@@ -12,21 +12,24 @@ import (
 
 	"github.com/nocktechnologies/nockguard/internal/jsonrpc"
 	"github.com/nocktechnologies/nockguard/internal/policy"
+	"github.com/nocktechnologies/nockguard/internal/validate"
 )
 
 type StdioProxy struct {
-	upstream []string
-	agent    string
-	engine   *policy.Engine
-	logger   *log.Logger
+	upstream  []string
+	agent     string
+	engine    *policy.Engine
+	validator *validate.Validator
+	logger    *log.Logger
 }
 
-func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, logger *log.Logger) *StdioProxy {
+func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, validator *validate.Validator, logger *log.Logger) *StdioProxy {
 	return &StdioProxy{
-		upstream: upstream,
-		agent:    agent,
-		engine:   engine,
-		logger:   logger,
+		upstream:  upstream,
+		agent:     agent,
+		engine:    engine,
+		validator: validator,
+		logger:    logger,
 	}
 }
 
@@ -104,6 +107,18 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 					return writeErr
 				}
 				continue
+			}
+
+			// Phase 2: input validation on the tool-call arguments.
+			if p.validator.Enabled() {
+				if hit := p.validator.CheckParams(msg.Params); hit != "" {
+					p.logger.Printf("BLOCK agent=%s tool=%s rule=%s", p.agent, toolName, hit)
+					errResp := jsonrpc.ErrorResponse(msg.ID, -32600, fmt.Sprintf("nockguard: tool %q arguments blocked by input validation (%s)", toolName, hit))
+					if _, writeErr := fmt.Fprintf(os.Stdout, "%s\n", errResp); writeErr != nil {
+						return writeErr
+					}
+					continue
+				}
 			}
 			p.logger.Printf("ALLOW agent=%s tool=%s", p.agent, toolName)
 		}
