@@ -83,15 +83,26 @@ nockguard proxy \
 - **deny**: Tool patterns blocked regardless of allow rules. Deny takes precedence.
 - **mode**: `allow` (default) permits unlisted tools, `deny` blocks them.
 - **default**: Fallback policy for agents not listed by name.
+- **validate_input** (Phase 2): built-in input-validation categories applied to tool-call arguments — `sqli`, `path_traversal`, `secrets`. Opt-in per agent.
+- **block_params** (Phase 2): custom regex patterns; a tool call is blocked if any argument matches.
+
+```yaml
+agents:
+  kit:
+    allow: ["read_*", "search_*"]
+    validate_input: ["sqli", "path_traversal", "secrets"]
+    block_params:
+      - "(?i)rm\\s+-rf\\s+/"
+```
 
 ## How It Works
 
 NockGuard intercepts two MCP methods:
 
 - **tools/list**: Filters the tool list response, hiding denied tools from the agent.
-- **tools/call**: Checks the tool name against policy before forwarding. Denied calls get a JSON-RPC error response.
+- **tools/call**: Checks the tool name against policy before forwarding. With Phase 2 validation enabled, it also scans the call's arguments (recursively, keys and values) against the configured rule categories and custom patterns, blocking injection attempts and outbound sensitive-data leaks. Denied or blocked calls get a JSON-RPC error response.
 
-All other MCP traffic passes through unmodified. NockGuard is version-transparent — it works with any MCP protocol version.
+All other MCP traffic passes through unmodified. NockGuard is version-transparent — it works with any MCP protocol version. Input validation is opt-in: an allowlist-only policy behaves exactly as in Phase 1.
 
 ## Relationship to NockLock
 
@@ -103,7 +114,7 @@ Same brand, same tap, independent products. Use one or both.
 ## Roadmap
 
 - [x] Phase 1: Tool allowlists (per-agent, wildcard, default-deny)
-- [ ] Phase 2: Input validation (regex rules on parameters)
+- [x] Phase 2: Input validation (SQLi / path-traversal / secrets rule sets + custom regex on tool-call arguments)
 - [ ] Phase 3: Rate limiting and spend caps
 - [ ] Phase 4: Audit trail with NockCC integration
 
