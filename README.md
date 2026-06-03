@@ -85,6 +85,8 @@ nockguard proxy \
 - **default**: Fallback policy for agents not listed by name.
 - **validate_input** (Phase 2): built-in input-validation categories applied to tool-call arguments — `sqli`, `path_traversal`, `secrets`. Opt-in per agent.
 - **block_params** (Phase 2): custom regex patterns; a tool call is blocked if any argument matches.
+- **rate_limit** (Phase 3): at most `max_calls` tool calls within a sliding `window` (a Go duration — `30s`, `1m`, `1h`). The allowance refills as the window slides — this bounds bursts and runaway tool-call loops without blocking normal traffic.
+- **spend_cap** (Phase 3): a hard cumulative ceiling of `max_calls` tool calls for the whole proxy session. It never refills — once hit, every further call is blocked. This is the kill-before-runaway stop that bounds total cost for an agent left running unattended.
 
 ```yaml
 agents:
@@ -93,14 +95,21 @@ agents:
     validate_input: ["sqli", "path_traversal", "secrets"]
     block_params:
       - "(?i)rm\\s+-rf\\s+/"
+    rate_limit:
+      max_calls: 60
+      window: 1m
+    spend_cap:
+      max_calls: 5000
 ```
+
+Rate limiting and spend caps are opt-in and independent — set one, both, or neither. NockGuard sits at the MCP layer and sees tool *calls*, not upstream API token spend, so the spend cap is denominated in tool calls (a proxy for cost), enforced before the call reaches the server. When a call clears the allowlist and input validation but exceeds a limit, the agent receives a JSON-RPC error (`rate limit exceeded` / `spend cap exceeded`); denied or input-blocked calls never consume budget.
 
 ## How It Works
 
 NockGuard intercepts two MCP methods:
 
 - **tools/list**: Filters the tool list response, hiding denied tools from the agent.
-- **tools/call**: Checks the tool name against policy before forwarding. With Phase 2 validation enabled, it also scans the call's arguments (recursively, keys and values) against the configured rule categories and custom patterns, blocking injection attempts and outbound sensitive-data leaks. Denied or blocked calls get a JSON-RPC error response.
+- **tools/call**: Checks the tool name against policy before forwarding. With Phase 2 validation enabled, it also scans the call's arguments (recursively, keys and values) against the configured rule categories and custom patterns, blocking injection attempts and outbound sensitive-data leaks. With Phase 3 limits enabled, a call that clears policy and validation is then metered against the agent's rate limit and spend cap. Denied, blocked, or over-limit calls get a JSON-RPC error response.
 
 All other MCP traffic passes through unmodified. NockGuard is version-transparent — it works with any MCP protocol version. Input validation is opt-in: an allowlist-only policy behaves exactly as in Phase 1.
 
@@ -115,7 +124,7 @@ Same brand, same tap, independent products. Use one or both.
 
 - [x] Phase 1: Tool allowlists (per-agent, wildcard, default-deny)
 - [x] Phase 2: Input validation (SQLi / path-traversal / secrets rule sets + custom regex on tool-call arguments)
-- [ ] Phase 3: Rate limiting and spend caps
+- [x] Phase 3: Rate limiting and spend caps (per-agent sliding-window rate limit + hard cumulative session cap)
 - [ ] Phase 4: Audit trail with NockCC integration
 
 ## License

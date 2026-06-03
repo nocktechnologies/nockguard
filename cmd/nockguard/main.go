@@ -79,10 +79,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	limiter, err := engine.LimiterFor(agent)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error building rate limiter for agent %s: %v\n", agent, err)
+		os.Exit(1)
+	}
+
 	logger := log.New(os.Stderr, "[nockguard] ", log.LstdFlags)
 	upstream := parseCommand(upstreamCmd)
 
-	p := proxy.NewStdioProxy(upstream, agent, engine, validator, logger)
+	p := proxy.NewStdioProxy(upstream, agent, engine, validator, limiter, logger)
 	if err := p.Run(); err != nil {
 		logger.Fatalf("proxy error: %v", err)
 	}
