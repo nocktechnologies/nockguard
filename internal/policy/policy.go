@@ -1,10 +1,13 @@
 package policy
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/nocktechnologies/nockguard/internal/ratelimit"
 	"github.com/nocktechnologies/nockguard/internal/validate"
 	"gopkg.in/yaml.v3"
 )
@@ -22,6 +25,24 @@ type AgentPolicy struct {
 	// custom regexes. Empty = no validation (Phase 1 behavior preserved).
 	ValidateInput []string `yaml:"validate_input"`
 	BlockParams   []string `yaml:"block_params"`
+	// Phase 3 rate limiting + spend caps (opt-in). Both nil = no limiting
+	// (Phase 1/2 behavior preserved).
+	RateLimit *RateLimitPolicy `yaml:"rate_limit"`
+	SpendCap  *SpendCapPolicy  `yaml:"spend_cap"`
+}
+
+// RateLimitPolicy bounds tool-call rate: at most MaxCalls within Window (a Go
+// duration string, e.g. "1m", "30s", "1h"). The allowance refills as the window
+// slides.
+type RateLimitPolicy struct {
+	MaxCalls int    `yaml:"max_calls"`
+	Window   string `yaml:"window"`
+}
+
+// SpendCapPolicy is a hard cumulative ceiling on tool calls for the whole proxy
+// session. It never refills.
+type SpendCapPolicy struct {
+	MaxCalls int `yaml:"max_calls"`
 }
 
 type Engine struct {
@@ -82,6 +103,38 @@ func (e *Engine) ValidatorFor(agent string) (*validate.Validator, error) {
 		return nil, nil
 	}
 	return validate.New(pol.ValidateInput, pol.BlockParams)
+}
+
+// LimiterFor builds the Phase 3 rate/spend limiter for an agent (falling back
+// to the "default" policy). Returns a nil limiter when neither control is
+// configured — callers guard with limiter.Enabled() (nil-safe), exactly like
+// ValidatorFor. A rate_limit with a missing or unparseable window is a
+// misconfiguration and returns an error so it fails loud at startup.
+func (e *Engine) LimiterFor(agent string) (*ratelimit.Limiter, error) {
+	pol, ok := e.config.Agents[agent]
+	if !ok {
+		pol = e.config.Agents["default"]
+	}
+	if pol.RateLimit == nil && pol.SpendCap == nil {
+		return nil, nil
+	}
+
+	var cfg ratelimit.Config
+	if pol.RateLimit != nil {
+		if pol.RateLimit.Window == "" {
+			return nil, fmt.Errorf("rate_limit for agent %q requires a window (e.g. \"1m\")", agent)
+		}
+		window, err := time.ParseDuration(pol.RateLimit.Window)
+		if err != nil {
+			return nil, fmt.Errorf("rate_limit window %q for agent %q: %w", pol.RateLimit.Window, agent, err)
+		}
+		cfg.MaxCalls = pol.RateLimit.MaxCalls
+		cfg.Window = window
+	}
+	if pol.SpendCap != nil {
+		cfg.SpendCap = pol.SpendCap.MaxCalls
+	}
+	return ratelimit.New(cfg), nil
 }
 
 func (e *Engine) FilterTools(agent string, tools []string) []string {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/nocktechnologies/nockguard/internal/jsonrpc"
 	"github.com/nocktechnologies/nockguard/internal/policy"
+	"github.com/nocktechnologies/nockguard/internal/ratelimit"
 	"github.com/nocktechnologies/nockguard/internal/validate"
 )
 
@@ -20,15 +21,17 @@ type StdioProxy struct {
 	agent     string
 	engine    *policy.Engine
 	validator *validate.Validator
+	limiter   *ratelimit.Limiter
 	logger    *log.Logger
 }
 
-func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, validator *validate.Validator, logger *log.Logger) *StdioProxy {
+func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, validator *validate.Validator, limiter *ratelimit.Limiter, logger *log.Logger) *StdioProxy {
 	return &StdioProxy{
 		upstream:  upstream,
 		agent:     agent,
 		engine:    engine,
 		validator: validator,
+		limiter:   limiter,
 		logger:    logger,
 	}
 }
@@ -120,6 +123,20 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 					continue
 				}
 			}
+
+			// Phase 3: rate limiting + spend caps. Checked only for calls that
+			// have cleared policy and validation (i.e. would reach upstream), so
+			// denied/blocked calls never consume budget.
+			if p.limiter.Enabled() {
+				if reason, ok := p.limiter.Allow(); !ok {
+					p.logger.Printf("RATELIMIT agent=%s tool=%s reason=%s", p.agent, toolName, reason)
+					errResp := jsonrpc.ErrorResponse(msg.ID, -32600, fmt.Sprintf("nockguard: tool %q blocked: %s exceeded", toolName, limitLabel(reason)))
+					if _, writeErr := fmt.Fprintf(os.Stdout, "%s\n", errResp); writeErr != nil {
+						return writeErr
+					}
+					continue
+				}
+			}
 			p.logger.Printf("ALLOW agent=%s tool=%s", p.agent, toolName)
 		}
 
@@ -198,6 +215,19 @@ func (p *StdioProxy) filterToolListResponse(line []byte) []byte {
 		return nil
 	}
 	return out
+}
+
+// limitLabel turns a limiter reason code into a human-readable phrase for the
+// JSON-RPC error returned to the agent.
+func limitLabel(reason string) string {
+	switch reason {
+	case "spend-cap":
+		return "spend cap"
+	case "rate":
+		return "rate limit"
+	default:
+		return reason
+	}
 }
 
 func extractToolName(params json.RawMessage) string {
