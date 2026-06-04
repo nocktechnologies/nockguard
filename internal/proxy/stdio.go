@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"sync"
 
+	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/jsonrpc"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 	"github.com/nocktechnologies/nockguard/internal/ratelimit"
@@ -22,17 +23,30 @@ type StdioProxy struct {
 	engine    *policy.Engine
 	validator *validate.Validator
 	limiter   *ratelimit.Limiter
+	auditor   *audit.Auditor
 	logger    *log.Logger
 }
 
-func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, validator *validate.Validator, limiter *ratelimit.Limiter, logger *log.Logger) *StdioProxy {
+func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, validator *validate.Validator, limiter *ratelimit.Limiter, auditor *audit.Auditor, logger *log.Logger) *StdioProxy {
 	return &StdioProxy{
 		upstream:  upstream,
 		agent:     agent,
 		engine:    engine,
 		validator: validator,
 		limiter:   limiter,
+		auditor:   auditor,
 		logger:    logger,
+	}
+}
+
+// audit records a policy decision to the trail when auditing is enabled. A
+// write error is logged but never blocks or fails the tool call (fail-open).
+func (p *StdioProxy) audit(tool, decision, reason string) {
+	if !p.auditor.Enabled() {
+		return
+	}
+	if err := p.auditor.Record(audit.Event{Agent: p.agent, Tool: tool, Decision: decision, Reason: reason}); err != nil {
+		p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, tool, err)
 	}
 }
 
@@ -105,6 +119,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			toolName := extractToolName(msg.Params)
 			if toolName != "" && !p.engine.Check(p.agent, toolName) {
 				p.logger.Printf("DENY agent=%s tool=%s", p.agent, toolName)
+				p.audit(toolName, "deny", "policy")
 				errResp := jsonrpc.ErrorResponse(msg.ID, -32600, fmt.Sprintf("nockguard: tool %q denied by policy", toolName))
 				if _, writeErr := fmt.Fprintf(os.Stdout, "%s\n", errResp); writeErr != nil {
 					return writeErr
@@ -116,6 +131,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			if p.validator.Enabled() {
 				if hit := p.validator.CheckParams(msg.Params); hit != "" {
 					p.logger.Printf("BLOCK agent=%s tool=%s rule=%s", p.agent, toolName, hit)
+					p.audit(toolName, "block", hit)
 					errResp := jsonrpc.ErrorResponse(msg.ID, -32600, fmt.Sprintf("nockguard: tool %q arguments blocked by input validation (%s)", toolName, hit))
 					if _, writeErr := fmt.Fprintf(os.Stdout, "%s\n", errResp); writeErr != nil {
 						return writeErr
@@ -130,6 +146,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			if p.limiter.Enabled() {
 				if reason, ok := p.limiter.Allow(); !ok {
 					p.logger.Printf("RATELIMIT agent=%s tool=%s reason=%s", p.agent, toolName, reason)
+					p.audit(toolName, "ratelimit", reason)
 					errResp := jsonrpc.ErrorResponse(msg.ID, -32600, fmt.Sprintf("nockguard: tool %q blocked: %s exceeded", toolName, limitLabel(reason)))
 					if _, writeErr := fmt.Fprintf(os.Stdout, "%s\n", errResp); writeErr != nil {
 						return writeErr
@@ -138,6 +155,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				}
 			}
 			p.logger.Printf("ALLOW agent=%s tool=%s", p.agent, toolName)
+			p.audit(toolName, "allow", "")
 		}
 
 		if msg.IsRequest() && msg.Method == "tools/list" {
@@ -206,6 +224,7 @@ func (p *StdioProxy) filterToolListResponse(line []byte) []byte {
 			filtered = append(filtered, t)
 		} else {
 			p.logger.Printf("HIDE agent=%s tool=%s", p.agent, t.Name)
+			p.audit(t.Name, "hide", "")
 		}
 	}
 
