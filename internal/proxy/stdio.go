@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
+	"github.com/nocktechnologies/nockguard/internal/forward"
 	"github.com/nocktechnologies/nockguard/internal/jsonrpc"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 	"github.com/nocktechnologies/nockguard/internal/ratelimit"
@@ -24,10 +25,11 @@ type StdioProxy struct {
 	validator *validate.Validator
 	limiter   *ratelimit.Limiter
 	auditor   *audit.Auditor
+	forwarder *forward.Forwarder
 	logger    *log.Logger
 }
 
-func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, validator *validate.Validator, limiter *ratelimit.Limiter, auditor *audit.Auditor, logger *log.Logger) *StdioProxy {
+func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, validator *validate.Validator, limiter *ratelimit.Limiter, auditor *audit.Auditor, forwarder *forward.Forwarder, logger *log.Logger) *StdioProxy {
 	return &StdioProxy{
 		upstream:  upstream,
 		agent:     agent,
@@ -35,18 +37,35 @@ func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, valid
 		validator: validator,
 		limiter:   limiter,
 		auditor:   auditor,
+		forwarder: forwarder,
 		logger:    logger,
 	}
 }
 
-// audit records a policy decision to the trail when auditing is enabled. A
-// write error is logged but never blocks or fails the tool call (fail-open).
+// audit records a policy decision to the local trail and, for enforcement
+// decisions, forwards it to the NockCC ops-log. Both sinks are independent and
+// fail-open: a write or forward problem is logged but never blocks or fails the
+// tool call.
 func (p *StdioProxy) audit(tool, decision, reason string) {
-	if !p.auditor.Enabled() {
-		return
+	if p.auditor.Enabled() {
+		if err := p.auditor.Record(audit.Event{Agent: p.agent, Tool: tool, Decision: decision, Reason: reason}); err != nil {
+			p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, tool, err)
+		}
 	}
-	if err := p.auditor.Record(audit.Event{Agent: p.agent, Tool: tool, Decision: decision, Reason: reason}); err != nil {
-		p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, tool, err)
+	if p.forwarder.Enabled() && isEnforcement(decision) {
+		p.forwarder.Enqueue(forward.Event{Agent: p.agent, Tool: tool, Decision: decision, Reason: reason})
+	}
+}
+
+// isEnforcement reports whether a decision is a policy action worth surfacing in
+// the NockCC ops-log. Allowed calls and tool-list hides are excluded to keep the
+// centralized feed to genuine enforcement signal.
+func isEnforcement(decision string) bool {
+	switch decision {
+	case "deny", "block", "ratelimit":
+		return true
+	default:
+		return false
 	}
 }
 

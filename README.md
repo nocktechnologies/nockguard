@@ -128,7 +128,22 @@ Each decision is one JSON object per line (JSON Lines):
 
 **By design, NockGuard does not write raw tool-call parameters to the audit trail.** Logging arguments would persist exactly the secrets and injection payloads that Phase 2 exists to keep out, so the trail records the *decision* (agent, tool, outcome, reason), not the payload.
 
-Forwarding the trail to the NockCC ops-log for centralized fleet monitoring and optional HMAC signing of entries are the next increments.
+### Forwarding to the NockCC ops-log
+
+NockGuard can stream **enforcement decisions** (`deny`, `block`, `ratelimit`) to the [NockCC](https://cc.nocktechnologies.io) ops-log, so what the firewall blocks across the fleet shows up in one Command Center feed. Allowed calls and tool-list hides are not forwarded — the centralized feed stays high-signal, while the local JSONL keeps the complete record.
+
+```yaml
+audit:
+  enabled: true
+  forward:
+    enabled: true
+    url: https://cc.nocktechnologies.io
+    api_key_env: NOCKCC_API_KEY   # the key is read from this env var, never stored in the policy file
+```
+
+Forwarding is **asynchronous and fail-open**: events post on a background worker, `Enqueue` never blocks (it drops if the buffer saturates), and any HTTP/transport error is swallowed — a slow or unreachable NockCC can never stall or fail a tool call. Severity maps as `block → high` (an injection / secret-exfil attempt) and `deny` / `ratelimit → warn`. Misconfiguration (forwarding enabled with no `url`, or an `api_key_env` that doesn't resolve) fails loud at startup rather than silently dropping every event.
+
+Optional HMAC signing of audit entries (tamper-evidence) is the remaining Phase 4 increment.
 
 ## How It Works
 
@@ -151,7 +166,7 @@ Same brand, same tap, independent products. Use one or both.
 - [x] Phase 1: Tool allowlists (per-agent, wildcard, default-deny)
 - [x] Phase 2: Input validation (SQLi / path-traversal / secrets rule sets + custom regex on tool-call arguments)
 - [x] Phase 3: Rate limiting and spend caps (per-agent sliding-window rate limit + hard cumulative session cap)
-- [~] Phase 4: Audit trail — structured JSONL trail of every decision shipped; NockCC ops-log forwarding + optional HMAC signing next
+- [~] Phase 4: Audit trail — structured JSONL trail + NockCC ops-log forwarding of enforcement decisions shipped; optional HMAC signing next
 
 ## License
 

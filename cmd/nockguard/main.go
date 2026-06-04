@@ -92,10 +92,18 @@ func main() {
 	}
 	defer auditor.Close()
 
+	forwarder, err := engine.Forwarder()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error configuring ops-log forwarder: %v\n", err)
+		os.Exit(1)
+	}
+	forwarder.Start()
+	defer forwarder.Stop()
+
 	logger := log.New(os.Stderr, "[nockguard] ", log.LstdFlags)
 	upstream := parseCommand(upstreamCmd)
 
-	p := proxy.NewStdioProxy(upstream, agent, engine, validator, limiter, auditor, logger)
+	p := proxy.NewStdioProxy(upstream, agent, engine, validator, limiter, auditor, forwarder, logger)
 	if err := p.Run(); err != nil {
 		logger.Fatalf("proxy error: %v", err)
 	}
