@@ -104,6 +104,32 @@ agents:
 
 Rate limiting and spend caps are opt-in and independent — set one, both, or neither. NockGuard sits at the MCP layer and sees tool *calls*, not upstream API token spend, so the spend cap is denominated in tool calls (a proxy for cost), enforced before the call reaches the server. When a call clears the allowlist and input validation but exceeds a limit, the agent receives a JSON-RPC error (`rate limit exceeded` / `spend cap exceeded`); denied or input-blocked calls never consume budget.
 
+## Audit Trail (Phase 4)
+
+NockGuard can write a structured, append-only record of every policy decision — turning the firewall from a gate into an accountable trail of what each agent attempted and what the policy did about it. Enable it with a top-level `audit` block:
+
+```yaml
+audit:
+  enabled: true
+  path: ~/.nockguard/logs/audit.jsonl   # optional; this is the default
+agents:
+  kit:
+    allow: ["nockcc_nock_*"]
+```
+
+Each decision is one JSON object per line (JSON Lines):
+
+```json
+{"ts":"2026-06-03T18:30:00Z","agent":"kit","tool":"nockcc_kill_switch_set","decision":"deny","reason":"policy"}
+{"ts":"2026-06-03T18:30:01Z","agent":"kit","tool":"nockcc_nock_list","decision":"allow"}
+```
+
+`decision` is one of `allow`, `deny`, `block` (input validation), `ratelimit`, or `hide` (filtered from `tools/list`). Auditing is opt-in (absent or `enabled: false` keeps Phase 1–3 behavior) and fail-open — an audit write error is logged but never blocks or fails a tool call.
+
+**By design, NockGuard does not write raw tool-call parameters to the audit trail.** Logging arguments would persist exactly the secrets and injection payloads that Phase 2 exists to keep out, so the trail records the *decision* (agent, tool, outcome, reason), not the payload.
+
+Forwarding the trail to the NockCC ops-log for centralized fleet monitoring and optional HMAC signing of entries are the next increments.
+
 ## How It Works
 
 NockGuard intercepts two MCP methods:
@@ -125,7 +151,7 @@ Same brand, same tap, independent products. Use one or both.
 - [x] Phase 1: Tool allowlists (per-agent, wildcard, default-deny)
 - [x] Phase 2: Input validation (SQLi / path-traversal / secrets rule sets + custom regex on tool-call arguments)
 - [x] Phase 3: Rate limiting and spend caps (per-agent sliding-window rate limit + hard cumulative session cap)
-- [ ] Phase 4: Audit trail with NockCC integration
+- [~] Phase 4: Audit trail — structured JSONL trail of every decision shipped; NockCC ops-log forwarding + optional HMAC signing next
 
 ## License
 

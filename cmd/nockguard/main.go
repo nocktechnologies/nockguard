@@ -85,10 +85,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	auditor, err := engine.Auditor()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error opening audit trail: %v\n", err)
+		os.Exit(1)
+	}
+	defer auditor.Close()
+
 	logger := log.New(os.Stderr, "[nockguard] ", log.LstdFlags)
 	upstream := parseCommand(upstreamCmd)
 
-	p := proxy.NewStdioProxy(upstream, agent, engine, validator, limiter, logger)
+	p := proxy.NewStdioProxy(upstream, agent, engine, validator, limiter, auditor, logger)
 	if err := p.Run(); err != nil {
 		logger.Fatalf("proxy error: %v", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/ratelimit"
 	"github.com/nocktechnologies/nockguard/internal/validate"
 	"gopkg.in/yaml.v3"
@@ -14,7 +15,21 @@ import (
 
 type Config struct {
 	Agents map[string]AgentPolicy `yaml:"agents"`
+	// Phase 4 audit trail (opt-in, proxy-wide). Absent or enabled=false = no
+	// audit file (Phase 1/2/3 behavior preserved).
+	Audit *AuditPolicy `yaml:"audit"`
 }
+
+// AuditPolicy configures the structured JSONL audit trail. Path defaults to
+// ~/.nockguard/logs/audit.jsonl when omitted.
+type AuditPolicy struct {
+	Enabled bool   `yaml:"enabled"`
+	Path    string `yaml:"path"`
+}
+
+// DefaultAuditPath is where the audit trail is written when audit is enabled
+// without an explicit path.
+const DefaultAuditPath = ".nockguard/logs/audit.jsonl"
 
 type AgentPolicy struct {
 	Allow []string `yaml:"allow"`
@@ -135,6 +150,24 @@ func (e *Engine) LimiterFor(agent string) (*ratelimit.Limiter, error) {
 		cfg.SpendCap = pol.SpendCap.MaxCalls
 	}
 	return ratelimit.New(cfg), nil
+}
+
+// Auditor builds the Phase 4 audit trail sink from config. Returns a disabled
+// (nil-safe) Auditor when audit is absent or disabled. An enabled audit block
+// with no path falls back to ~/.nockguard/logs/audit.jsonl.
+func (e *Engine) Auditor() (*audit.Auditor, error) {
+	if e.config.Audit == nil || !e.config.Audit.Enabled {
+		return audit.New("")
+	}
+	path := e.config.Audit.Path
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		path = filepath.Join(home, DefaultAuditPath)
+	}
+	return audit.New(path)
 }
 
 func (e *Engine) FilterTools(agent string, tools []string) []string {
