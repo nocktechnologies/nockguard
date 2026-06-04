@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
+	"github.com/nocktechnologies/nockguard/internal/forward"
 	"github.com/nocktechnologies/nockguard/internal/ratelimit"
 	"github.com/nocktechnologies/nockguard/internal/validate"
 	"gopkg.in/yaml.v3"
@@ -25,6 +26,17 @@ type Config struct {
 type AuditPolicy struct {
 	Enabled bool   `yaml:"enabled"`
 	Path    string `yaml:"path"`
+	// Forward optionally streams enforcement decisions to the NockCC ops-log.
+	Forward *ForwardPolicy `yaml:"forward"`
+}
+
+// ForwardPolicy configures forwarding of enforcement decisions (deny / block /
+// ratelimit) to the NockCC ops-log. The API key is read from the named
+// environment variable rather than stored in the policy file.
+type ForwardPolicy struct {
+	Enabled   bool   `yaml:"enabled"`
+	URL       string `yaml:"url"`
+	APIKeyEnv string `yaml:"api_key_env"`
 }
 
 // DefaultAuditPath is where the audit trail is written when audit is enabled
@@ -168,6 +180,29 @@ func (e *Engine) Auditor() (*audit.Auditor, error) {
 		path = filepath.Join(home, DefaultAuditPath)
 	}
 	return audit.New(path)
+}
+
+// Forwarder builds the NockCC ops-log forwarder from config. Returns a disabled
+// (nil-safe) forwarder when forwarding is absent or disabled. An enabled forward
+// block must specify a url and, if api_key_env is given, that variable must
+// resolve — both are checked loud at startup so misconfiguration fails fast
+// rather than silently dropping every forward.
+func (e *Engine) Forwarder() (*forward.Forwarder, error) {
+	if e.config.Audit == nil || e.config.Audit.Forward == nil || !e.config.Audit.Forward.Enabled {
+		return forward.New(forward.Config{}), nil
+	}
+	fc := e.config.Audit.Forward
+	if fc.URL == "" {
+		return nil, fmt.Errorf("audit.forward.enabled requires a url")
+	}
+	apiKey := ""
+	if fc.APIKeyEnv != "" {
+		apiKey = os.Getenv(fc.APIKeyEnv)
+		if apiKey == "" {
+			return nil, fmt.Errorf("audit.forward.api_key_env %q is not set in the environment", fc.APIKeyEnv)
+		}
+	}
+	return forward.New(forward.Config{BaseURL: fc.URL, APIKey: apiKey}), nil
 }
 
 func (e *Engine) FilterTools(agent string, tools []string) []string {
