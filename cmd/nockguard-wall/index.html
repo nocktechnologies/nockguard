@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NockGuard · Live Wall</title>
+<style>
+  :root {
+    --bg:#0a0c10; --panel:#11151c; --line:#1e2530; --text:#e6edf3; --dim:#8b949e;
+    --allow:#3fb950; --deny:#f0883e; --block:#ff4d4d; --ratelimit:#d29922; --hide:#6e7681;
+    --accent:#58a6ff;
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; }
+  body {
+    background:radial-gradient(1200px 600px at 50% -10%, #11161f 0%, var(--bg) 60%);
+    color:var(--text); font:14px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    display:flex; flex-direction:column; height:100vh; overflow:hidden;
+  }
+  header {
+    padding:18px 22px 14px; border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:18px; flex-wrap:wrap;
+  }
+  .brand { display:flex; align-items:baseline; gap:10px; }
+  .brand h1 { margin:0; font-size:18px; letter-spacing:.5px; }
+  .brand .sub { color:var(--dim); font-size:12px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--allow);
+         box-shadow:0 0 10px var(--allow); animation:pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+  .stats { margin-left:auto; display:flex; gap:10px; flex-wrap:wrap; }
+  .pill { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+          padding:6px 12px; min-width:74px; text-align:center; }
+  .pill .n { font-size:20px; font-weight:600; display:block; line-height:1.1; }
+  .pill .l { font-size:10px; letter-spacing:1px; color:var(--dim); text-transform:uppercase; }
+  .pill.allowed .n{color:var(--allow)} .pill.blocked .n{color:var(--block)}
+  .pill.limited .n{color:var(--ratelimit)} .pill.denied .n{color:var(--deny)}
+
+  #feed { flex:1; overflow:hidden; padding:10px 14px; display:flex; flex-direction:column; gap:6px; }
+  .row {
+    display:grid; grid-template-columns:80px 120px 1fr auto; align-items:center; gap:14px;
+    background:var(--panel); border:1px solid var(--line); border-left:4px solid var(--hide);
+    border-radius:8px; padding:9px 14px; animation:slidein .28s ease-out;
+  }
+  @keyframes slidein { from{opacity:0; transform:translateY(-8px)} to{opacity:1; transform:none} }
+  .row .ts { color:var(--dim); font-size:12px; }
+  .row .agent { color:var(--accent); font-weight:600; }
+  .row .tool { color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row .reason { color:var(--dim); font-size:12px; grid-column:3; margin-top:2px; }
+  .row .badge { font-size:11px; font-weight:700; letter-spacing:1px; text-transform:uppercase;
+                padding:3px 9px; border-radius:5px; }
+  .allow      { border-left-color:var(--allow); }
+  .allow      .badge{ background:rgba(63,185,80,.15); color:var(--allow); }
+  .deny       { border-left-color:var(--deny); }  .deny .badge{ background:rgba(240,136,62,.15); color:var(--deny); }
+  .ratelimit  { border-left-color:var(--ratelimit); } .ratelimit .badge{ background:rgba(210,153,34,.15); color:var(--ratelimit); }
+  .hide       { border-left-color:var(--hide); } .hide .badge{ background:rgba(110,118,129,.18); color:var(--dim); }
+  .block {
+    border-left-color:var(--block); border-color:rgba(255,77,77,.4);
+    background:linear-gradient(90deg, rgba(255,77,77,.10), var(--panel) 60%);
+    animation:slidein .28s ease-out, flashred .9s ease-out;
+  }
+  .block .badge{ background:rgba(255,77,77,.18); color:var(--block); }
+  @keyframes flashred { 0%{box-shadow:0 0 0 0 rgba(255,77,77,.55)} 100%{box-shadow:0 0 22px 2px rgba(255,77,77,0)} }
+  .empty { color:var(--dim); text-align:center; margin:auto; }
+  footer { padding:8px 22px; border-top:1px solid var(--line); color:var(--dim); font-size:11px;
+           display:flex; justify-content:space-between; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="dot" id="live"></span>
+      <h1>NockGuard <span style="color:var(--dim)">·</span> Live Wall</h1>
+      <span class="sub">every tool call your agents attempt — and what the firewall did</span>
+    </div>
+    <div class="stats">
+      <div class="pill"><span class="n" id="c-total">0</span><span class="l">total</span></div>
+      <div class="pill allowed"><span class="n" id="c-allow">0</span><span class="l">allowed</span></div>
+      <div class="pill blocked"><span class="n" id="c-block">0</span><span class="l">blocked</span></div>
+      <div class="pill limited"><span class="n" id="c-rate">0</span><span class="l">limited</span></div>
+      <div class="pill denied"><span class="n" id="c-deny">0</span><span class="l">denied/hidden</span></div>
+    </div>
+  </header>
+  <div id="feed"><div class="empty" id="empty">waiting for the first decision…</div></div>
+  <footer>
+    <span id="conn">connecting…</span>
+    <span>NockGuard — Align · Decide · Deploy</span>
+  </footer>
+
+<script>
+  const feed = document.getElementById('feed');
+  const empty = document.getElementById('empty');
+  const counts = { total:0, allow:0, block:0, rate:0, deny:0 };
+  const el = { total:'c-total', allow:'c-allow', block:'c-block', rate:'c-rate', deny:'c-deny' };
+  const MAX_ROWS = 200;
+
+  function bump(decision) {
+    counts.total++;
+    if (decision === 'allow') counts.allow++;
+    else if (decision === 'block') counts.block++;
+    else if (decision === 'ratelimit') counts.rate++;
+    else counts.deny++; // deny + hide
+    document.getElementById(el.total).textContent = counts.total;
+    document.getElementById(el.allow).textContent = counts.allow;
+    document.getElementById(el.block).textContent = counts.block;
+    document.getElementById(el.rate).textContent = counts.rate;
+    document.getElementById(el.deny).textContent = counts.deny;
+  }
+
+  function hhmmss(ts) {
+    const d = new Date(ts);
+    return isNaN(d) ? (ts || '') : d.toLocaleTimeString([], {hour12:false});
+  }
+
+  // Decisions come from an audit trail of UNTRUSTED agents, so every value is
+  // escaped before display, and the decision (used as a CSS class) is whitelisted
+  // to the known NockGuard outcomes — an adversarial string can never inject
+  // markup or stray class tokens.
+  const KNOWN = { allow:1, deny:1, block:1, ratelimit:1, hide:1 };
+
+  function render(ev) {
+    if (empty) empty.remove();
+    const dec = KNOWN[ev.decision] ? ev.decision : 'hide';
+    const row = document.createElement('div');
+    row.className = 'row ' + dec;
+    row.innerHTML =
+      '<span class="ts">' + esc(hhmmss(ev.ts)) + '</span>' +
+      '<span class="agent">' + esc(ev.agent || '—') + '</span>' +
+      '<span class="tool">' + esc(ev.tool || '') +
+        (ev.reason ? '<div class="reason">' + esc(ev.reason) + '</div>' : '') + '</span>' +
+      '<span class="badge">' + esc(ev.decision || '?') + '</span>';
+    feed.prepend(row);
+    while (feed.childElementCount > MAX_ROWS) feed.lastElementChild.remove();
+    bump(dec);
+  }
+
+  function esc(s){ const d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }
+
+  function connect() {
+    const es = new EventSource('/events');
+    const conn = document.getElementById('conn');
+    es.onopen = () => { conn.textContent = 'live'; };
+    es.onmessage = (m) => { try { render(JSON.parse(m.data)); } catch(e){} };
+    es.onerror = () => { conn.textContent = 'reconnecting…'; };
+  }
+  connect();
+</script>
+</body>
+</html>
