@@ -18,8 +18,8 @@
     display:flex; flex-direction:column; height:100vh; overflow:hidden;
   }
   header {
-    padding:18px 22px 14px; border-bottom:1px solid var(--line);
-    display:flex; align-items:center; gap:18px; flex-wrap:wrap;
+    padding:16px 22px 12px; border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:16px; flex-wrap:wrap;
   }
   .brand { display:flex; align-items:baseline; gap:10px; }
   .brand h1 { margin:0; font-size:18px; letter-spacing:.5px; }
@@ -27,15 +27,23 @@
   .dot { width:9px; height:9px; border-radius:50%; background:var(--allow);
          box-shadow:0 0 10px var(--allow); animation:pulse 2s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
-  .stats { margin-left:auto; display:flex; gap:10px; flex-wrap:wrap; }
+  .stats { margin-left:auto; display:flex; gap:9px; flex-wrap:wrap; align-items:center; }
   .pill { background:var(--panel); border:1px solid var(--line); border-radius:8px;
-          padding:6px 12px; min-width:74px; text-align:center; }
+          padding:6px 12px; min-width:70px; text-align:center; }
   .pill .n { font-size:20px; font-weight:600; display:block; line-height:1.1; }
   .pill .l { font-size:10px; letter-spacing:1px; color:var(--dim); text-transform:uppercase; }
   .pill.allowed .n{color:var(--allow)} .pill.blocked .n{color:var(--block)}
   .pill.limited .n{color:var(--ratelimit)} .pill.denied .n{color:var(--deny)}
+  .pill.caught .n{color:var(--block)}
+  .toggle { background:var(--panel); border:1px solid var(--line); color:var(--dim);
+            border-radius:8px; padding:8px 12px; font:inherit; font-size:12px; cursor:pointer;
+            letter-spacing:.5px; }
+  .toggle:hover { color:var(--text); border-color:#2b3442; }
+  .toggle.on { color:var(--block); border-color:rgba(255,77,77,.5); background:rgba(255,77,77,.08); }
+  .toggle.snd.on { color:var(--accent); border-color:rgba(88,166,255,.5); background:rgba(88,166,255,.08); }
 
   #feed { flex:1; overflow:hidden; padding:10px 14px; display:flex; flex-direction:column; gap:6px; }
+  body.threats #feed .row.allow { display:none; }
   .row {
     display:grid; grid-template-columns:80px 120px 1fr auto; align-items:center; gap:14px;
     background:var(--panel); border:1px solid var(--line); border-left:4px solid var(--hide);
@@ -63,9 +71,21 @@
   .empty { color:var(--dim); text-align:center; margin:auto; }
   footer { padding:8px 22px; border-top:1px solid var(--line); color:var(--dim); font-size:11px;
            display:flex; justify-content:space-between; }
+
+  /* full-screen red flash on a block */
+  #flash { position:fixed; inset:0; pointer-events:none; z-index:50;
+           background:radial-gradient(circle at 50% 40%, rgba(255,77,77,.0), rgba(255,77,77,.0));
+           box-shadow:inset 0 0 200px 40px rgba(255,77,77,0); opacity:0; }
+  #flash.hit { animation:vignette .55s ease-out; }
+  @keyframes vignette {
+    0% { opacity:0; box-shadow:inset 0 0 200px 40px rgba(255,77,77,0); }
+    18%{ opacity:1; box-shadow:inset 0 0 240px 70px rgba(255,77,77,.45); }
+    100%{ opacity:0; box-shadow:inset 0 0 200px 40px rgba(255,77,77,0); }
+  }
 </style>
 </head>
 <body>
+  <div id="flash"></div>
   <header>
     <div class="brand">
       <span class="dot" id="live"></span>
@@ -78,6 +98,9 @@
       <div class="pill blocked"><span class="n" id="c-block">0</span><span class="l">blocked</span></div>
       <div class="pill limited"><span class="n" id="c-rate">0</span><span class="l">limited</span></div>
       <div class="pill denied"><span class="n" id="c-deny">0</span><span class="l">denied/hidden</span></div>
+      <div class="pill caught"><span class="n" id="c-caught">0%</span><span class="l">caught</span></div>
+      <button class="toggle" id="t-threats" title="show only non-allowed">THREATS ONLY</button>
+      <button class="toggle snd" id="t-sound" title="beep when something is blocked">🔊 SOUND</button>
     </div>
   </header>
   <div id="feed"><div class="empty" id="empty">waiting for the first decision…</div></div>
@@ -88,10 +111,40 @@
 
 <script>
   const feed = document.getElementById('feed');
-  const empty = document.getElementById('empty');
+  const flash = document.getElementById('flash');
+  let empty = document.getElementById('empty');
   const counts = { total:0, allow:0, block:0, rate:0, deny:0 };
-  const el = { total:'c-total', allow:'c-allow', block:'c-block', rate:'c-rate', deny:'c-deny' };
   const MAX_ROWS = 200;
+  const KNOWN = { allow:1, deny:1, block:1, ratelimit:1, hide:1 };
+
+  // --- toggles ---
+  let soundOn = false;
+  const tThreats = document.getElementById('t-threats');
+  const tSound = document.getElementById('t-sound');
+  tThreats.addEventListener('click', () => {
+    document.body.classList.toggle('threats');
+    tThreats.classList.toggle('on', document.body.classList.contains('threats'));
+  });
+  let audioCtx = null;
+  tSound.addEventListener('click', () => {
+    soundOn = !soundOn;
+    tSound.classList.toggle('on', soundOn);
+    if (soundOn && !audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    if (soundOn && audioCtx) audioCtx.resume(); // unlock on the click gesture
+  });
+  function beep() {
+    if (!soundOn || !audioCtx) return;
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = 'square'; o.frequency.value = 220;
+    g.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.18, audioCtx.currentTime + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.22);
+    o.connect(g).connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + 0.23);
+  }
+  function hitFlash() {
+    flash.classList.remove('hit'); void flash.offsetWidth; flash.classList.add('hit');
+  }
 
   function bump(decision) {
     counts.total++;
@@ -99,26 +152,24 @@
     else if (decision === 'block') counts.block++;
     else if (decision === 'ratelimit') counts.rate++;
     else counts.deny++; // deny + hide
-    document.getElementById(el.total).textContent = counts.total;
-    document.getElementById(el.allow).textContent = counts.allow;
-    document.getElementById(el.block).textContent = counts.block;
-    document.getElementById(el.rate).textContent = counts.rate;
-    document.getElementById(el.deny).textContent = counts.deny;
+    const caught = counts.total - counts.allow;
+    const pct = counts.total ? Math.round(caught / counts.total * 100) : 0;
+    document.getElementById('c-total').textContent = counts.total;
+    document.getElementById('c-allow').textContent = counts.allow;
+    document.getElementById('c-block').textContent = counts.block;
+    document.getElementById('c-rate').textContent = counts.rate;
+    document.getElementById('c-deny').textContent = counts.deny;
+    document.getElementById('c-caught').textContent = pct + '%';
   }
 
   function hhmmss(ts) {
     const d = new Date(ts);
     return isNaN(d) ? (ts || '') : d.toLocaleTimeString([], {hour12:false});
   }
-
-  // Decisions come from an audit trail of UNTRUSTED agents, so every value is
-  // escaped before display, and the decision (used as a CSS class) is whitelisted
-  // to the known NockGuard outcomes — an adversarial string can never inject
-  // markup or stray class tokens.
-  const KNOWN = { allow:1, deny:1, block:1, ratelimit:1, hide:1 };
+  function esc(s){ const d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }
 
   function render(ev) {
-    if (empty) empty.remove();
+    if (empty) { empty.remove(); empty = null; }
     const dec = KNOWN[ev.decision] ? ev.decision : 'hide';
     const row = document.createElement('div');
     row.className = 'row ' + dec;
@@ -131,9 +182,8 @@
     feed.prepend(row);
     while (feed.childElementCount > MAX_ROWS) feed.lastElementChild.remove();
     bump(dec);
+    if (dec === 'block') { hitFlash(); beep(); }
   }
-
-  function esc(s){ const d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }
 
   function connect() {
     const es = new EventSource('/events');
