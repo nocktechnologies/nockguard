@@ -143,7 +143,21 @@ audit:
 
 Forwarding is **asynchronous and fail-open**: events post on a background worker, `Enqueue` never blocks (it drops if the buffer saturates), and any HTTP/transport error is swallowed — a slow or unreachable NockCC can never stall or fail a tool call. Severity maps as `block → high` (an injection / secret-exfil attempt) and `deny` / `ratelimit → warn`. Misconfiguration (forwarding enabled with no `url`, or an `api_key_env` that doesn't resolve) fails loud at startup rather than silently dropping every event.
 
-Optional HMAC signing of audit entries (tamper-evidence) is the remaining Phase 4 increment.
+### Tamper-evidence (HMAC hash-chain)
+
+Audit entries can be signed with an HMAC hash-chain — each entry's signature covers its own content plus the previous entry's signature, so any insertion, deletion, or edit anywhere in the trail breaks the chain from that point forward. Signing is opt-in (provide a key); without one, the trail behaves exactly as the unsigned JSONL above. This closes Phase 4.
+
+## Live Wall
+
+The audit trail is a file; the **Live Wall** makes it something you watch. `nockguard-wall` tails the audit JSONL and streams each policy decision to a local browser dashboard in real time, color-coded by outcome — every tool call an agent attempted and exactly what the firewall did about it. It is the visible layer over NockGuard's invisible enforcement: visceral proof of the accountability moat.
+
+```bash
+go run ./cmd/nockguard-wall                 # serves http://127.0.0.1:8787 (loopback = private)
+go run ./cmd/nockguard-wall --demo          # synthesize a sample stream when there's no live traffic
+go run ./cmd/nockguard-wall --audit <path>  # point at a specific audit JSONL
+```
+
+It binds to loopback by default (private), embeds its own page (single binary, no assets to ship), and replays the existing audit record on open so the wall is populated immediately, then streams new decisions as they land. The wall reads only the recorded decision (agent, tool, outcome, reason) — never raw tool-call parameters, consistent with the audit trail's no-payload rule.
 
 ## How It Works
 
@@ -166,7 +180,8 @@ Same brand, same tap, independent products. Use one or both.
 - [x] Phase 1: Tool allowlists (per-agent, wildcard, default-deny)
 - [x] Phase 2: Input validation (SQLi / path-traversal / secrets rule sets + custom regex on tool-call arguments)
 - [x] Phase 3: Rate limiting and spend caps (per-agent sliding-window rate limit + hard cumulative session cap)
-- [~] Phase 4: Audit trail — structured JSONL trail + NockCC ops-log forwarding of enforcement decisions shipped; optional HMAC signing next
+- [x] Phase 4: Audit trail — structured JSONL trail, NockCC ops-log forwarding, and tamper-evident HMAC hash-chain signing
+- [x] Live Wall: real-time local dashboard streaming every policy decision from the audit trail
 
 ## License
 
