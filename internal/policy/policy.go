@@ -26,6 +26,10 @@ type Config struct {
 type AuditPolicy struct {
 	Enabled bool   `yaml:"enabled"`
 	Path    string `yaml:"path"`
+	// SignKeyEnv names the environment variable holding the HMAC key that makes
+	// the trail tamper-evident (Phase 4 3/3). Empty = unsigned. The key is never
+	// stored in the policy file; an enabled value that does not resolve fails loud.
+	SignKeyEnv string `yaml:"sign_key_env"`
 	// Forward optionally streams enforcement decisions to the NockCC ops-log.
 	Forward *ForwardPolicy `yaml:"forward"`
 }
@@ -179,7 +183,15 @@ func (e *Engine) Auditor() (*audit.Auditor, error) {
 		}
 		path = filepath.Join(home, DefaultAuditPath)
 	}
-	return audit.New(path)
+	var opts []audit.Option
+	if env := e.config.Audit.SignKeyEnv; env != "" {
+		key := os.Getenv(env)
+		if key == "" {
+			return nil, fmt.Errorf("audit.sign_key_env %q is not set in the environment", env)
+		}
+		opts = append(opts, audit.WithSigningKey([]byte(key)))
+	}
+	return audit.New(path, opts...)
 }
 
 // Forwarder builds the NockCC ops-log forwarder from config. Returns a disabled
