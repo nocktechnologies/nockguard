@@ -41,6 +41,7 @@ type event struct {
 // broker is a minimal SSE hub: it fans recorded events out to every connected
 // browser. The client set is only ever touched by run(), so no locks are needed.
 type broker struct {
+	auditPath  string // replayed to each newly-connected client as history
 	register   chan chan event
 	unregister chan chan event
 	broadcast  chan event
@@ -90,6 +91,11 @@ func (b *broker) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	// Replay existing audit history to this client first, so opening the wall
+	// shows the full record rather than only decisions that arrive afterward.
+	replayHistory(b.auditPath, w)
+	fl.Flush()
+
 	c := make(chan event, 64)
 	b.register <- c
 	defer func() { b.unregister <- c }()
@@ -115,11 +121,45 @@ func (b *broker) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// tail follows path like `tail -f`, emitting each newly appended JSON line. It
-// tolerates the file not existing yet (waits for it) and truncation/rotation
+// replayHistory writes the existing audit lines to a just-connected SSE client,
+// oldest first (the page prepends, so newest lands on top). Bounded so a large
+// trail can't flood the page. This is what makes opening the wall show the full
+// record instead of only decisions that arrive after the page loads.
+func replayHistory(path string, w io.Writer) {
+	if path == "" {
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	const maxReplay = 500
+	var lines [][]byte
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		var ev event
+		if json.Unmarshal(sc.Bytes(), &ev) == nil && ev.Decision != "" {
+			b, _ := json.Marshal(ev)
+			lines = append(lines, b)
+			if len(lines) > maxReplay {
+				lines = lines[1:]
+			}
+		}
+	}
+	for _, ln := range lines {
+		fmt.Fprintf(w, "data: %s\n\n", ln)
+	}
+}
+
+// tail follows path like `tail -f`, emitting each newly appended JSON line. On
+// first open it seeks to the end (existing history is replayed to clients on
+// connect), and it tolerates the file not existing yet and truncation/rotation
 // (the read offset resets when the file shrinks).
 func tail(ctx context.Context, path string, b *broker) {
 	var offset int64
+	firstOpen := true
 	for {
 		select {
 		case <-ctx.Done():
@@ -128,6 +168,10 @@ func tail(ctx context.Context, path string, b *broker) {
 		}
 		if f, err := os.Open(path); err == nil {
 			if info, err := f.Stat(); err == nil {
+				if firstOpen {
+					offset = info.Size() // follow new lines only; history is per-client
+					firstOpen = false
+				}
 				if info.Size() < offset {
 					offset = 0 // truncated or rotated
 				}
@@ -204,6 +248,7 @@ func main() {
 	defer cancel()
 
 	b := newBroker()
+	b.auditPath = *auditPath
 	go b.run(ctx)
 	go tail(ctx, *auditPath, b)
 	if *demoMode {
