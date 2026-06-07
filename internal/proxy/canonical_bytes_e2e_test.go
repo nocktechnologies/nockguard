@@ -147,6 +147,34 @@ func TestUnextractableToolNameFailsClosed(t *testing.T) {
 	}
 }
 
+// 1d#1 (top-level variant) — a DUPLICATE top-level "method" key is the same
+// parser-differential one level up: Go parses it last-wins, so a second
+// "method":"tools/list" can mask a "method":"tools/call", and a first-key-wins
+// upstream would still run the masked call. The fix canonicalizes the whole
+// top-level message, so the forwarded bytes carry exactly one method == the
+// proxy's view — neither ordering can expose a different method upstream.
+func TestDuplicateTopLevelMethodCannotBypass(t *testing.T) {
+	// Case A: last-wins = tools/list masks a leading tools/call. Forwarded bytes
+	// must NOT expose method=tools/call to a first-wins upstream.
+	_, forwardedA := runProxyCapture(t,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"dangerous_tool"},"method":"tools/list"}`+"\n")
+	if strings.Contains(forwardedA, "tools/call") {
+		t.Errorf("forwarded bytes still expose method=tools/call to a first-wins upstream:\n%s", forwardedA)
+	}
+	if n := strings.Count(forwardedA, `"method"`); n > 1 {
+		t.Errorf("forwarded message carries %d method keys (top-level differential open):\n%s", n, forwardedA)
+	}
+
+	// Case B: last-wins = tools/call (a denied tool) masked behind a leading
+	// tools/list. The proxy gates on the canonical last-wins view → denied → the
+	// call must NOT reach upstream.
+	_, forwardedB := runProxyCapture(t,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list","method":"tools/call","params":{"name":"dangerous_tool"}}`+"\n")
+	if strings.Contains(forwardedB, "dangerous_tool") {
+		t.Errorf("a denied tools/call masked by a duplicate method reached upstream:\n%s", forwardedB)
+	}
+}
+
 // 1d#3 — an --agent value with no named policy AND no "default" must fail CLOSED
 // (deny every tool), not silently allow everything.
 func TestUnknownAgentFailsClosedE2E(t *testing.T) {

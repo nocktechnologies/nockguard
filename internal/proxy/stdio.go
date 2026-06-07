@@ -146,12 +146,16 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		msg, err := jsonrpc.Decode(line)
-		if err != nil {
-			// Not a single well-formed JSON-RPC object (e.g. a top-level batch
-			// array or malformed JSON). We cannot gate what we cannot parse, so
-			// fail CLOSED — reject it rather than forward the raw bytes upstream.
-			// A batched tools/call would otherwise skip every gate.
+
+		// Canonicalize the TOP-LEVEL message before doing anything else. Unmarshal
+		// into a map so any duplicate top-level keys (method, id, params, ...)
+		// collapse to Go's last-wins value, then re-marshal: the bytes the proxy
+		// gates and the bytes the upstream receives are now identical, so a
+		// first-key-wins upstream cannot read a different "method" (e.g. a second
+		// "method":"tools/list" hiding a "method":"tools/call"). A line that is not
+		// a single JSON object (batch array, malformed) fails here → fail CLOSED.
+		var topLevel map[string]json.RawMessage
+		if err := json.Unmarshal(line, &topLevel); err != nil {
 			p.logger.Printf("REJECT agent=%s reason=undecodable-or-batch", p.agent)
 			errResp := jsonrpc.ErrorResponse(json.RawMessage("null"), -32700,
 				"nockguard: rejected — only single well-formed JSON-RPC objects are accepted (batch arrays are not gated)")
@@ -160,11 +164,33 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			}
 			continue
 		}
+		canonicalLine, err := json.Marshal(topLevel)
+		if err != nil {
+			p.logger.Printf("REJECT agent=%s reason=canonical-marshal-failed", p.agent)
+			errResp := jsonrpc.ErrorResponse(json.RawMessage("null"), -32603,
+				"nockguard: rejected — message could not be canonicalized")
+			if _, writeErr := fmt.Fprintf(os.Stdout, "%s\n", errResp); writeErr != nil {
+				return writeErr
+			}
+			continue
+		}
+		msg, err := jsonrpc.Decode(canonicalLine)
+		if err != nil {
+			// canonicalLine is a valid JSON object, so Decode into the Message
+			// struct should not fail; if it somehow does, fail CLOSED.
+			p.logger.Printf("REJECT agent=%s reason=undecodable-after-canonicalize", p.agent)
+			errResp := jsonrpc.ErrorResponse(json.RawMessage("null"), -32700,
+				"nockguard: rejected — message is not a well-formed JSON-RPC object")
+			if _, writeErr := fmt.Fprintf(os.Stdout, "%s\n", errResp); writeErr != nil {
+				return writeErr
+			}
+			continue
+		}
 
 		// Gate tools/call by METHOD, regardless of id: a notification-form call
-		// (no id) must NOT slip past the gates. The params are interpreted and
-		// re-marshaled to canonical bytes so what we gate is exactly what we
-		// forward — closing duplicate-key and other parser-differential bypasses.
+		// (no id) must NOT slip past the gates. params are ALSO canonicalized so
+		// what we gate is exactly what we forward — closing duplicate-key and
+		// other parser-differential bypasses at both the top level and in params.
 		if msg.Method == "tools/call" {
 			toolName, canonicalParams, ok := canonicalToolCall(msg.Params)
 			if !ok || toolName == "" {
@@ -238,10 +264,12 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				p.audit(toolName, "approval-granted", v.Reason)
 			}
 
-			// Cleared every gate — forward the CANONICAL bytes, never the raw
-			// line, so the upstream's view of the call matches the proxy's exactly.
-			canonicalMsg := &jsonrpc.Message{JSONRPC: msg.JSONRPC, ID: msg.ID, Method: msg.Method, Params: canonicalParams}
-			out, mErr := json.Marshal(canonicalMsg)
+			// Cleared every gate — forward CANONICAL bytes, never the raw line.
+			// Swap the canonical params back into the (already top-level-canonical)
+			// message map and re-marshal, so the upstream sees exactly the name we
+			// gated, once, with every other top-level field preserved verbatim.
+			topLevel["params"] = canonicalParams
+			out, mErr := json.Marshal(topLevel)
 			if mErr != nil {
 				p.logger.Printf("DENY agent=%s tool=%s reason=canonical-marshal-failed", p.agent, toolName)
 				p.audit(toolName, "deny", "canonical-marshal-failed")
@@ -260,15 +288,16 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 		}
 
 		// tools/list (always a request) — track the id so the response can be
-		// filtered, then forward raw below.
+		// filtered, then forward below.
 		if msg.IsRequest() && msg.Method == "tools/list" {
 			pending.Store(string(msg.ID), true)
 		}
 
 		// Non-tools/call traffic (initialize, tools/list, responses, other
-		// notifications) is not gated; forward it verbatim to preserve protocol
-		// fidelity.
-		if _, writeErr := fmt.Fprintf(w, "%s\n", line); writeErr != nil {
+		// notifications) is not gated, but we forward the CANONICAL top-level
+		// bytes (not the raw line) so duplicate-key collapsing reaches upstream —
+		// a shadow "method" can't differ between the proxy's view and upstream's.
+		if _, writeErr := fmt.Fprintf(w, "%s\n", canonicalLine); writeErr != nil {
 			return writeErr
 		}
 	}
