@@ -28,6 +28,15 @@ go install github.com/nocktechnologies/nockguard/cmd/nockguard@latest
 
 ## Quick Start
 
+The fastest path — scaffold a default-deny starter policy, then run the firewall:
+
+```bash
+nockguard init                                  # writes ~/.nockguard/policy.yaml (won't clobber an existing one)
+nockguard proxy --upstream "npx mcp-server-nockcc" --agent my-agent
+```
+
+`init` generates a commented, default-deny policy you edit in place — no hand-writing YAML to get started. Or write one yourself:
+
 1. Create a policy file:
 
 ```yaml
