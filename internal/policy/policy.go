@@ -103,6 +103,26 @@ func Load(path string) (*Engine, error) {
 	return &Engine{config: cfg}, nil
 }
 
+// SigningKeyEnvNames returns the names of the environment variables that hold
+// the audit signing secret (the Ed25519 seed and/or the HMAC key), as configured
+// in the policy. The proxy strips these from the upstream child's environment so
+// the policed agent cannot read the seed from its own /proc/self/environ and forge
+// the audit trail. The key value itself is parsed into the Auditor at startup, so
+// the child never needs the variable. Returns nil when audit signing is unset.
+func (e *Engine) SigningKeyEnvNames() []string {
+	if e.config.Audit == nil {
+		return nil
+	}
+	var names []string
+	if n := e.config.Audit.SignEd25519KeyEnv; n != "" {
+		names = append(names, n)
+	}
+	if n := e.config.Audit.SignKeyEnv; n != "" {
+		names = append(names, n)
+	}
+	return names
+}
+
 func (e *Engine) Check(agent, tool string) bool {
 	pol, ok := e.config.Agents[agent]
 	if !ok {
