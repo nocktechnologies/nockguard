@@ -54,7 +54,11 @@ type tgResponse struct {
 // Ask posts the held call and waits for a tap. Fail-safe on every error path.
 func (t *TelegramApprover) Ask(req Request) Verdict {
 	id := t.nonce()
-	text := fmt.Sprintf("🔒 NockGuard — approval needed\n\nAgent: %s\nTool: %s\n\nApprove this call?", req.Agent, req.Tool)
+	text := fmt.Sprintf("🔒 NockGuard — approval needed\n\nAgent: %s\nTool: %s", req.Agent, req.Tool)
+	if summary := summarizeParams(req.Params); summary != "" {
+		text += "\n" + summary
+	}
+	text += "\n\nApprove this call?"
 	if !t.send(text, id) {
 		return Verdict{Approved: false, Reason: "send-failed"}
 	}

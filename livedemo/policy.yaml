@@ -1,0 +1,32 @@
+# NockGuard LIVE demo policy — real NockCC MCP traffic through the firewall.
+# Isolated audit path so the Live Wall shows only this real run.
+audit:
+  enabled: true
+  path: /Users/kevin/.nockguard/logs/live-demo.jsonl
+agents:
+  mira:
+    # Read/ops tools the agent is allowed to use — real calls, real data back.
+    allow:
+      - "nockcc_fleet_*"
+      - "nockcc_nock_list"
+      - "nockcc_nock_get"
+      - "nockcc_diary_*"
+      - "nockcc_spend_*"
+      - "nockcc_sessions_*"
+      - "nockcc_pipeline_*"
+    # Hard denies — the firewall blocks these BEFORE they reach the server.
+    # kill_switch_set + nock_archive are destructive; private_* is the register boundary.
+    deny:
+      - "nockcc_kill_switch_set"
+      - "nockcc_nock_archive"
+      - "nockcc_private_*"
+    # Phase 2 — block tool-call args carrying secrets or SQLi.
+    validate_input: ["secrets", "sqli"]
+    # Phase 3 — trip the rate limit after 5 calls in the window so the wall shows ratelimit.
+    rate_limit:
+      max_calls: 5
+      window: 1m
+  default:
+    mode: deny
+    deny:
+      - "nockcc_kill_switch_set"
