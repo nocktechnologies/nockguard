@@ -30,6 +30,22 @@ type StdioProxy struct {
 	forwarder *forward.Forwarder
 	approver  approval.Approver // Phase 5; nil = no approval gate (Phase 1-4 behavior)
 	logger    *log.Logger
+
+	// agentMu serializes ALL writes to the agent-facing channel (os.Stdout).
+	// agentToUpstream (error/reject responses) and upstreamToAgent (upstream
+	// traffic) run in separate goroutines and both write there; without this lock
+	// their JSON-RPC lines could interleave and corrupt the stream.
+	agentMu sync.Mutex
+}
+
+// writeAgentLine writes one newline-terminated line to the agent-facing channel
+// under agentMu, so the two proxy goroutines never interleave output on it. w is
+// the agent writer (os.Stdout in production; injectable for tests).
+func (p *StdioProxy) writeAgentLine(w io.Writer, line []byte) error {
+	p.agentMu.Lock()
+	defer p.agentMu.Unlock()
+	_, err := fmt.Fprintf(w, "%s\n", line)
+	return err
 }
 
 // WithApprover wires the Phase 5 interactive approval gate. nil (the default)
@@ -146,34 +162,84 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		msg, err := jsonrpc.Decode(line)
+
+		// Canonicalize the TOP-LEVEL message before doing anything else. Unmarshal
+		// into a map so any duplicate top-level keys (method, id, params, ...)
+		// collapse to Go's last-wins value, then re-marshal: the bytes the proxy
+		// gates and the bytes the upstream receives are now identical, so a
+		// first-key-wins upstream cannot read a different "method" (e.g. a second
+		// "method":"tools/list" hiding a "method":"tools/call"). A line that is not
+		// a single JSON object (batch array, malformed) fails here → fail CLOSED.
+		var topLevel map[string]json.RawMessage
+		if err := json.Unmarshal(line, &topLevel); err != nil {
+			p.logger.Printf("REJECT agent=%s reason=undecodable-or-batch", p.agent)
+			errResp := jsonrpc.ErrorResponse(json.RawMessage("null"), -32700,
+				"nockguard: rejected — only single well-formed JSON-RPC objects are accepted (batch arrays are not gated)")
+			if writeErr := p.writeAgentLine(os.Stdout, errResp); writeErr != nil {
+				return writeErr
+			}
+			continue
+		}
+		canonicalLine, err := json.Marshal(topLevel)
 		if err != nil {
-			if _, writeErr := fmt.Fprintf(w, "%s\n", line); writeErr != nil {
+			p.logger.Printf("REJECT agent=%s reason=canonical-marshal-failed", p.agent)
+			errResp := jsonrpc.ErrorResponse(json.RawMessage("null"), -32603,
+				"nockguard: rejected — message could not be canonicalized")
+			if writeErr := p.writeAgentLine(os.Stdout, errResp); writeErr != nil {
+				return writeErr
+			}
+			continue
+		}
+		msg, err := jsonrpc.Decode(canonicalLine)
+		if err != nil {
+			// canonicalLine is a valid JSON object, so Decode into the Message
+			// struct should not fail; if it somehow does, fail CLOSED.
+			p.logger.Printf("REJECT agent=%s reason=undecodable-after-canonicalize", p.agent)
+			errResp := jsonrpc.ErrorResponse(json.RawMessage("null"), -32700,
+				"nockguard: rejected — message is not a well-formed JSON-RPC object")
+			if writeErr := p.writeAgentLine(os.Stdout, errResp); writeErr != nil {
 				return writeErr
 			}
 			continue
 		}
 
-		if msg.IsRequest() && msg.Method == "tools/call" {
-			toolName := extractToolName(msg.Params)
-			if toolName != "" && !p.engine.Check(p.agent, toolName) {
-				p.logger.Printf("DENY agent=%s tool=%s", p.agent, toolName)
-				p.audit(toolName, "deny", "policy")
-				errResp := jsonrpc.ErrorResponse(msg.ID, -32600, fmt.Sprintf("nockguard: tool %q denied by policy", toolName))
-				if _, writeErr := fmt.Fprintf(os.Stdout, "%s\n", errResp); writeErr != nil {
-					return writeErr
+		// Gate tools/call by METHOD, regardless of id: a notification-form call
+		// (no id) must NOT slip past the gates. params are ALSO canonicalized so
+		// what we gate is exactly what we forward — closing duplicate-key and
+		// other parser-differential bypasses at both the top level and in params.
+		if msg.Method == "tools/call" {
+			toolName, canonicalParams, ok := canonicalToolCall(msg.Params)
+			if !ok || toolName == "" {
+				// A tools/call whose name we cannot extract fails CLOSED — the
+				// upstream might still resolve a name the proxy could not see.
+				p.logger.Printf("DENY agent=%s reason=unextractable-name", p.agent)
+				p.audit("", "deny", "unextractable-name")
+				if werr := p.rejectToAgent(msg.ID, -32600,
+					"nockguard: tools/call rejected — tool name could not be extracted"); werr != nil {
+					return werr
 				}
 				continue
 			}
 
-			// Phase 2: input validation on the tool-call arguments.
+			if !p.engine.Check(p.agent, toolName) {
+				p.logger.Printf("DENY agent=%s tool=%s", p.agent, toolName)
+				p.audit(toolName, "deny", "policy")
+				if werr := p.rejectToAgent(msg.ID, -32600,
+					fmt.Sprintf("nockguard: tool %q denied by policy", toolName)); werr != nil {
+					return werr
+				}
+				continue
+			}
+
+			// Phase 2: input validation on the canonical tool-call arguments
+			// (the bytes that will actually be forwarded).
 			if p.validator.Enabled() {
-				if hit := p.validator.CheckParams(msg.Params); hit != "" {
+				if hit := p.validator.CheckParams(canonicalParams); hit != "" {
 					p.logger.Printf("BLOCK agent=%s tool=%s rule=%s", p.agent, toolName, hit)
 					p.audit(toolName, "block", hit)
-					errResp := jsonrpc.ErrorResponse(msg.ID, -32600, fmt.Sprintf("nockguard: tool %q arguments blocked by input validation (%s)", toolName, hit))
-					if _, writeErr := fmt.Fprintf(os.Stdout, "%s\n", errResp); writeErr != nil {
-						return writeErr
+					if werr := p.rejectToAgent(msg.ID, -32600,
+						fmt.Sprintf("nockguard: tool %q arguments blocked by input validation (%s)", toolName, hit)); werr != nil {
+						return werr
 					}
 					continue
 				}
@@ -186,9 +252,9 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				if reason, ok := p.limiter.Allow(); !ok {
 					p.logger.Printf("RATELIMIT agent=%s tool=%s reason=%s", p.agent, toolName, reason)
 					p.audit(toolName, "ratelimit", reason)
-					errResp := jsonrpc.ErrorResponse(msg.ID, -32600, fmt.Sprintf("nockguard: tool %q blocked: %s exceeded", toolName, limitLabel(reason)))
-					if _, writeErr := fmt.Fprintf(os.Stdout, "%s\n", errResp); writeErr != nil {
-						return writeErr
+					if werr := p.rejectToAgent(msg.ID, -32600,
+						fmt.Sprintf("nockguard: tool %q blocked: %s exceeded", toolName, limitLabel(reason))); werr != nil {
+						return werr
 					}
 					continue
 				}
@@ -200,13 +266,13 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			// approver returns Approved=false on timeout/transport error, so a
 			// missed prompt never auto-approves a consequential call.
 			if p.approver != nil && p.engine.RequiresApproval(p.agent, toolName) {
-				v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: toolName, Params: msg.Params})
+				v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: toolName, Params: canonicalParams})
 				if !v.Approved {
 					p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=%s", p.agent, toolName, v.Reason)
 					p.audit(toolName, "approval-denied", v.Reason)
-					errResp := jsonrpc.ErrorResponse(msg.ID, -32600, fmt.Sprintf("nockguard: tool %q denied by approval gate (%s)", toolName, v.Reason))
-					if _, writeErr := fmt.Fprintf(os.Stdout, "%s\n", errResp); writeErr != nil {
-						return writeErr
+					if werr := p.rejectToAgent(msg.ID, -32600,
+						fmt.Sprintf("nockguard: tool %q denied by approval gate (%s)", toolName, v.Reason)); werr != nil {
+						return werr
 					}
 					continue
 				}
@@ -214,19 +280,56 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				p.audit(toolName, "approval-granted", v.Reason)
 			}
 
+			// Cleared every gate — forward CANONICAL bytes, never the raw line.
+			// Swap the canonical params back into the (already top-level-canonical)
+			// message map and re-marshal, so the upstream sees exactly the name we
+			// gated, once, with every other top-level field preserved verbatim.
+			topLevel["params"] = canonicalParams
+			out, mErr := json.Marshal(topLevel)
+			if mErr != nil {
+				p.logger.Printf("DENY agent=%s tool=%s reason=canonical-marshal-failed", p.agent, toolName)
+				p.audit(toolName, "deny", "canonical-marshal-failed")
+				if werr := p.rejectToAgent(msg.ID, -32603,
+					"nockguard: tools/call rejected — could not canonicalize message"); werr != nil {
+					return werr
+				}
+				continue
+			}
 			p.logger.Printf("ALLOW agent=%s tool=%s", p.agent, toolName)
 			p.audit(toolName, "allow", "")
+			if _, writeErr := fmt.Fprintf(w, "%s\n", out); writeErr != nil {
+				return writeErr
+			}
+			continue
 		}
 
+		// tools/list (always a request) — track the id so the response can be
+		// filtered, then forward below.
 		if msg.IsRequest() && msg.Method == "tools/list" {
 			pending.Store(string(msg.ID), true)
 		}
 
-		if _, writeErr := fmt.Fprintf(w, "%s\n", line); writeErr != nil {
+		// Non-tools/call traffic (initialize, tools/list, responses, other
+		// notifications) is not gated, but we forward the CANONICAL top-level
+		// bytes (not the raw line) so duplicate-key collapsing reaches upstream —
+		// a shadow "method" can't differ between the proxy's view and upstream's.
+		if _, writeErr := fmt.Fprintf(w, "%s\n", canonicalLine); writeErr != nil {
 			return writeErr
 		}
 	}
 	return scanner.Err()
+}
+
+// rejectToAgent returns a JSON-RPC error to the agent for a denied REQUEST
+// (id present). A notification (no id) has no response channel in JSON-RPC, so a
+// denied notification is simply dropped — nothing is forwarded upstream and
+// nothing is written back to the agent.
+func (p *StdioProxy) rejectToAgent(id json.RawMessage, code int, message string) error {
+	if id == nil {
+		return nil
+	}
+	errResp := jsonrpc.ErrorResponse(id, code, message)
+	return p.writeAgentLine(os.Stdout, errResp)
 }
 
 func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map) error {
@@ -236,7 +339,7 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 		line := scanner.Bytes()
 		msg, err := jsonrpc.Decode(line)
 		if err != nil {
-			if _, writeErr := fmt.Fprintf(w, "%s\n", line); writeErr != nil {
+			if writeErr := p.writeAgentLine(w, line); writeErr != nil {
 				return writeErr
 			}
 			continue
@@ -251,7 +354,7 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 			}
 		}
 
-		if _, writeErr := fmt.Fprintf(w, "%s\n", line); writeErr != nil {
+		if writeErr := p.writeAgentLine(w, line); writeErr != nil {
 			return writeErr
 		}
 	}
@@ -336,12 +439,32 @@ func sanitizedEnv(strip []string) []string {
 	return env
 }
 
-func extractToolName(params json.RawMessage) string {
-	var p struct {
-		Name string `json:"name"`
+// canonicalToolCall interprets a tools/call params object in Go's canonical
+// last-value-wins form and returns the extracted tool name plus the re-marshaled
+// canonical params. ok is false when params is absent or not a JSON object — a
+// call the proxy cannot interpret, which the caller fails closed. Top-level
+// duplicate keys collapse to the last value (the value the name gate sees), so
+// the forwarded bytes carry exactly one of each key and the upstream cannot
+// resolve a shadow name. Nested "arguments" are kept verbatim as RawMessage, so
+// numbers inside tool arguments are never re-encoded (no float-precision risk).
+func canonicalToolCall(params json.RawMessage) (name string, canonical json.RawMessage, ok bool) {
+	if len(params) == 0 {
+		return "", nil, false
 	}
-	if err := json.Unmarshal(params, &p); err != nil {
-		return ""
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(params, &obj); err != nil {
+		return "", nil, false
 	}
-	return p.Name
+	rawName, present := obj["name"]
+	if !present {
+		return "", nil, false
+	}
+	if err := json.Unmarshal(rawName, &name); err != nil {
+		return "", nil, false
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return "", nil, false
+	}
+	return name, out, true
 }

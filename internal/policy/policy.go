@@ -123,12 +123,28 @@ func (e *Engine) SigningKeyEnvNames() []string {
 	return names
 }
 
+// HasPolicyFor reports whether an explicit policy governs the given agent —
+// either a named entry or a "default" fallback. When false, Check fails CLOSED
+// (denies every tool), so callers should warn loudly at startup that the agent
+// is unconfigured rather than let the deny-all surprise the operator.
+func (e *Engine) HasPolicyFor(agent string) bool {
+	if _, ok := e.config.Agents[agent]; ok {
+		return true
+	}
+	_, ok := e.config.Agents["default"]
+	return ok
+}
+
 func (e *Engine) Check(agent, tool string) bool {
 	pol, ok := e.config.Agents[agent]
 	if !ok {
 		pol, ok = e.config.Agents["default"]
 		if !ok {
-			return true
+			// Fail CLOSED: an agent with no named policy and no "default" is
+			// unrecognized, so denying every tool is the only safe reading of
+			// "default-deny". (Previously this returned true — allow-everything —
+			// which silently unrestricted any unconfigured --agent value.)
+			return false
 		}
 	}
 

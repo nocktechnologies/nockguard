@@ -115,6 +115,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Fail-closed is correct but should never be a silent surprise: if the named
+	// agent has neither its own policy nor a "default", every tool will be denied.
+	// Warn loudly so the operator fixes the policy instead of debugging a deny-all.
+	if !engine.HasPolicyFor(agent) {
+		fmt.Fprintf(os.Stderr, "warning: no policy for agent %q and no \"default\" — ALL tools will be DENIED (fail-closed). Add an agent or \"default\" policy in %s.\n", agent, policyPath)
+	}
+
 	validator, err := engine.ValidatorFor(agent)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error building input validator for agent %s: %v\n", agent, err)
