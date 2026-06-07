@@ -148,8 +148,16 @@ agents:
 		t.Fatal(err)
 	}
 
-	if !eng.Check("unknown", "anything") {
-		t.Error("unknown agent with no default should be allowed")
+	// Fail CLOSED: an agent with no named policy and no "default" must be denied
+	// every tool — a silent allow-everything would contradict "default-deny".
+	if eng.Check("unknown", "anything") {
+		t.Error("unknown agent with no default should be DENIED (fail closed)")
+	}
+	if eng.HasPolicyFor("unknown") {
+		t.Error("HasPolicyFor should report false for an unconfigured agent")
+	}
+	if !eng.HasPolicyFor("kit") {
+		t.Error("HasPolicyFor should report true for a named agent")
 	}
 }
 
