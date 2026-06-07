@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"sync"
 
+	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/forward"
 	"github.com/nocktechnologies/nockguard/internal/jsonrpc"
@@ -26,7 +27,16 @@ type StdioProxy struct {
 	limiter   *ratelimit.Limiter
 	auditor   *audit.Auditor
 	forwarder *forward.Forwarder
+	approver  approval.Approver // Phase 5; nil = no approval gate (Phase 1-4 behavior)
 	logger    *log.Logger
+}
+
+// WithApprover wires the Phase 5 interactive approval gate. nil (the default)
+// disables the gate entirely, preserving Phase 1-4 behavior. Returns the proxy
+// for chaining off NewStdioProxy.
+func (p *StdioProxy) WithApprover(a approval.Approver) *StdioProxy {
+	p.approver = a
+	return p
 }
 
 func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, validator *validate.Validator, limiter *ratelimit.Limiter, auditor *audit.Auditor, forwarder *forward.Forwarder, logger *log.Logger) *StdioProxy {
@@ -62,7 +72,9 @@ func (p *StdioProxy) audit(tool, decision, reason string) {
 // centralized feed to genuine enforcement signal.
 func isEnforcement(decision string) bool {
 	switch decision {
-	case "deny", "block", "ratelimit":
+	case "deny", "block", "ratelimit", "approval-granted", "approval-denied":
+		// approval-* are the highest-signal events NockGuard captures: a human
+		// had to intervene on a consequential call, so both outcomes surface.
 		return true
 	default:
 		return false
@@ -173,6 +185,27 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 					continue
 				}
 			}
+
+			// Phase 5: interactive approval gate. The call has cleared policy,
+			// validation and limits, so it WOULD be allowed — but a tool matching
+			// require_approval is HELD for a human nod first. Fail-safe: the
+			// approver returns Approved=false on timeout/transport error, so a
+			// missed prompt never auto-approves a consequential call.
+			if p.approver != nil && p.engine.RequiresApproval(p.agent, toolName) {
+				v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: toolName, Params: msg.Params})
+				if !v.Approved {
+					p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=%s", p.agent, toolName, v.Reason)
+					p.audit(toolName, "approval-denied", v.Reason)
+					errResp := jsonrpc.ErrorResponse(msg.ID, -32600, fmt.Sprintf("nockguard: tool %q denied by approval gate (%s)", toolName, v.Reason))
+					if _, writeErr := fmt.Fprintf(os.Stdout, "%s\n", errResp); writeErr != nil {
+						return writeErr
+					}
+					continue
+				}
+				p.logger.Printf("APPROVAL-GRANTED agent=%s tool=%s reason=%s", p.agent, toolName, v.Reason)
+				p.audit(toolName, "approval-granted", v.Reason)
+			}
+
 			p.logger.Printf("ALLOW agent=%s tool=%s", p.agent, toolName)
 			p.audit(toolName, "allow", "")
 		}
