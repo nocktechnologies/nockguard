@@ -60,6 +60,10 @@ type AgentPolicy struct {
 	// (Phase 1/2 behavior preserved).
 	RateLimit *RateLimitPolicy `yaml:"rate_limit"`
 	SpendCap  *SpendCapPolicy  `yaml:"spend_cap"`
+	// Phase 5 interactive approval gates (opt-in). Tool patterns that require a
+	// human nod before the call is forwarded upstream, even when the tool is
+	// allowed by policy. Empty = no approval gate (Phase 1-4 behavior preserved).
+	RequireApproval []string `yaml:"require_approval"`
 }
 
 // RateLimitPolicy bounds tool-call rate: at most MaxCalls within Window (a Go
@@ -120,6 +124,27 @@ func (e *Engine) Check(agent, tool string) bool {
 		return false
 	}
 	return true
+}
+
+// RequiresApproval reports whether a (agent, tool) call must be held for a human
+// nod before it is forwarded upstream. This is the Phase 5 third gate: it is
+// independent of Check (a tool can be allowed AND still require approval).
+// Absence of any require_approval rule (or no policy for the agent and no
+// "default") means no approval gate — Phase 1-4 behavior is preserved.
+func (e *Engine) RequiresApproval(agent, tool string) bool {
+	pol, ok := e.config.Agents[agent]
+	if !ok {
+		pol, ok = e.config.Agents["default"]
+		if !ok {
+			return false
+		}
+	}
+	for _, pattern := range pol.RequireApproval {
+		if matchPattern(pattern, tool) {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidatorFor builds the input validator for an agent (falling back to the

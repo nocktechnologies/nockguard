@@ -6,11 +6,38 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 	"github.com/nocktechnologies/nockguard/internal/proxy"
 )
+
+// buildApprover wires the Phase 5 approval gate. For now: a deterministic test
+// seam (NOCKGUARD_APPROVAL_TEST=approve|deny) used by e2e tests, otherwise no
+// approver (nil) — the real Telegram approver lands in the next piece. nil means
+// require_approval rules are present but un-enforced; that is logged loud so a
+// deployment never silently skips the gate.
+func buildApprover(logger *log.Logger) approval.Approver {
+	switch os.Getenv("NOCKGUARD_APPROVAL_TEST") {
+	case "approve":
+		return approval.NewStaticApprover(true, "test-auto-approve")
+	case "deny":
+		return approval.NewStaticApprover(false, "test-auto-deny")
+	}
+	// Real approver: a DEDICATED Telegram bot (never the fleet's main bot). Both
+	// env vars must be set; otherwise the gate is un-enforced (logged loud).
+	token := os.Getenv("NOCKGUARD_APPROVAL_BOT_TOKEN")
+	chatID := os.Getenv("NOCKGUARD_APPROVAL_CHAT_ID")
+	if token != "" && chatID != "" {
+		timeout := 2 * time.Minute
+		logger.Printf("Phase 5 approval gate ON — Telegram (dedicated bot), %s timeout, fail-safe deny", timeout)
+		return approval.NewTelegramApprover(token, chatID, timeout)
+	}
+	logger.Printf("Phase 5 approval gate: no approver configured (set NOCKGUARD_APPROVAL_BOT_TOKEN + NOCKGUARD_APPROVAL_CHAT_ID); require_approval rules are present but un-enforced")
+	return nil
+}
 
 func main() {
 	args := os.Args[1:]
@@ -110,7 +137,8 @@ func main() {
 	logger := log.New(os.Stderr, "[nockguard] ", log.LstdFlags)
 	upstream := parseCommand(upstreamCmd)
 
-	p := proxy.NewStdioProxy(upstream, agent, engine, validator, limiter, auditor, forwarder, logger)
+	p := proxy.NewStdioProxy(upstream, agent, engine, validator, limiter, auditor, forwarder, logger).
+		WithApprover(buildApprover(logger))
 	if err := p.Run(); err != nil {
 		logger.Fatalf("proxy error: %v", err)
 	}
