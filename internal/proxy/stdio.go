@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/nocktechnologies/nockguard/internal/approval"
@@ -84,6 +85,13 @@ func isEnforcement(decision string) bool {
 func (p *StdioProxy) Run() error {
 	cmd := exec.Command(p.upstream[0], p.upstream[1:]...)
 	cmd.Stderr = os.Stderr
+	// Isolate the audit signing seed from the policed agent. The upstream child
+	// would otherwise inherit the proxy's full environment — including the
+	// configured Ed25519/HMAC signing variable — and could read it to forge the
+	// audit trail, defeating non-repudiation against the very party it targets.
+	// The key is already parsed into the Auditor at startup, so the child never
+	// needs it.
+	cmd.Env = sanitizedEnv(p.engine.SigningKeyEnvNames())
 
 	upstreamIn, err := cmd.StdinPipe()
 	if err != nil {
@@ -299,6 +307,33 @@ func limitLabel(reason string) string {
 	default:
 		return reason
 	}
+}
+
+// sanitizedEnv returns the proxy's environment with the named variables removed.
+// Used to strip the audit signing seed before spawning the upstream child so the
+// policed agent cannot read it. Variables not in strip are inherited unchanged;
+// an empty strip list returns the full environment.
+func sanitizedEnv(strip []string) []string {
+	if len(strip) == 0 {
+		return os.Environ()
+	}
+	stripSet := make(map[string]struct{}, len(strip))
+	for _, name := range strip {
+		stripSet[name] = struct{}{}
+	}
+	parent := os.Environ()
+	env := make([]string, 0, len(parent))
+	for _, kv := range parent {
+		name := kv
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			name = kv[:i]
+		}
+		if _, drop := stripSet[name]; drop {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return env
 }
 
 func extractToolName(params json.RawMessage) string {
