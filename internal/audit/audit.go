@@ -119,6 +119,15 @@ func New(path string, opts ...Option) (*Auditor, error) {
 		return nil, err
 	}
 	if a.signing() {
+		// Verify the existing chain BEFORE seeding prevSig from its tail. Without
+		// this, a trail tampered or truncated mid-chain during downtime would be
+		// silently accepted: the next append chains onto the broken tail, baking
+		// the tamper in as the new baseline so the trail verifies clean from that
+		// point on forever. Refuse to open instead — turn a silent permanent
+		// corruption into a loud startup failure.
+		if err := a.verifyExisting(path); err != nil {
+			return nil, fmt.Errorf("audit trail %s failed verification on open — refusing to append onto a tampered or broken chain: %w", path, err)
+		}
 		last, err := lastSig(path)
 		if err != nil {
 			return nil, err
@@ -131,6 +140,30 @@ func New(path string, opts ...Option) (*Auditor, error) {
 	}
 	a.f = f
 	return a, nil
+}
+
+// verifyExisting walks the existing trail and confirms the hash chain is intact
+// before the auditor seeds its prevSig from the tail and starts appending. A
+// missing file (nothing recorded yet) and unsigned mode are both no-ops. For
+// Ed25519 the public key is derived from the configured private key, so the same
+// verification the external `audit verify` command runs is enforced at open time.
+func (a *Auditor) verifyExisting(path string) error {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if a.edPriv != nil {
+		pub, ok := a.edPriv.Public().(ed25519.PublicKey)
+		if !ok {
+			return fmt.Errorf("ed25519 private key has no usable public key")
+		}
+		_, err := VerifyEd25519(path, pub)
+		return err
+	}
+	_, err := Verify(path, a.key)
+	return err
 }
 
 // Enabled reports whether the Auditor is writing to a file. Nil-safe, so callers
