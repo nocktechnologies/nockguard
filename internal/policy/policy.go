@@ -30,6 +30,13 @@ type AuditPolicy struct {
 	// the trail tamper-evident (Phase 4 3/3). Empty = unsigned. The key is never
 	// stored in the policy file; an enabled value that does not resolve fails loud.
 	SignKeyEnv string `yaml:"sign_key_env"`
+	// SignEd25519KeyEnv names the environment variable holding a hex-encoded
+	// Ed25519 private key (32-byte seed or 64-byte key) for NON-REPUDIABLE signing.
+	// When set it takes precedence over SignKeyEnv: the trail is verified with the
+	// corresponding PUBLIC key, which cannot forge entries, so a passing
+	// verification proves who signed. Empty = fall back to HMAC or unsigned. The
+	// key is never stored in the policy file; an unresolved value fails loud.
+	SignEd25519KeyEnv string `yaml:"sign_ed25519_key_env"`
 	// Forward optionally streams enforcement decisions to the NockCC ops-log.
 	Forward *ForwardPolicy `yaml:"forward"`
 }
@@ -209,7 +216,18 @@ func (e *Engine) Auditor() (*audit.Auditor, error) {
 		path = filepath.Join(home, DefaultAuditPath)
 	}
 	var opts []audit.Option
-	if env := e.config.Audit.SignKeyEnv; env != "" {
+	// Ed25519 (non-repudiable) takes precedence over HMAC when both are configured.
+	if env := e.config.Audit.SignEd25519KeyEnv; env != "" {
+		raw := os.Getenv(env)
+		if raw == "" {
+			return nil, fmt.Errorf("audit.sign_ed25519_key_env %q is not set in the environment", env)
+		}
+		priv, err := audit.PrivateKeyFromHex(raw)
+		if err != nil {
+			return nil, fmt.Errorf("audit.sign_ed25519_key_env %q: %w", env, err)
+		}
+		opts = append(opts, audit.WithEd25519Key(priv))
+	} else if env := e.config.Audit.SignKeyEnv; env != "" {
 		key := os.Getenv(env)
 		if key == "" {
 			return nil, fmt.Errorf("audit.sign_key_env %q is not set in the environment", env)
