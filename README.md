@@ -147,6 +147,34 @@ Forwarding is **asynchronous and fail-open**: events post on a background worker
 
 Audit entries can be signed with an HMAC hash-chain — each entry's signature covers its own content plus the previous entry's signature, so any insertion, deletion, or edit anywhere in the trail breaks the chain from that point forward. Signing is opt-in (provide a key); without one, the trail behaves exactly as the unsigned JSONL above. This closes Phase 4.
 
+```bash
+nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY   # exit 0 = intact, 2 = tampered
+```
+
+### Non-repudiation (Ed25519)
+
+HMAC is *tamper-evident* but symmetric: whoever verifies the trail holds the same key that produced the signatures, and could therefore forge them. **Ed25519** signing closes that gap — it is asymmetric. A private key signs; the trail is verified with the corresponding **public key**, which *cannot* produce signatures. So a passing verification is proof that the holder of the private key signed every entry — the verifier never has the power to forge one. That is the difference between "this trail wasn't edited" and "this trail is *non-repudiable*": court-credible, and aligned with the emerging [IETF agent-audit-trail](https://datatracker.ietf.org) direction (hash-chain + asymmetric signatures).
+
+Generate a keypair, then point the policy at the private seed via an env var:
+
+```bash
+nockguard keygen
+# NOCKGUARD_AUDIT_ED25519_KEY=<private seed — secret, never commit>
+# NOCKGUARD_AUDIT_ED25519_PUB=<public key — share with verifiers>
+```
+
+```yaml
+audit:
+  enabled: true
+  sign_ed25519_key_env: NOCKGUARD_AUDIT_ED25519_KEY   # hex 32-byte seed or 64-byte key; read from env, never stored in the policy file
+```
+
+`sign_ed25519_key_env` takes precedence over `sign_key_env` when both are set. Verify the trail with only the public key — the signer's secret is never needed to audit it:
+
+```bash
+nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB   # exit 0 = intact + authentic, 2 = tampered or wrong signer
+```
+
 ## Live Wall
 
 The audit trail is a file; the **Live Wall** makes it something you watch. `nockguard-wall` tails the audit JSONL and streams each policy decision to a local browser dashboard in real time, color-coded by outcome — every tool call an agent attempted and exactly what the firewall did about it. It is the visible layer over NockGuard's invisible enforcement: visceral proof of the accountability moat.
@@ -181,6 +209,8 @@ Same brand, same tap, independent products. Use one or both.
 - [x] Phase 2: Input validation (SQLi / path-traversal / secrets rule sets + custom regex on tool-call arguments)
 - [x] Phase 3: Rate limiting and spend caps (per-agent sliding-window rate limit + hard cumulative session cap)
 - [x] Phase 4: Audit trail — structured JSONL trail, NockCC ops-log forwarding, and tamper-evident HMAC hash-chain signing
+- [x] Phase 4+: Non-repudiable audit — Ed25519 asymmetric signing (private-key signs, public-key verifies), `keygen`, standards-aligned
+- [x] Phase 5: Interactive approval gates — human-in-the-loop hold on consequential tools (dedicated Telegram bot, fail-safe deny)
 - [x] Live Wall: real-time local dashboard streaming every policy decision from the audit trail
 
 ## License

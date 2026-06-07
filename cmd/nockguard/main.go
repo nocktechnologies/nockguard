@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -53,6 +56,11 @@ func main() {
 
 	if args[0] == "audit" {
 		runAudit(args[1:])
+		return
+	}
+
+	if args[0] == "keygen" {
+		runKeygen()
 		return
 	}
 
@@ -149,14 +157,17 @@ func parseCommand(cmd string) []string {
 }
 
 // runAudit handles `nockguard audit verify` — it walks the signed audit trail and
-// checks the HMAC hash chain end to end, proving no entry was edited, deleted,
-// reordered, or inserted. Exit 0 = intact, 2 = tampering detected, 1 = usage/setup.
+// checks the hash chain end to end, proving no entry was edited, deleted,
+// reordered, or inserted. With --key-env it checks the symmetric HMAC chain
+// (tamper-evident); with --ed25519-pub-env it checks the Ed25519 chain using only
+// the public key (non-repudiable — proves WHO signed). Exit 0 = intact, 2 =
+// tampering detected, 1 = usage/setup.
 func runAudit(args []string) {
 	if len(args) == 0 || args[0] != "verify" {
-		fmt.Fprintln(os.Stderr, "usage: nockguard audit verify --key-env <ENV> [--audit <path>]")
+		fmt.Fprintln(os.Stderr, "usage: nockguard audit verify (--key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>]")
 		os.Exit(1)
 	}
-	var auditPath, keyEnv string
+	var auditPath, keyEnv, pubEnv string
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--audit":
@@ -169,22 +180,47 @@ func runAudit(args []string) {
 				i++
 				keyEnv = args[i]
 			}
+		case "--ed25519-pub-env":
+			if i+1 < len(args) {
+				i++
+				pubEnv = args[i]
+			}
 		}
 	}
 	if auditPath == "" {
 		home, _ := os.UserHomeDir()
 		auditPath = filepath.Join(home, policy.DefaultAuditPath)
 	}
-	if keyEnv == "" {
-		fmt.Fprintln(os.Stderr, "error: --key-env <ENV> is required (the env var holding the signing key)")
+	if (keyEnv == "") == (pubEnv == "") {
+		fmt.Fprintln(os.Stderr, "error: provide exactly one of --key-env <ENV> (HMAC) or --ed25519-pub-env <ENV> (Ed25519 public key)")
 		os.Exit(1)
 	}
-	key := os.Getenv(keyEnv)
-	if key == "" {
-		fmt.Fprintf(os.Stderr, "error: %s is not set in the environment\n", keyEnv)
-		os.Exit(1)
+
+	var (
+		n   int
+		err error
+	)
+	if pubEnv != "" {
+		pubHex := os.Getenv(pubEnv)
+		if pubHex == "" {
+			fmt.Fprintf(os.Stderr, "error: %s is not set in the environment\n", pubEnv)
+			os.Exit(1)
+		}
+		pub, perr := audit.PublicKeyFromHex(pubHex)
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", perr)
+			os.Exit(1)
+		}
+		n, err = audit.VerifyEd25519(auditPath, pub)
+	} else {
+		key := os.Getenv(keyEnv)
+		if key == "" {
+			fmt.Fprintf(os.Stderr, "error: %s is not set in the environment\n", keyEnv)
+			os.Exit(1)
+		}
+		n, err = audit.Verify(auditPath, []byte(key))
 	}
-	n, err := audit.Verify(auditPath, []byte(key))
+
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "TAMPER DETECTED — %s (verified %d before the break): %v\n", auditPath, n, err)
 		os.Exit(2)
@@ -192,22 +228,43 @@ func runAudit(args []string) {
 	fmt.Printf("OK — %d entries verified, hash chain intact: %s\n", n, auditPath)
 }
 
+// runKeygen generates a fresh Ed25519 keypair for non-repudiable audit signing.
+// The private SEED is the secret the proxy signs with — set it in the signing env
+// (audit.sign_ed25519_key_env), keep it out of version control. The PUBLIC key is
+// what verifiers use; it cannot produce signatures, so it can be shared freely.
+func runKeygen() {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "keygen failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("# Ed25519 audit signing keypair\n")
+	fmt.Printf("# PRIVATE seed — secret. Set as the signing env (sign_ed25519_key_env); never commit.\n")
+	fmt.Printf("NOCKGUARD_AUDIT_ED25519_KEY=%s\n\n", hex.EncodeToString(priv.Seed()))
+	fmt.Printf("# PUBLIC key — share with verifiers. Cannot forge entries.\n")
+	fmt.Printf("NOCKGUARD_AUDIT_ED25519_PUB=%s\n", hex.EncodeToString(pub))
+}
+
 func printUsage() {
 	fmt.Fprintln(os.Stderr, `nockguard — MCP firewall for AI agent fleets
 
 Usage:
   nockguard proxy --upstream <command> --agent <name> [--policy <path>]
-  nockguard audit verify --key-env <ENV> [--audit <path>]
+  nockguard audit verify (--key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>]
+  nockguard keygen
   nockguard version
 
 Options:
-  --upstream  MCP server command to proxy (required)
-  --agent     Agent identity for policy lookup (required)
-  --policy    Path to policy YAML (default: ~/.nockguard/policy.yaml)
-  --key-env   Env var holding the audit signing key (for: audit verify)
-  --audit     Path to the audit JSONL (default: ~/.nockguard/logs/audit.jsonl)
+  --upstream         MCP server command to proxy (required)
+  --agent            Agent identity for policy lookup (required)
+  --policy           Path to policy YAML (default: ~/.nockguard/policy.yaml)
+  --key-env          Env var holding the HMAC signing key (tamper-evident verify)
+  --ed25519-pub-env  Env var holding the hex Ed25519 public key (non-repudiable verify)
+  --audit            Path to the audit JSONL (default: ~/.nockguard/logs/audit.jsonl)
 
 Examples:
   nockguard proxy --upstream "npx mcp-server-nockcc" --agent kit --policy policy.yaml
-  nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY`)
+  nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY
+  nockguard keygen  # generate an Ed25519 keypair for non-repudiable signing
+  nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB`)
 }

@@ -28,6 +28,7 @@ package audit
 import (
 	"bufio"
 	"bytes"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -35,6 +36,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -59,8 +61,9 @@ type Auditor struct {
 
 	mu      sync.Mutex
 	f       *os.File
-	key     []byte // HMAC signing key; empty = unsigned trail
-	prevSig string // last written signature, seeded from the file on open
+	key     []byte             // HMAC signing key; empty = unsigned trail
+	edPriv  ed25519.PrivateKey // Ed25519 signing key; non-nil = non-repudiable trail (takes precedence over key)
+	prevSig string             // last written signature, seeded from the file on open
 }
 
 // Option configures an Auditor at construction.
@@ -71,6 +74,33 @@ type Option func(*Auditor)
 // never persisted by this package.
 func WithSigningKey(key []byte) Option {
 	return func(a *Auditor) { a.key = key }
+}
+
+// WithEd25519Key enables non-repudiable hash-chain signing with the given
+// Ed25519 private key. Unlike the symmetric HMAC mode — where the verifier holds
+// the same key that produced the signatures and could therefore forge them —
+// Ed25519 is asymmetric: only the holder of this private key can sign, and the
+// trail is verified with the corresponding PUBLIC key (see VerifyEd25519), which
+// cannot produce signatures. That makes the trail non-repudiable: a verifier
+// proves WHO signed without ever holding the signing key. Takes precedence over
+// WithSigningKey if both are supplied. The key is supplied by the caller (read
+// from an environment variable upstream), never persisted by this package.
+func WithEd25519Key(priv ed25519.PrivateKey) Option {
+	return func(a *Auditor) { a.edPriv = priv }
+}
+
+// signing reports whether any signing mode is active.
+func (a *Auditor) signing() bool {
+	return len(a.key) > 0 || a.edPriv != nil
+}
+
+// sign produces the hex chain signature for canonical bytes linked to prev,
+// using whichever signing mode is configured (Ed25519 takes precedence).
+func (a *Auditor) sign(canonical []byte, prev string) string {
+	if a.edPriv != nil {
+		return signLineEd25519(a.edPriv, canonical, prev)
+	}
+	return signLine(a.key, canonical, prev)
 }
 
 // New opens (creating parent dirs as needed) the audit file at path in append
@@ -88,7 +118,7 @@ func New(path string, opts ...Option) (*Auditor, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	if len(a.key) > 0 {
+	if a.signing() {
 		last, err := lastSig(path)
 		if err != nil {
 			return nil, err
@@ -123,12 +153,12 @@ func (a *Auditor) Record(ev Event) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if len(a.key) > 0 {
+	if a.signing() {
 		canonical, err := json.Marshal(ev)
 		if err != nil {
 			return err
 		}
-		sig := signLine(a.key, canonical, a.prevSig)
+		sig := a.sign(canonical, a.prevSig)
 		ev.Sig = sig
 		a.prevSig = sig
 	}
@@ -163,6 +193,58 @@ func signLine(key, canonical []byte, prev string) string {
 	m.Write([]byte{'\n'})
 	m.Write([]byte(prev))
 	return hex.EncodeToString(m.Sum(nil))
+}
+
+// chainedMessage assembles the exact bytes that get signed for an entry: its
+// canonical content, an unambiguous newline separator (canonical JSON never
+// contains a raw newline), and the previous signature. Shared by the HMAC and
+// Ed25519 paths so the two modes chain identically.
+func chainedMessage(canonical []byte, prev string) []byte {
+	msg := make([]byte, 0, len(canonical)+1+len(prev))
+	msg = append(msg, canonical...)
+	msg = append(msg, '\n')
+	msg = append(msg, prev...)
+	return msg
+}
+
+// signLineEd25519 computes the hex Ed25519 signature of an entry's canonical
+// bytes chained to the previous signature. The signature is verifiable with the
+// corresponding public key alone (see VerifyEd25519) — the property that makes
+// the trail non-repudiable.
+func signLineEd25519(priv ed25519.PrivateKey, canonical []byte, prev string) string {
+	return hex.EncodeToString(ed25519.Sign(priv, chainedMessage(canonical, prev)))
+}
+
+// PrivateKeyFromHex decodes a hex-encoded Ed25519 private key — accepting either
+// a 32-byte seed (the compact form to store in an env var) or a full 64-byte
+// private key — into an ed25519.PrivateKey. Used to load the signing key from the
+// environment without ever writing it to the policy file.
+func PrivateKeyFromHex(s string) (ed25519.PrivateKey, error) {
+	b, err := hex.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		return nil, fmt.Errorf("ed25519 private key is not valid hex: %w", err)
+	}
+	switch len(b) {
+	case ed25519.SeedSize: // 32-byte seed
+		return ed25519.NewKeyFromSeed(b), nil
+	case ed25519.PrivateKeySize: // 64-byte full key
+		return ed25519.PrivateKey(b), nil
+	default:
+		return nil, fmt.Errorf("ed25519 private key must be %d-byte seed or %d-byte key (got %d bytes)", ed25519.SeedSize, ed25519.PrivateKeySize, len(b))
+	}
+}
+
+// PublicKeyFromHex decodes a 32-byte hex-encoded Ed25519 public key — the value a
+// verifier needs (and the only value it needs) to check a non-repudiable trail.
+func PublicKeyFromHex(s string) (ed25519.PublicKey, error) {
+	b, err := hex.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		return nil, fmt.Errorf("ed25519 public key is not valid hex: %w", err)
+	}
+	if len(b) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("ed25519 public key must be %d bytes (got %d)", ed25519.PublicKeySize, len(b))
+	}
+	return ed25519.PublicKey(b), nil
 }
 
 // lastSig returns the signature of the final non-empty line in the file, or ""
@@ -227,6 +309,57 @@ func Verify(path string, key []byte) (int, error) {
 		}
 		want := signLine(key, canonical, prev)
 		if !hmac.Equal([]byte(got), []byte(want)) {
+			return n, fmt.Errorf("line %d: signature mismatch — trail was tampered, deleted from, reordered, or signed with a different key", n)
+		}
+		prev = got
+	}
+	if err := sc.Err(); err != nil {
+		return n, err
+	}
+	return n, nil
+}
+
+// VerifyEd25519 walks an Ed25519-signed audit file and checks the hash chain end
+// to end using ONLY the public key. It returns the number of entries verified,
+// or the 1-based line number and an error at the first entry whose signature
+// does not verify — which happens if any entry was edited, deleted, inserted, or
+// reordered, or if the trail was signed by a different private key. Because the
+// public key cannot produce signatures, a passing verification is proof the
+// holder of the matching private key signed every entry: non-repudiation.
+func VerifyEd25519(path string, pub ed25519.PublicKey) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	prev := ""
+	n := 0
+	for sc.Scan() {
+		raw := sc.Bytes()
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
+		n++
+		var ev Event
+		if err := json.Unmarshal(raw, &ev); err != nil {
+			return n, fmt.Errorf("line %d: invalid json: %w", n, err)
+		}
+		if ev.Sig == "" {
+			return n, fmt.Errorf("line %d: entry is not signed", n)
+		}
+		sig, err := hex.DecodeString(ev.Sig)
+		if err != nil {
+			return n, fmt.Errorf("line %d: signature is not valid hex: %w", n, err)
+		}
+		got := ev.Sig
+		ev.Sig = ""
+		canonical, err := json.Marshal(ev)
+		if err != nil {
+			return n, err
+		}
+		if !ed25519.Verify(pub, chainedMessage(canonical, prev), sig) {
 			return n, fmt.Errorf("line %d: signature mismatch — trail was tampered, deleted from, reordered, or signed with a different key", n)
 		}
 		prev = got
