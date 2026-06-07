@@ -30,6 +30,22 @@ type StdioProxy struct {
 	forwarder *forward.Forwarder
 	approver  approval.Approver // Phase 5; nil = no approval gate (Phase 1-4 behavior)
 	logger    *log.Logger
+
+	// agentMu serializes ALL writes to the agent-facing channel (os.Stdout).
+	// agentToUpstream (error/reject responses) and upstreamToAgent (upstream
+	// traffic) run in separate goroutines and both write there; without this lock
+	// their JSON-RPC lines could interleave and corrupt the stream.
+	agentMu sync.Mutex
+}
+
+// writeAgentLine writes one newline-terminated line to the agent-facing channel
+// under agentMu, so the two proxy goroutines never interleave output on it. w is
+// the agent writer (os.Stdout in production; injectable for tests).
+func (p *StdioProxy) writeAgentLine(w io.Writer, line []byte) error {
+	p.agentMu.Lock()
+	defer p.agentMu.Unlock()
+	_, err := fmt.Fprintf(w, "%s\n", line)
+	return err
 }
 
 // WithApprover wires the Phase 5 interactive approval gate. nil (the default)
@@ -159,7 +175,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			p.logger.Printf("REJECT agent=%s reason=undecodable-or-batch", p.agent)
 			errResp := jsonrpc.ErrorResponse(json.RawMessage("null"), -32700,
 				"nockguard: rejected — only single well-formed JSON-RPC objects are accepted (batch arrays are not gated)")
-			if _, writeErr := fmt.Fprintf(os.Stdout, "%s\n", errResp); writeErr != nil {
+			if writeErr := p.writeAgentLine(os.Stdout, errResp); writeErr != nil {
 				return writeErr
 			}
 			continue
@@ -169,7 +185,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			p.logger.Printf("REJECT agent=%s reason=canonical-marshal-failed", p.agent)
 			errResp := jsonrpc.ErrorResponse(json.RawMessage("null"), -32603,
 				"nockguard: rejected — message could not be canonicalized")
-			if _, writeErr := fmt.Fprintf(os.Stdout, "%s\n", errResp); writeErr != nil {
+			if writeErr := p.writeAgentLine(os.Stdout, errResp); writeErr != nil {
 				return writeErr
 			}
 			continue
@@ -181,7 +197,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			p.logger.Printf("REJECT agent=%s reason=undecodable-after-canonicalize", p.agent)
 			errResp := jsonrpc.ErrorResponse(json.RawMessage("null"), -32700,
 				"nockguard: rejected — message is not a well-formed JSON-RPC object")
-			if _, writeErr := fmt.Fprintf(os.Stdout, "%s\n", errResp); writeErr != nil {
+			if writeErr := p.writeAgentLine(os.Stdout, errResp); writeErr != nil {
 				return writeErr
 			}
 			continue
@@ -313,8 +329,7 @@ func (p *StdioProxy) rejectToAgent(id json.RawMessage, code int, message string)
 		return nil
 	}
 	errResp := jsonrpc.ErrorResponse(id, code, message)
-	_, err := fmt.Fprintf(os.Stdout, "%s\n", errResp)
-	return err
+	return p.writeAgentLine(os.Stdout, errResp)
 }
 
 func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map) error {
@@ -324,7 +339,7 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 		line := scanner.Bytes()
 		msg, err := jsonrpc.Decode(line)
 		if err != nil {
-			if _, writeErr := fmt.Fprintf(w, "%s\n", line); writeErr != nil {
+			if writeErr := p.writeAgentLine(w, line); writeErr != nil {
 				return writeErr
 			}
 			continue
@@ -339,7 +354,7 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 			}
 		}
 
-		if _, writeErr := fmt.Fprintf(w, "%s\n", line); writeErr != nil {
+		if writeErr := p.writeAgentLine(w, line); writeErr != nil {
 			return writeErr
 		}
 	}
