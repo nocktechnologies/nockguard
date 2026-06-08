@@ -64,6 +64,11 @@ func main() {
 		return
 	}
 
+	if args[0] == "init" {
+		runInit(args[1:])
+		return
+	}
+
 	if args[0] != "proxy" {
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
 		printUsage()
@@ -252,10 +257,48 @@ func runKeygen() {
 	fmt.Printf("NOCKGUARD_AUDIT_ED25519_PUB=%s\n", hex.EncodeToString(pub))
 }
 
+// runInit handles `nockguard init` — it scaffolds a sensible, default-deny
+// starter policy so a new user is guarded in seconds instead of hand-writing
+// YAML. It never overwrites an existing policy without --force.
+func runInit(args []string) {
+	var policyPath string
+	force := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--policy":
+			if i+1 < len(args) {
+				i++
+				policyPath = args[i]
+			}
+		case "--force":
+			force = true
+		}
+	}
+	if policyPath == "" {
+		home, _ := os.UserHomeDir()
+		policyPath = filepath.Join(home, ".nockguard", "policy.yaml")
+	}
+
+	written, err := policy.WriteStarter(policyPath, force)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if !written {
+		return
+	}
+	fmt.Printf("Wrote starter policy: %s\n\n", policyPath)
+	fmt.Println("Next:")
+	fmt.Printf("  1. Edit %s — rename the agent and set its allow/deny lists.\n", policyPath)
+	fmt.Println("  2. Run the firewall in front of your MCP server:")
+	fmt.Printf("     nockguard proxy --upstream \"<your mcp server cmd>\" --agent <name> --policy %s\n", policyPath)
+}
+
 func printUsage() {
 	fmt.Fprintln(os.Stderr, `nockguard — MCP firewall for AI agent fleets
 
 Usage:
+  nockguard init [--policy <path>] [--force]
   nockguard proxy --upstream <command> --agent <name> [--policy <path>]
   nockguard audit verify (--key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>]
   nockguard keygen
@@ -265,11 +308,13 @@ Options:
   --upstream         MCP server command to proxy (required)
   --agent            Agent identity for policy lookup (required)
   --policy           Path to policy YAML (default: ~/.nockguard/policy.yaml)
+  --force            Overwrite an existing policy (for: init)
   --key-env          Env var holding the HMAC signing key (tamper-evident verify)
   --ed25519-pub-env  Env var holding the hex Ed25519 public key (non-repudiable verify)
   --audit            Path to the audit JSONL (default: ~/.nockguard/logs/audit.jsonl)
 
 Examples:
+  nockguard init                                        # scaffold a default-deny starter policy
   nockguard proxy --upstream "npx mcp-server-nockcc" --agent kit --policy policy.yaml
   nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY
   nockguard keygen  # generate an Ed25519 keypair for non-repudiable signing
