@@ -226,9 +226,19 @@ func runAudit(args []string) {
 		}
 	}
 
-	// --agent is mutually exclusive with --key-env and --ed25519-pub-env.
-	if agentName != "" && (keyEnv != "" || pubEnv != "") {
-		fmt.Fprintln(os.Stderr, "error: --agent cannot be combined with --key-env or --ed25519-pub-env; use one mode")
+	// Exactly one verification mode must be specified.
+	modeCount := 0
+	if agentName != "" {
+		modeCount++
+	}
+	if keyEnv != "" {
+		modeCount++
+	}
+	if pubEnv != "" {
+		modeCount++
+	}
+	if modeCount != 1 {
+		fmt.Fprintln(os.Stderr, "error: provide exactly one of --agent <name>, --key-env <ENV>, or --ed25519-pub-env <ENV>")
 		os.Exit(1)
 	}
 

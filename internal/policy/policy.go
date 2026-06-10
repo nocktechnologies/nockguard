@@ -311,10 +311,18 @@ func AgentPubKeyEnvName(agent string) string {
 // path by inserting the agent name before the filename:
 //
 //	~/.nockguard/logs/audit.jsonl, "kit" → ~/.nockguard/logs/kit.audit.jsonl
+//
+// Defense-in-depth: even if the caller skips ValidAgentName, filepath.Base
+// strips any leading path components from the agent string so it cannot
+// traverse outside dir.
 func AgentAuditPath(basePath, agent string) string {
 	dir := filepath.Dir(basePath)
 	base := filepath.Base(basePath)
-	return filepath.Join(dir, agent+"."+base)
+	safeAgent := filepath.Base(filepath.Clean(agent))
+	if safeAgent == "." || safeAgent == ".." || safeAgent == "" {
+		safeAgent = "unknown-agent"
+	}
+	return filepath.Join(dir, safeAgent+"."+base)
 }
 
 // AuditorFor builds an Auditor for a specific agent. When the agent has its own
