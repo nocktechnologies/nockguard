@@ -274,6 +274,22 @@ func (e *Engine) Auditor() (*audit.Auditor, error) {
 	return audit.New(path, opts...)
 }
 
+// ValidAgentName reports whether an agent name is safe to embed in environment
+// variable names and file-system paths. Only alphanumerics, hyphens, and dots
+// are accepted — this matches every real fleet agent name (kit, mira-nockos,
+// mar-nockos, …) and excludes path separators or traversal sequences.
+func ValidAgentName(agent string) bool {
+	if agent == "" {
+		return false
+	}
+	for _, r := range agent {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '.') {
+			return false
+		}
+	}
+	return true
+}
+
 // AgentKeyEnvName returns the canonical environment variable name for an
 // agent's Ed25519 private key seed. Hyphens and dots in the agent name are
 // replaced with underscores and the result is uppercased:
@@ -303,9 +319,16 @@ func AgentAuditPath(basePath, agent string) string {
 
 // AuditorFor builds an Auditor for a specific agent. When the agent has its own
 // Ed25519 key set via the env var returned by AgentKeyEnvName, that key is used
-// and the trail is written to an agent-specific path (agentAuditPath). When no
+// and the trail is written to an agent-specific path (AgentAuditPath). When no
 // per-agent key is set, AuditorFor falls back to the policy-wide Auditor.
 func (e *Engine) AuditorFor(agent string) (*audit.Auditor, error) {
+	if !ValidAgentName(agent) {
+		return nil, fmt.Errorf("invalid agent name %q: only alphanumerics, hyphens, and dots are allowed", agent)
+	}
+	// Check audit enabled first — no point parsing a key we won't use.
+	if e.config.Audit == nil || !e.config.Audit.Enabled {
+		return audit.New("")
+	}
 	envName := AgentKeyEnvName(agent)
 	raw := os.Getenv(envName)
 	if raw == "" {
@@ -314,9 +337,6 @@ func (e *Engine) AuditorFor(agent string) (*audit.Auditor, error) {
 	priv, err := audit.PrivateKeyFromHex(raw)
 	if err != nil {
 		return nil, fmt.Errorf("per-agent key %q: %w", envName, err)
-	}
-	if e.config.Audit == nil || !e.config.Audit.Enabled {
-		return audit.New("")
 	}
 	path := e.config.Audit.Path
 	if path == "" {

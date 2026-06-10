@@ -231,3 +231,40 @@ func TestAgentKeyEnvNameNormalization(t *testing.T) {
 		t.Errorf("env name is not uppercase: %q", got)
 	}
 }
+
+// TestValidAgentName verifies the name allowlist: alphanumerics, hyphens, dots
+// accepted; slashes, dots-only traversal, empty, and control characters rejected.
+func TestValidAgentName(t *testing.T) {
+	valid := []string{"kit", "mira-nockos", "mar-nockos", "my.agent", "Agent1"}
+	for _, name := range valid {
+		if !ValidAgentName(name) {
+			t.Errorf("ValidAgentName(%q) = false, want true", name)
+		}
+	}
+	invalid := []string{"", "../etc", "../../foo", "kit/bar", "a b", "kit\x00", "foo\\bar"}
+	for _, name := range invalid {
+		if ValidAgentName(name) {
+			t.Errorf("ValidAgentName(%q) = true, want false", name)
+		}
+	}
+}
+
+// TestAuditorForInvalidAgentName verifies AuditorFor rejects a path-traversal agent name.
+func TestAuditorForInvalidAgentName(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := writePolicy(t, `
+audit:
+  enabled: true
+  path: `+auditPath+`
+agents:
+  kit:
+    allow: ["*"]
+`)
+	eng, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.AuditorFor("../../../etc/passwd"); err == nil {
+		t.Error("AuditorFor with path-traversal agent name should return error")
+	}
+}

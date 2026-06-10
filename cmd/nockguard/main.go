@@ -189,35 +189,55 @@ func runAudit(args []string) {
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--audit":
-			if i+1 < len(args) {
-				i++
-				auditPath = args[i]
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "error: --audit requires a value")
+				os.Exit(1)
 			}
+			i++
+			auditPath = args[i]
 		case "--audit-dir":
-			if i+1 < len(args) {
-				i++
-				auditDir = args[i]
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "error: --audit-dir requires a value")
+				os.Exit(1)
 			}
+			i++
+			auditDir = args[i]
 		case "--agent":
-			if i+1 < len(args) {
-				i++
-				agentName = args[i]
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "error: --agent requires a value")
+				os.Exit(1)
 			}
+			i++
+			agentName = args[i]
 		case "--key-env":
-			if i+1 < len(args) {
-				i++
-				keyEnv = args[i]
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "error: --key-env requires a value")
+				os.Exit(1)
 			}
+			i++
+			keyEnv = args[i]
 		case "--ed25519-pub-env":
-			if i+1 < len(args) {
-				i++
-				pubEnv = args[i]
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "error: --ed25519-pub-env requires a value")
+				os.Exit(1)
 			}
+			i++
+			pubEnv = args[i]
 		}
+	}
+
+	// --agent is mutually exclusive with --key-env and --ed25519-pub-env.
+	if agentName != "" && (keyEnv != "" || pubEnv != "") {
+		fmt.Fprintln(os.Stderr, "error: --agent cannot be combined with --key-env or --ed25519-pub-env; use one mode")
+		os.Exit(1)
 	}
 
 	// Per-agent mode: derive path and pub-key env from agent name.
 	if agentName != "" {
+		if !policy.ValidAgentName(agentName) {
+			fmt.Fprintf(os.Stderr, "error: invalid agent name %q: only alphanumerics, hyphens, and dots are allowed\n", agentName)
+			os.Exit(1)
+		}
 		baseDir := auditDir
 		if baseDir == "" {
 			home, _ := os.UserHomeDir()
@@ -277,9 +297,17 @@ func runAudit(args []string) {
 func runKeygen(args []string) {
 	var agentName string
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--agent" && i+1 < len(args) {
+		if args[i] == "--agent" {
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "error: --agent requires a value")
+				os.Exit(1)
+			}
 			i++
 			agentName = args[i]
+			if !policy.ValidAgentName(agentName) {
+				fmt.Fprintf(os.Stderr, "error: invalid agent name %q: only alphanumerics, hyphens, and dots are allowed\n", agentName)
+				os.Exit(1)
+			}
 		}
 	}
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
