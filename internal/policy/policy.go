@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -293,7 +294,15 @@ func (e *Engine) Forwarder() (*forward.Forwarder, error) {
 			return nil, fmt.Errorf("audit.forward.api_key_env %q is not set in the environment", fc.APIKeyEnv)
 		}
 	}
-	return forward.New(forward.Config{BaseURL: fc.URL, APIKey: apiKey}), nil
+	return forward.New(forward.Config{
+		BaseURL: fc.URL,
+		APIKey:  apiKey,
+		// A nil logger silently swallows every forward failure, which
+		// contradicts the fail-loud posture everywhere else in nockguard:
+		// an operator watching an empty Live Wall has no way to learn the
+		// POSTs are erroring. Surface forward errors on stderr.
+		Logger: log.New(os.Stderr, "[nockguard-forward] ", log.LstdFlags),
+	}), nil
 }
 
 func (e *Engine) FilterTools(agent string, tools []string) []string {

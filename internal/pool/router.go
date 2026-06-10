@@ -19,9 +19,9 @@ var ErrAllExhausted = errors.New("pool: all upstreams exhausted (all on cooldown
 // All methods are safe for concurrent use.
 type Router struct {
 	mu        sync.Mutex
-	upstreams []string            // ordered; determines tie-break for equal headroom
-	sessions  map[string]string   // session-id → label (sticky pins)
-	headroom  map[string]float64  // label → remaining quota (0–1; default 1.0 = unknown/full)
+	upstreams []string             // ordered; determines tie-break for equal headroom
+	sessions  map[string]string    // session-id → label (sticky pins)
+	headroom  map[string]float64   // label → remaining quota (0–1; default 1.0 = unknown/full)
 	coolUntil map[string]time.Time // label → cooldown expiry (zero = not cooling)
 	cooldown  time.Duration
 }

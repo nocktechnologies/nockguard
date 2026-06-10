@@ -7,8 +7,8 @@ import (
 )
 
 var (
-	t0       = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	cool60   = 60 * time.Second
+	t0        = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cool60    = 60 * time.Second
 	twoLabels = []string{"sub-1", "sub-2"}
 )
 
