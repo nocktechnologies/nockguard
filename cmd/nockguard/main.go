@@ -60,7 +60,7 @@ func main() {
 	}
 
 	if args[0] == "keygen" {
-		runKeygen()
+		runKeygen(args[1:])
 		return
 	}
 
@@ -139,7 +139,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	auditor, err := engine.Auditor()
+	auditor, err := engine.AuditorFor(agent)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error opening audit trail: %v\n", err)
 		os.Exit(1)
@@ -168,24 +168,40 @@ func parseCommand(cmd string) []string {
 	return strings.Fields(cmd)
 }
 
-// runAudit handles `nockguard audit verify` — it walks the signed audit trail and
-// checks the hash chain end to end, proving no entry was edited, deleted,
-// reordered, or inserted. With --key-env it checks the symmetric HMAC chain
-// (tamper-evident); with --ed25519-pub-env it checks the Ed25519 chain using only
-// the public key (non-repudiable — proves WHO signed). Exit 0 = intact, 2 =
-// tampering detected, 1 = usage/setup.
+// runAudit handles `nockguard audit verify`. Supports two modes:
+//
+//   - Per-agent: `--agent <name>` derives both the audit file path
+//     (<audit-dir>/<name>.audit.jsonl) and the public key env var
+//     (NOCKGUARD_AGENT_<NAME>_ED25519_PUB) from the agent name alone.
+//     Use --audit-dir to override the directory (default ~/.nockguard/logs).
+//
+//   - Global: `--key-env <ENV>` (HMAC) or `--ed25519-pub-env <ENV>` (Ed25519)
+//     with an optional `--audit <path>` override. Backward-compatible with
+//     the pre-Phase-5 flow.
+//
+// Exit 0 = chain intact, 2 = tampering detected, 1 = usage/setup error.
 func runAudit(args []string) {
 	if len(args) == 0 || args[0] != "verify" {
-		fmt.Fprintln(os.Stderr, "usage: nockguard audit verify (--key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>]")
+		fmt.Fprintln(os.Stderr, "usage: nockguard audit verify (--agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]")
 		os.Exit(1)
 	}
-	var auditPath, keyEnv, pubEnv string
+	var auditPath, auditDir, agentName, keyEnv, pubEnv string
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--audit":
 			if i+1 < len(args) {
 				i++
 				auditPath = args[i]
+			}
+		case "--audit-dir":
+			if i+1 < len(args) {
+				i++
+				auditDir = args[i]
+			}
+		case "--agent":
+			if i+1 < len(args) {
+				i++
+				agentName = args[i]
 			}
 		case "--key-env":
 			if i+1 < len(args) {
@@ -199,12 +215,26 @@ func runAudit(args []string) {
 			}
 		}
 	}
+
+	// Per-agent mode: derive path and pub-key env from agent name.
+	if agentName != "" {
+		baseDir := auditDir
+		if baseDir == "" {
+			home, _ := os.UserHomeDir()
+			baseDir = filepath.Join(home, filepath.Dir(policy.DefaultAuditPath))
+		}
+		baseName := filepath.Base(policy.DefaultAuditPath)
+		basePath := filepath.Join(baseDir, baseName)
+		auditPath = policy.AgentAuditPath(basePath, agentName)
+		pubEnv = policy.AgentPubKeyEnvName(agentName)
+	}
+
 	if auditPath == "" {
 		home, _ := os.UserHomeDir()
 		auditPath = filepath.Join(home, policy.DefaultAuditPath)
 	}
 	if (keyEnv == "") == (pubEnv == "") {
-		fmt.Fprintln(os.Stderr, "error: provide exactly one of --key-env <ENV> (HMAC) or --ed25519-pub-env <ENV> (Ed25519 public key)")
+		fmt.Fprintln(os.Stderr, "error: provide --agent <name>, --key-env <ENV> (HMAC), or --ed25519-pub-env <ENV> (Ed25519 public key)")
 		os.Exit(1)
 	}
 
@@ -241,20 +271,37 @@ func runAudit(args []string) {
 }
 
 // runKeygen generates a fresh Ed25519 keypair for non-repudiable audit signing.
-// The private SEED is the secret the proxy signs with — set it in the signing env
-// (audit.sign_ed25519_key_env), keep it out of version control. The PUBLIC key is
-// what verifiers use; it cannot produce signatures, so it can be shared freely.
-func runKeygen() {
+// With --agent <name> it emits agent-namespaced variable names
+// (NOCKGUARD_AGENT_<UPPER>_ED25519_KEY / _PUB) so each agent can hold its own
+// signing identity. Without --agent it emits the legacy global variable names.
+func runKeygen(args []string) {
+	var agentName string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--agent" && i+1 < len(args) {
+			i++
+			agentName = args[i]
+		}
+	}
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "keygen failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("# Ed25519 audit signing keypair\n")
-	fmt.Printf("# PRIVATE seed — secret. Set as the signing env (sign_ed25519_key_env); never commit.\n")
-	fmt.Printf("NOCKGUARD_AUDIT_ED25519_KEY=%s\n\n", hex.EncodeToString(priv.Seed()))
-	fmt.Printf("# PUBLIC key — share with verifiers. Cannot forge entries.\n")
-	fmt.Printf("NOCKGUARD_AUDIT_ED25519_PUB=%s\n", hex.EncodeToString(pub))
+	if agentName != "" {
+		keyEnv := policy.AgentKeyEnvName(agentName)
+		pubEnv := policy.AgentPubKeyEnvName(agentName)
+		fmt.Printf("# Ed25519 keypair for agent: %s\n", agentName)
+		fmt.Printf("# PRIVATE seed — secret. Set in the proxy environment; never commit.\n")
+		fmt.Printf("%s=%s\n\n", keyEnv, hex.EncodeToString(priv.Seed()))
+		fmt.Printf("# PUBLIC key — share with verifiers. Cannot produce signatures.\n")
+		fmt.Printf("%s=%s\n", pubEnv, hex.EncodeToString(pub))
+	} else {
+		fmt.Printf("# Ed25519 audit signing keypair\n")
+		fmt.Printf("# PRIVATE seed — secret. Set as the signing env (sign_ed25519_key_env); never commit.\n")
+		fmt.Printf("NOCKGUARD_AUDIT_ED25519_KEY=%s\n\n", hex.EncodeToString(priv.Seed()))
+		fmt.Printf("# PUBLIC key — share with verifiers. Cannot forge entries.\n")
+		fmt.Printf("NOCKGUARD_AUDIT_ED25519_PUB=%s\n", hex.EncodeToString(pub))
+	}
 }
 
 // runInit handles `nockguard init` — it scaffolds a sensible, default-deny
@@ -300,23 +347,30 @@ func printUsage() {
 Usage:
   nockguard init [--policy <path>] [--force]
   nockguard proxy --upstream <command> --agent <name> [--policy <path>]
-  nockguard audit verify (--key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>]
-  nockguard keygen
+  nockguard audit verify (--agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
+  nockguard keygen [--agent <name>]
   nockguard version
 
 Options:
   --upstream         MCP server command to proxy (required)
-  --agent            Agent identity for policy lookup (required)
+  --agent            Agent identity for policy lookup / per-agent keypair flow
   --policy           Path to policy YAML (default: ~/.nockguard/policy.yaml)
   --force            Overwrite an existing policy (for: init)
   --key-env          Env var holding the HMAC signing key (tamper-evident verify)
   --ed25519-pub-env  Env var holding the hex Ed25519 public key (non-repudiable verify)
   --audit            Path to the audit JSONL (default: ~/.nockguard/logs/audit.jsonl)
+  --audit-dir        Directory holding per-agent audit files (for: audit verify --agent)
+
+Per-agent signing:
+  Each agent gets its own Ed25519 keypair. The trail is signed with the agent's
+  private key and written to <agent>.audit.jsonl, verifiable with only that
+  agent's public key — non-repudiable: proves which agent did what.
 
 Examples:
   nockguard init                                        # scaffold a default-deny starter policy
   nockguard proxy --upstream "npx mcp-server-nockcc" --agent kit --policy policy.yaml
-  nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY
-  nockguard keygen  # generate an Ed25519 keypair for non-repudiable signing
-  nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB`)
+  nockguard keygen --agent kit                          # generate per-agent keypair
+  nockguard audit verify --agent kit                    # verify kit's trail (reads NOCKGUARD_AGENT_KIT_ED25519_PUB)
+  nockguard keygen                                      # generate global keypair (legacy)
+  nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB  # verify global trail`)
 }

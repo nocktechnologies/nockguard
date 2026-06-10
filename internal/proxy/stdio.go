@@ -107,7 +107,7 @@ func (p *StdioProxy) Run() error {
 	// audit trail, defeating non-repudiation against the very party it targets.
 	// The key is already parsed into the Auditor at startup, so the child never
 	// needs it.
-	cmd.Env = sanitizedEnv(p.engine.SigningKeyEnvNames())
+	cmd.Env = sanitizedEnv(p.engine.SigningKeyEnvNamesFor(p.agent))
 
 	upstreamIn, err := cmd.StdinPipe()
 	if err != nil {
