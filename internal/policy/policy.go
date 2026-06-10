@@ -274,6 +274,102 @@ func (e *Engine) Auditor() (*audit.Auditor, error) {
 	return audit.New(path, opts...)
 }
 
+// ValidAgentName reports whether an agent name is safe to embed in environment
+// variable names and file-system paths. Only alphanumerics, hyphens, and dots
+// are accepted — this matches every real fleet agent name (kit, mira-nockos,
+// mar-nockos, …) and excludes path separators or traversal sequences.
+func ValidAgentName(agent string) bool {
+	if agent == "" {
+		return false
+	}
+	for _, r := range agent {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '.') {
+			return false
+		}
+	}
+	return true
+}
+
+// AgentKeyEnvName returns the canonical environment variable name for an
+// agent's Ed25519 private key seed. Hyphens and dots in the agent name are
+// replaced with underscores and the result is uppercased:
+//
+//	mira-nockos → NOCKGUARD_AGENT_MIRA_NOCKOS_ED25519_KEY
+func AgentKeyEnvName(agent string) string {
+	upper := strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(agent))
+	return "NOCKGUARD_AGENT_" + upper + "_ED25519_KEY"
+}
+
+// AgentPubKeyEnvName returns the canonical environment variable name for an
+// agent's Ed25519 public key (the verifier-side counterpart of AgentKeyEnvName).
+func AgentPubKeyEnvName(agent string) string {
+	upper := strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(agent))
+	return "NOCKGUARD_AGENT_" + upper + "_ED25519_PUB"
+}
+
+// AgentAuditPath derives the per-agent audit file path from the shared base
+// path by inserting the agent name before the filename:
+//
+//	~/.nockguard/logs/audit.jsonl, "kit" → ~/.nockguard/logs/kit.audit.jsonl
+//
+// Defense-in-depth: even if the caller skips ValidAgentName, filepath.Base
+// strips any leading path components from the agent string so it cannot
+// traverse outside dir.
+func AgentAuditPath(basePath, agent string) string {
+	dir := filepath.Dir(basePath)
+	base := filepath.Base(basePath)
+	safeAgent := filepath.Base(filepath.Clean(agent))
+	if safeAgent == "." || safeAgent == ".." || safeAgent == "" {
+		safeAgent = "unknown-agent"
+	}
+	return filepath.Join(dir, safeAgent+"."+base)
+}
+
+// AuditorFor builds an Auditor for a specific agent. When the agent has its own
+// Ed25519 key set via the env var returned by AgentKeyEnvName, that key is used
+// and the trail is written to an agent-specific path (AgentAuditPath). When no
+// per-agent key is set, AuditorFor falls back to the policy-wide Auditor.
+func (e *Engine) AuditorFor(agent string) (*audit.Auditor, error) {
+	if !ValidAgentName(agent) {
+		return nil, fmt.Errorf("invalid agent name %q: only alphanumerics, hyphens, and dots are allowed", agent)
+	}
+	// Check audit enabled first — no point parsing a key we won't use.
+	if e.config.Audit == nil || !e.config.Audit.Enabled {
+		return audit.New("")
+	}
+	envName := AgentKeyEnvName(agent)
+	raw := os.Getenv(envName)
+	if raw == "" {
+		return e.Auditor()
+	}
+	priv, err := audit.PrivateKeyFromHex(raw)
+	if err != nil {
+		return nil, fmt.Errorf("per-agent key %q: %w", envName, err)
+	}
+	path := e.config.Audit.Path
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		path = filepath.Join(home, DefaultAuditPath)
+	}
+	return audit.New(AgentAuditPath(path, agent), audit.WithEd25519Key(priv))
+}
+
+// SigningKeyEnvNamesFor extends SigningKeyEnvNames with the per-agent key env
+// var for the given agent when it is present in the environment. The proxy uses
+// this to strip ALL signing seeds (global + per-agent) from the child process
+// before spawning it, so the policed agent cannot read and forge any key.
+func (e *Engine) SigningKeyEnvNamesFor(agent string) []string {
+	names := e.SigningKeyEnvNames()
+	envName := AgentKeyEnvName(agent)
+	if os.Getenv(envName) != "" {
+		names = append(names, envName)
+	}
+	return names
+}
+
 // Forwarder builds the NockCC ops-log forwarder from config. Returns a disabled
 // (nil-safe) forwarder when forwarding is absent or disabled. An enabled forward
 // block must specify a url and, if api_key_env is given, that variable must
