@@ -83,6 +83,55 @@ func TestSecrets(t *testing.T) {
 	}
 }
 
+func TestGitHubSecrets(t *testing.T) {
+	v := mustNew(t, []string{CategorySecrets}, nil)
+	cases := []struct {
+		name  string
+		token string
+	}{
+		{"classic-pat", "ghp_0123456789abcdefABCDEF0123456789abcd"},
+		{"oauth-token", "gho_0123456789abcdefABCDEF0123456789abcd"},
+		{"user-to-server-token", "ghu_0123456789abcdefABCDEF0123456789abcd"},
+		{"server-to-server-token", "ghs_0123456789abcdefABCDEF0123456789abcd"},
+		{"refresh-token", "ghr_0123456789abcdefABCDEF0123456789abcd"},
+		{"fine-grained-pat", "github_pat_0123456789abcdefABCDEF_0123456789abcdefABCDEF0123456789abcdefABCDEF0123456789abcde"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/value", func(t *testing.T) {
+			p := params(t, map[string]any{"arguments": map[string]any{"body": tc.token}})
+			if hit := v.CheckParams(p); hit == "" {
+				t.Fatalf("expected GitHub secret block for value %q", tc.token)
+			}
+		})
+		t.Run(tc.name+"/key", func(t *testing.T) {
+			p := params(t, map[string]any{"arguments": map[string]any{tc.token: "value"}})
+			if hit := v.CheckParams(p); hit == "" {
+				t.Fatalf("expected GitHub secret block for key %q", tc.token)
+			}
+		})
+	}
+
+	clean := []string{
+		"prose mentioning ghp_ without a token body",
+		"ghp_0123456789abcdefABCDEF0123456789abc",
+		"gho_0123456789abcdefABCDEF0123456789abc!",
+		"ghu_0123456789abcdefABCDEF0123456789abc_",
+		"ghs_0123456789abcdefABCDEF0123456789abc/",
+		"ghr_0123456789abcdefABCDEF0123456789abc-",
+		"github_pat_0123456789abcdefABCDE_0123456789abcdefABCDEF0123456789abcdefABCDEF0123456789abcde",
+		"github_pat_0123456789abcdefABCDEF_0123456789abcdefABCDEF0123456789abcdefABCDEF0123456789abcd!",
+		"nothing secret here",
+	}
+	for _, s := range clean {
+		t.Run("clean/"+s, func(t *testing.T) {
+			p := params(t, map[string]any{"arguments": map[string]any{"body": s}})
+			if hit := v.CheckParams(p); hit != "" {
+				t.Fatalf("clean string flagged as %q", hit)
+			}
+		})
+	}
+}
+
 func TestCustomPattern(t *testing.T) {
 	v := mustNew(t, nil, []string{`(?i)rm\s+-rf\s+/`})
 	p := params(t, map[string]any{"arguments": map[string]any{"cmd": "rm -rf /"}})
