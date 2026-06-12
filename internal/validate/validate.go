@@ -43,6 +43,8 @@ var builtin = map[string][]rule{
 		{"credit-card", regexp.MustCompile(`\b(?:\d[ -]?){13,16}\b`)},
 		{"openai-key", regexp.MustCompile(`\bsk-[A-Za-z0-9]{20,}\b`)},
 		{"aws-access-key", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
+		{"github-token", regexp.MustCompile(`\bgh[opusr]_[A-Za-z0-9]{36}\b`)},
+		{"github-fine-grained-pat", regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}\b`)},
 		{"generic-bearer", regexp.MustCompile(`(?i)\b(api[_-]?key|secret|token|bearer)\b["':=\s]{1,4}[A-Za-z0-9_\-]{16,}`)},
 	},
 }
