@@ -109,6 +109,14 @@ func TestGitHubSecrets(t *testing.T) {
 				t.Fatalf("expected GitHub secret block for key %q", tc.token)
 			}
 		})
+		for _, s := range []string{"x" + tc.token, tc.token + "A"} {
+			t.Run(tc.name+"/embedded/"+s, func(t *testing.T) {
+				p := params(t, map[string]any{"arguments": map[string]any{"body": s}})
+				if hit := v.CheckParams(p); hit != "" {
+					t.Fatalf("embedded token-shaped string flagged as %q", hit)
+				}
+			})
+		}
 	}
 
 	clean := []string{
