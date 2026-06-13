@@ -221,9 +221,15 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				continue
 			}
 
-			if !p.engine.Check(p.agent, toolName) {
-				p.logger.Printf("DENY agent=%s tool=%s", p.agent, toolName)
-				p.audit(toolName, "deny", "policy")
+			// Evaluate once: the verdict gates the call, and the basis (which rule
+			// matched) is recorded in the audit trail so a denial is explainable
+			// rather than an opaque "policy". The matched rule is kept OUT of the
+			// agent-facing error on purpose — revealing it would let a hostile
+			// agent map the policy surface — so it lands only in the log + audit.
+			dec := p.engine.Evaluate(p.agent, toolName)
+			if !dec.Allowed {
+				p.logger.Printf("DENY agent=%s tool=%s reason=%q", p.agent, toolName, dec.Reason)
+				p.audit(toolName, "deny", dec.Reason)
 				if werr := p.rejectToAgent(msg.ID, -32600,
 					fmt.Sprintf("nockguard: tool %q denied by policy", toolName)); werr != nil {
 					return werr
@@ -296,7 +302,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				continue
 			}
 			p.logger.Printf("ALLOW agent=%s tool=%s", p.agent, toolName)
-			p.audit(toolName, "allow", "")
+			p.audit(toolName, "allow", dec.Reason)
 			if _, writeErr := fmt.Fprintf(w, "%s\n", out); writeErr != nil {
 				return writeErr
 			}
@@ -383,11 +389,11 @@ func (p *StdioProxy) filterToolListResponse(line []byte) []byte {
 		InputSchema json.RawMessage `json:"inputSchema,omitempty"`
 	}
 	for _, t := range resp.Result.Tools {
-		if p.engine.Check(p.agent, t.Name) {
+		if dec := p.engine.Evaluate(p.agent, t.Name); dec.Allowed {
 			filtered = append(filtered, t)
 		} else {
-			p.logger.Printf("HIDE agent=%s tool=%s", p.agent, t.Name)
-			p.audit(t.Name, "hide", "")
+			p.logger.Printf("HIDE agent=%s tool=%s reason=%q", p.agent, t.Name, dec.Reason)
+			p.audit(t.Name, "hide", dec.Reason)
 		}
 	}
 

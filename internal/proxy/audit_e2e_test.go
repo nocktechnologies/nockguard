@@ -91,4 +91,15 @@ agents:
 			t.Errorf("record %d decision = %q, want %q (all: %v)", i, decisions[i], want[i], decisions)
 		}
 	}
+
+	// Provenance, end-to-end: a policy decision names the matching rule in the
+	// audit reason — so an allow/deny is explainable through the real binary and
+	// the on-disk trail, not an opaque "policy". (Record 2 is a rate-limit, whose
+	// reason belongs to the limiter, so it is not asserted here.)
+	if got := lines[0]["reason"]; got != `allow-rule "nockcc_nock_*"` {
+		t.Errorf("allow record reason = %q, want the matching allow-rule", got)
+	}
+	if got := lines[3]["reason"]; got != `deny-rule "nockcc_kill_switch_set"` {
+		t.Errorf("deny record reason = %q, want the matching deny-rule", got)
+	}
 }

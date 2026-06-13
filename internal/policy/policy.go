@@ -136,38 +136,63 @@ func (e *Engine) HasPolicyFor(agent string) bool {
 	return ok
 }
 
-func (e *Engine) Check(agent, tool string) bool {
+// Decision is the outcome of evaluating a (agent, tool) pair against policy. It
+// carries not just the allow/deny verdict but the BASIS for it — which rule
+// matched, or that none did — so the audit trail can name WHY a call was allowed
+// or denied instead of recording an opaque "policy". Every enforcement decision
+// points back at its source rule; this is the explainability layer.
+type Decision struct {
+	Allowed bool
+	// Reason is a short, audit-ready phrase naming the basis for the verdict,
+	// e.g. `deny-rule "*delete*"`, `allow-rule "nockcc_nock_*"`,
+	// "no allow-rule matched", "default-allow (no allow list)", or
+	// "no policy for agent (fail-closed)".
+	Reason string
+}
+
+// Evaluate resolves the policy decision for a (agent, tool) pair AND its basis.
+// It mirrors Check's precedence exactly — explicit deny first, then the allow
+// list (present ⇒ must match), then mode/default — but returns the matching rule
+// so callers can record a non-opaque audit reason. Check delegates here, so the
+// boolean verdict and the reason can never drift apart.
+func (e *Engine) Evaluate(agent, tool string) Decision {
 	pol, ok := e.config.Agents[agent]
 	if !ok {
 		pol, ok = e.config.Agents["default"]
 		if !ok {
 			// Fail CLOSED: an agent with no named policy and no "default" is
 			// unrecognized, so denying every tool is the only safe reading of
-			// "default-deny". (Previously this returned true — allow-everything —
+			// "default-deny". (Previously Check returned true — allow-everything —
 			// which silently unrestricted any unconfigured --agent value.)
-			return false
+			return Decision{Allowed: false, Reason: "no policy for agent (fail-closed)"}
 		}
 	}
 
 	for _, pattern := range pol.Deny {
 		if matchPattern(pattern, tool) {
-			return false
+			return Decision{Allowed: false, Reason: fmt.Sprintf("deny-rule %q", pattern)}
 		}
 	}
 
 	if len(pol.Allow) > 0 {
 		for _, pattern := range pol.Allow {
 			if matchPattern(pattern, tool) {
-				return true
+				return Decision{Allowed: true, Reason: fmt.Sprintf("allow-rule %q", pattern)}
 			}
 		}
-		return false
+		return Decision{Allowed: false, Reason: "no allow-rule matched"}
 	}
 
 	if pol.Mode == "deny" {
-		return false
+		return Decision{Allowed: false, Reason: `mode "deny", no allow list`}
 	}
-	return true
+	return Decision{Allowed: true, Reason: "default-allow (no allow list)"}
+}
+
+// Check reports whether a (agent, tool) call is permitted. It is the boolean
+// view of Evaluate, preserved for callers that only need the verdict.
+func (e *Engine) Check(agent, tool string) bool {
+	return e.Evaluate(agent, tool).Allowed
 }
 
 // RequiresApproval reports whether a (agent, tool) call must be held for a human

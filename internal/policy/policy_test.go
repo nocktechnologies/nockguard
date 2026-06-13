@@ -202,3 +202,56 @@ agents:
 		t.Error("unlisted tool should be blocked in deny mode")
 	}
 }
+
+// TestEvaluateProvenance verifies that Evaluate returns not just the verdict but
+// the BASIS for it — naming the matched rule or the absence of one — across every
+// decision path, including deny-beats-allow precedence. This is the data the
+// audit trail records so a denial is explainable rather than an opaque "policy".
+func TestEvaluateProvenance(t *testing.T) {
+	path := writePolicy(t, `
+agents:
+  kit:
+    allow:
+      - "nockcc_nock_*"
+    deny:
+      - "nockcc_kill_switch_set"
+      - "*delete*"
+  locked:
+    mode: deny
+  permissive: {}
+`)
+	eng, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		agent, tool string
+		wantAllowed bool
+		wantReason  string
+	}{
+		{"allow-match", "kit", "nockcc_nock_list", true, `allow-rule "nockcc_nock_*"`},
+		{"explicit-deny", "kit", "nockcc_kill_switch_set", false, `deny-rule "nockcc_kill_switch_set"`},
+		{"deny-beats-allow", "kit", "nockcc_nock_delete", false, `deny-rule "*delete*"`},
+		{"no-allow-match", "kit", "nockcc_spend_summary", false, "no allow-rule matched"},
+		{"mode-deny", "locked", "anything", false, `mode "deny", no allow list`},
+		{"default-allow", "permissive", "anything", true, "default-allow (no allow list)"},
+		{"no-policy-fail-closed", "ghost", "anything", false, "no policy for agent (fail-closed)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dec := eng.Evaluate(tt.agent, tt.tool)
+			if dec.Allowed != tt.wantAllowed {
+				t.Errorf("Evaluate(%q, %q).Allowed = %v, want %v", tt.agent, tt.tool, dec.Allowed, tt.wantAllowed)
+			}
+			if dec.Reason != tt.wantReason {
+				t.Errorf("Evaluate(%q, %q).Reason = %q, want %q", tt.agent, tt.tool, dec.Reason, tt.wantReason)
+			}
+			// Check must never disagree with Evaluate's verdict — it delegates.
+			if got := eng.Check(tt.agent, tt.tool); got != dec.Allowed {
+				t.Errorf("Check(%q, %q) = %v but Evaluate.Allowed = %v — verdict drift", tt.agent, tt.tool, got, dec.Allowed)
+			}
+		})
+	}
+}
