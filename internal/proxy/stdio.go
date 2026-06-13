@@ -228,7 +228,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			// agent map the policy surface — so it lands only in the log + audit.
 			dec := p.engine.Evaluate(p.agent, toolName)
 			if !dec.Allowed {
-				p.logger.Printf("DENY agent=%s tool=%s reason=%s", p.agent, toolName, dec.Reason)
+				p.logger.Printf("DENY agent=%s tool=%s reason=%q", p.agent, toolName, dec.Reason)
 				p.audit(toolName, "deny", dec.Reason)
 				if werr := p.rejectToAgent(msg.ID, -32600,
 					fmt.Sprintf("nockguard: tool %q denied by policy", toolName)); werr != nil {
@@ -392,7 +392,7 @@ func (p *StdioProxy) filterToolListResponse(line []byte) []byte {
 		if dec := p.engine.Evaluate(p.agent, t.Name); dec.Allowed {
 			filtered = append(filtered, t)
 		} else {
-			p.logger.Printf("HIDE agent=%s tool=%s reason=%s", p.agent, t.Name, dec.Reason)
+			p.logger.Printf("HIDE agent=%s tool=%s reason=%q", p.agent, t.Name, dec.Reason)
 			p.audit(t.Name, "hide", dec.Reason)
 		}
 	}
