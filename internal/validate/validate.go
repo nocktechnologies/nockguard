@@ -40,11 +40,16 @@ var builtin = map[string][]rule{
 	},
 	CategorySecrets: {
 		{"ssn", regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
-		{"credit-card", regexp.MustCompile(`\b(?:\d[ -]?){13,16}\b`)},
+		{"credit-card", regexp.MustCompile(`(?:^|[^\w-])(?:\d[ -]?){13,16}(?:$|[^\w-])`)},
 		{"openai-key", regexp.MustCompile(`\bsk-[A-Za-z0-9]{20,}\b`)},
 		{"aws-access-key", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
 		{"github-token", regexp.MustCompile(`\bgh[opusr]_[A-Za-z0-9]{36}\b`)},
 		{"github-fine-grained-pat", regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}\b`)},
+		{"slack-token", regexp.MustCompile(`(?:^|[^A-Za-z0-9_-])xox[bpars]-[0-9]{12}-[0-9]{12,13}-[A-Za-z0-9]{24}(?:$|[^A-Za-z0-9_-])`)},
+		{"stripe-live-key", regexp.MustCompile(`\b[rs]k_live_[A-Za-z0-9]{24}\b`)},
+		{"gcp-service-account-key", regexp.MustCompile(`(?is)"type"\s*:\s*"service_account".*"private_key"\s*:\s*"-----BEGIN PRIVATE KEY-----`)},
+		{"azure-storage-connection-string", regexp.MustCompile(`(?i)\bDefaultEndpointsProtocol=https;AccountName=[A-Za-z0-9-]{3,24};AccountKey=[A-Za-z0-9+/]{80,}={0,2};EndpointSuffix=core\.windows\.net\b`)},
+		{"npm-token", regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`)},
 		{"generic-bearer", regexp.MustCompile(`(?i)\b(api[_-]?key|secret|token|bearer)\b["':=\s]{1,4}[A-Za-z0-9_\-]{16,}`)},
 	},
 }
