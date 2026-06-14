@@ -140,6 +140,80 @@ func TestGitHubSecrets(t *testing.T) {
 	}
 }
 
+func TestVendorSecrets(t *testing.T) {
+	v := mustNew(t, []string{CategorySecrets}, nil)
+	slack := func(prefix string) string {
+		return prefix + "-123456789012-" + "1234567890123-" + "AbCdEfGhIjKlMnOpQrStUvWx"
+	}
+	stripe := func(prefix string) string {
+		return prefix + "_live_" + "0123456789abcdefABCDEF01"
+	}
+	npm := func(body string) string {
+		return "npm" + "_" + body
+	}
+	gcpServiceAccount := `"type":"service_account","private_key":"-----BEGIN ` + `PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n"`
+	azureConnectionString := "DefaultEndpointsProtocol=https;" +
+		"AccountName=acct01;" +
+		"AccountKey=" + "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU2Nzg5" + "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=;" +
+		"EndpointSuffix=core.windows.net"
+	cases := []struct {
+		name  string
+		token string
+	}{
+		{"slack-bot-token", slack("xox" + "b")},
+		{"slack-app-token", slack("xox" + "a")},
+		{"slack-refresh-token", slack("xox" + "r")},
+		{"slack-user-token", slack("xox" + "p")},
+		{"slack-workspace-token", slack("xox" + "s")},
+		{"stripe-secret-key", stripe("s" + "k")},
+		{"stripe-restricted-key", stripe("r" + "k")},
+		{"gcp-service-account-json", gcpServiceAccount},
+		{"azure-storage-connection-string", azureConnectionString},
+		{"npm-token", npm("0123456789abcdefABCDEF0123456789abcd")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/value", func(t *testing.T) {
+			p := params(t, map[string]any{"arguments": map[string]any{"body": tc.token}})
+			if hit := v.CheckParams(p); hit == "" {
+				t.Fatalf("expected vendor secret block for value %q", tc.token)
+			}
+		})
+		t.Run(tc.name+"/key", func(t *testing.T) {
+			p := params(t, map[string]any{"arguments": map[string]any{tc.token: "value"}})
+			if hit := v.CheckParams(p); hit == "" {
+				t.Fatalf("expected vendor secret block for key %q", tc.token)
+			}
+		})
+	}
+
+	clean := []string{
+		"slack docs mention " + "xox" + "b- without a token body",
+		"x" + slack("xox"+"b"),
+		slack("xox"+"b") + "y",
+		"s" + "k_test_" + "0123456789abcdefABCDEF01",
+		"s" + "k_live_" + "0123456789abcdefABCDEF0",
+		"s" + "k_live_" + "0123456789abcdefABCDEF012",
+		"r" + "k_test_" + "0123456789abcdefABCDEF01",
+		"r" + "k_live_" + "0123456789abcdefABCDEF0",
+		"r" + "k_live_" + "0123456789abcdefABCDEF012",
+		`"type":"service_account"`,
+		`"private_key":"-----BEGIN ` + `PRIVATE KEY-----"`,
+		"DefaultEndpointsProtocol=https;AccountName=acct01;EndpointSuffix=core.windows.net",
+		"DefaultEndpointsProtocol=https;AccountName=acct01;Account" + "Key=not-base64;EndpointSuffix=core.windows.net",
+		npm("0123456789abcdefABCDEF0123456789abc"),
+		npm("0123456789abcdefABCDEF0123456789abcde"),
+		"x" + npm("0123456789abcdefABCDEF0123456789abcd"),
+	}
+	for _, s := range clean {
+		t.Run("clean/"+s, func(t *testing.T) {
+			p := params(t, map[string]any{"arguments": map[string]any{"body": s}})
+			if hit := v.CheckParams(p); hit != "" {
+				t.Fatalf("clean vendor string flagged as %q", hit)
+			}
+		})
+	}
+}
+
 func TestCustomPattern(t *testing.T) {
 	v := mustNew(t, nil, []string{`(?i)rm\s+-rf\s+/`})
 	p := params(t, map[string]any{"arguments": map[string]any{"cmd": "rm -rf /"}})
