@@ -110,7 +110,11 @@ func main() {
 		os.Exit(1)
 	}
 	if policyPath == "" {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+			os.Exit(1)
+		}
 		policyPath = home + "/.nockguard/policy.yaml"
 	}
 
@@ -250,7 +254,11 @@ func runAudit(args []string) {
 		}
 		baseDir := auditDir
 		if baseDir == "" {
-			home, _ := os.UserHomeDir()
+			home, err := os.UserHomeDir()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+				os.Exit(1)
+			}
 			baseDir = filepath.Join(home, filepath.Dir(policy.DefaultAuditPath))
 		}
 		baseName := filepath.Base(policy.DefaultAuditPath)
@@ -260,7 +268,11 @@ func runAudit(args []string) {
 	}
 
 	if auditPath == "" {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+			os.Exit(1)
+		}
 		auditPath = filepath.Join(home, policy.DefaultAuditPath)
 	}
 	if (keyEnv == "") == (pubEnv == "") {
@@ -360,7 +372,11 @@ func runInit(args []string) {
 		}
 	}
 	if policyPath == "" {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+			os.Exit(1)
+		}
 		policyPath = filepath.Join(home, ".nockguard", "policy.yaml")
 	}
 
