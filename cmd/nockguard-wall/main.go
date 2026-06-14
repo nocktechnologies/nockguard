@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -39,47 +40,44 @@ type event struct {
 }
 
 // broker is a minimal SSE hub: it fans recorded events out to every connected
-// browser. The client set is only ever touched by run(), so no locks are needed.
+// browser.
 type broker struct {
-	auditPath  string // replayed to each newly-connected client as history
-	register   chan chan event
-	unregister chan chan event
-	broadcast  chan event
+	auditPath string // replayed to each newly-connected client as history
+	mu        sync.Mutex
+	clients   map[chan event]struct{}
 }
 
 func newBroker() *broker {
 	return &broker{
-		register:   make(chan chan event),
-		unregister: make(chan chan event),
-		broadcast:  make(chan event, 256),
+		clients: make(map[chan event]struct{}),
 	}
 }
 
-func (b *broker) run(ctx context.Context) {
-	clients := map[chan event]struct{}{}
-	for {
+func (b *broker) register(c chan event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.clients[c] = struct{}{}
+}
+
+func (b *broker) unregister(c chan event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.clients[c]; ok {
+		delete(b.clients, c)
+		close(c)
+	}
+}
+
+func (b *broker) emit(ev event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for c := range b.clients {
 		select {
-		case <-ctx.Done():
-			return
-		case c := <-b.register:
-			clients[c] = struct{}{}
-		case c := <-b.unregister:
-			if _, ok := clients[c]; ok {
-				delete(clients, c)
-				close(c)
-			}
-		case ev := <-b.broadcast:
-			for c := range clients {
-				select {
-				case c <- ev:
-				default: // slow client — drop one event rather than stall the hub
-				}
-			}
+		case c <- ev:
+		default: // slow client — drop one event rather than stall the hub
 		}
 	}
 }
-
-func (b *broker) emit(ev event) { b.broadcast <- ev }
 
 func (b *broker) handleSSE(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
@@ -97,8 +95,8 @@ func (b *broker) handleSSE(w http.ResponseWriter, r *http.Request) {
 	fl.Flush()
 
 	c := make(chan event, 64)
-	b.register <- c
-	defer func() { b.unregister <- c }()
+	b.register(c)
+	defer b.unregister(c)
 
 	ka := time.NewTicker(20 * time.Second) // keepalive so the stream isn't reaped
 	defer ka.Stop()
@@ -148,6 +146,9 @@ func replayHistory(path string, w io.Writer) {
 			}
 		}
 	}
+	if err := sc.Err(); err != nil {
+		log.Printf("error replaying history: %v", err)
+	}
 	for _, ln := range lines {
 		fmt.Fprintf(w, "data: %s\n\n", ln)
 	}
@@ -183,6 +184,9 @@ func tail(ctx context.Context, path string, b *broker) {
 						if json.Unmarshal(sc.Bytes(), &ev) == nil && ev.Decision != "" {
 							b.emit(ev)
 						}
+					}
+					if err := sc.Err(); err != nil {
+						log.Printf("error scanning audit log: %v", err)
 					}
 					if cur, err := f.Seek(0, io.SeekCurrent); err == nil {
 						offset = cur
@@ -249,7 +253,6 @@ func main() {
 
 	b := newBroker()
 	b.auditPath = *auditPath
-	go b.run(ctx)
 	go tail(ctx, *auditPath, b)
 	if *demoMode {
 		go demo(ctx, b)
@@ -268,5 +271,12 @@ func main() {
 	})
 
 	fmt.Printf("NockGuard Live Wall → http://%s   (audit: %s, demo: %v)\n", *addr, *auditPath, *demoMode)
-	log.Fatal(http.ListenAndServe(*addr, mux))
+	srv := &http.Server{
+		Addr:         *addr,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 0, // SSE requires streaming.
+		IdleTimeout:  120 * time.Second,
+	}
+	log.Fatal(srv.ListenAndServe())
 }
