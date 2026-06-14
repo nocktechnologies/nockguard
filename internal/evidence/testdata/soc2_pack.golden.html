@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NockGuard Compliance Evidence Pack — SOC 2 (Trust Services Criteria)</title>
+<style>
+  :root { --ink:#1a1d24; --muted:#5b6472; --line:#e3e7ee; --bg:#f6f8fb;
+          --pass:#0f7b46; --pass-bg:#e6f6ec; --fail:#b21f2d; --fail-bg:#fdeced;
+          --accent:#1f3a5f; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         color:var(--ink); background:var(--bg); }
+  .wrap { max-width:980px; margin:0 auto; padding:40px 28px 80px; }
+  header.cover { border-bottom:3px solid var(--accent); padding-bottom:24px; margin-bottom:8px; }
+  .brand { font-size:13px; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); font-weight:700; }
+  h1 { font-size:28px; margin:6px 0 4px; }
+  h2 { font-size:20px; margin:38px 0 14px; padding-bottom:6px; border-bottom:1px solid var(--line); }
+  h3 { font-size:16px; margin:24px 0 6px; }
+  .meta { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px 24px; margin-top:18px; }
+  .meta .k { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  .meta .v { font-weight:600; word-break:break-word; }
+  .banner { margin:22px 0; padding:18px 22px; border-radius:10px; border:1px solid; display:flex;
+            align-items:center; gap:16px; }
+  .banner.pass { background:var(--pass-bg); border-color:var(--pass); color:var(--pass); }
+  .banner.fail { background:var(--fail-bg); border-color:var(--fail); color:var(--fail); }
+  .banner .badge { font-size:26px; font-weight:800; letter-spacing:.04em; }
+  .banner .desc { color:var(--ink); font-size:14px; }
+  table { width:100%; border-collapse:collapse; margin-top:10px; font-size:14px; background:#fff; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { background:#eef2f8; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  .ctrl-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .ctrl-id { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-weight:700; color:var(--accent); }
+  .count { background:var(--accent); color:#fff; border-radius:20px; padding:1px 10px; font-size:12px; font-weight:600; }
+  .count.zero { background:#9aa4b2; }
+  .desc-block { color:var(--muted); font-size:13.5px; margin:2px 0 4px; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:4px; font-size:12px; font-weight:600;
+          font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .pill.allow { background:#e6f6ec; color:var(--pass); }
+  .pill.deny, .pill.block, .pill.approval-denied { background:var(--fail-bg); color:var(--fail); }
+  .pill.ratelimit, .pill.hide, .pill.approval-granted { background:#fff4e0; color:#9a5b00; }
+  .empty { color:var(--muted); font-style:italic; padding:8px 0; }
+  code, .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .filevr { font-size:13px; }
+  .filevr .ok { color:var(--pass); font-weight:600; }
+  .filevr .bad { color:var(--fail); font-weight:600; }
+  footer { margin-top:50px; padding-top:16px; border-top:1px solid var(--line); color:var(--muted); font-size:12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="cover">
+    <div class="brand">NockGuard · Compliance Evidence Pack</div>
+    <h1>SOC 2 (Trust Services Criteria)</h1>
+    <div class="meta">
+      <div><div class="k">Framework</div><div class="v mono">soc2</div></div>
+      <div><div class="k">Generated</div><div class="v">2026-06-14T12:00:00Z</div></div>
+      <div><div class="k">Agent scope</div><div class="v">all agents</div></div>
+      <div><div class="k">Range from</div><div class="v">beginning</div></div>
+      <div><div class="k">Range to</div><div class="v">now</div></div>
+      <div><div class="k">Agents in evidence</div><div class="v">ash, kit</div></div>
+    </div>
+  </header>
+
+  <h2>Integrity Attestation</h2>
+  
+  
+  <div class="banner pass">
+    <span class="badge">PASS</span>
+    <span class="desc">The signed audit chain is <strong>intact</strong>. 5 entries verified end-to-end via HMAC-SHA256 (tamper-evident). No edit, deletion, insertion, or reorder was detected.</span>
+  </div>
+  
+  <table>
+    <tr><th>Mode</th><td>HMAC-SHA256 (tamper-evident)</td></tr>
+    <tr><th>Entries verified</th><td>5</td></tr>
+    <tr><th>Chain intact</th><td><span class="pill allow">true</span></td></tr>
+    
+    <tr><th>Verified at</th><td>2026-06-14T12:00:00Z</td></tr>
+  </table>
+  <h3>Per-file verification</h3>
+  <table class="filevr">
+    <tr><th>Audit file</th><th>Entries</th><th>Status</th></tr>
+    
+    <tr>
+      <td class="mono">/audit/agent.audit.jsonl</td>
+      <td>5</td>
+      <td><span class="ok">intact</span></td>
+    </tr>
+    
+  </table>
+  
+
+  <h2>Control Evidence</h2>
+  
+  
+  <div class="control">
+    <div class="ctrl-head">
+      <h3 style="margin:18px 0 2px"><span class="ctrl-id">CC6.1</span> Logical Access Controls</h3>
+      <span class="count">3 events</span>
+    </div>
+    <div class="desc-block">The entity implements logical access security measures to protect against threats from sources outside its system boundaries. Evidenced by access-control decisions: tool calls denied or blocked by policy, and approvals explicitly granted by a human.</div>
+    
+    <table>
+      <tr><th>Timestamp</th><th>Agent</th><th>Tool</th><th>Decision</th><th>Reason</th></tr>
+      
+      <tr>
+        <td class="mono">2026-06-14T12:00:00Z</td>
+        <td>kit</td>
+        <td class="mono">Bash</td>
+        <td><span class="pill deny">deny</span></td>
+        <td>secret-exfil</td>
+      </tr>
+      
+      <tr>
+        <td class="mono">2026-06-14T12:00:00Z</td>
+        <td>ash</td>
+        <td class="mono">WebFetch</td>
+        <td><span class="pill block">block</span></td>
+        <td>blocklist</td>
+      </tr>
+      
+      <tr>
+        <td class="mono">2026-06-14T12:00:00Z</td>
+        <td>kit</td>
+        <td class="mono">nockcc_kill_switch_set</td>
+        <td><span class="pill approval-granted">approval-granted</span></td>
+        <td>human ok</td>
+      </tr>
+      
+    </table>
+    
+  </div>
+  
+  <div class="control">
+    <div class="ctrl-head">
+      <h3 style="margin:18px 0 2px"><span class="ctrl-id">CC7.2</span> System Monitoring</h3>
+      <span class="count">5 events</span>
+    </div>
+    <div class="desc-block">The entity monitors system components for anomalies and acts on them. Evidenced by the completeness of the signed, tamper-evident audit trail itself: every tool-call decision (allow, deny, block, rate-limit, hide) is monitored and recorded.</div>
+    
+    <table>
+      <tr><th>Timestamp</th><th>Agent</th><th>Tool</th><th>Decision</th><th>Reason</th></tr>
+      
+      <tr>
+        <td class="mono">2026-06-14T12:00:00Z</td>
+        <td>kit</td>
+        <td class="mono">Read</td>
+        <td><span class="pill allow">allow</span></td>
+        <td>—</td>
+      </tr>
+      
+      <tr>
+        <td class="mono">2026-06-14T12:00:00Z</td>
+        <td>kit</td>
+        <td class="mono">Bash</td>
+        <td><span class="pill deny">deny</span></td>
+        <td>secret-exfil</td>
+      </tr>
+      
+      <tr>
+        <td class="mono">2026-06-14T12:00:00Z</td>
+        <td>ash</td>
+        <td class="mono">WebFetch</td>
+        <td><span class="pill block">block</span></td>
+        <td>blocklist</td>
+      </tr>
+      
+      <tr>
+        <td class="mono">2026-06-14T12:00:00Z</td>
+        <td>ash</td>
+        <td class="mono">Write</td>
+        <td><span class="pill ratelimit">ratelimit</span></td>
+        <td>rate</td>
+      </tr>
+      
+      <tr>
+        <td class="mono">2026-06-14T12:00:00Z</td>
+        <td>kit</td>
+        <td class="mono">nockcc_kill_switch_set</td>
+        <td><span class="pill approval-granted">approval-granted</span></td>
+        <td>human ok</td>
+      </tr>
+      
+    </table>
+    
+  </div>
+  
+  <div class="control">
+    <div class="ctrl-head">
+      <h3 style="margin:18px 0 2px"><span class="ctrl-id">CC8.1</span> Change Management</h3>
+      <span class="count">2 events</span>
+    </div>
+    <div class="desc-block">The entity authorizes, designs, develops, tests, and approves changes before implementation. Evidenced by rate-limit and hide enforcement that constrains agent behavior, plus the human approval decisions gating sensitive (change-causing) tool calls.</div>
+    
+    <table>
+      <tr><th>Timestamp</th><th>Agent</th><th>Tool</th><th>Decision</th><th>Reason</th></tr>
+      
+      <tr>
+        <td class="mono">2026-06-14T12:00:00Z</td>
+        <td>ash</td>
+        <td class="mono">Write</td>
+        <td><span class="pill ratelimit">ratelimit</span></td>
+        <td>rate</td>
+      </tr>
+      
+      <tr>
+        <td class="mono">2026-06-14T12:00:00Z</td>
+        <td>kit</td>
+        <td class="mono">nockcc_kill_switch_set</td>
+        <td><span class="pill approval-granted">approval-granted</span></td>
+        <td>human ok</td>
+      </tr>
+      
+    </table>
+    
+  </div>
+  
+  
+
+  <h2>Raw Evidence Appendix</h2>
+  <div class="desc-block">Every audit entry in the selected scope, in original file and line order. This is the unbucketed source the control tables draw from.</div>
+  
+  <table>
+    <tr><th>Timestamp</th><th>Agent</th><th>Tool</th><th>Decision</th><th>Reason</th></tr>
+    
+    <tr>
+      <td class="mono">2026-06-14T12:00:00Z</td>
+      <td>kit</td>
+      <td class="mono">Read</td>
+      <td><span class="pill allow">allow</span></td>
+      <td>—</td>
+    </tr>
+    
+    <tr>
+      <td class="mono">2026-06-14T12:00:00Z</td>
+      <td>kit</td>
+      <td class="mono">Bash</td>
+      <td><span class="pill deny">deny</span></td>
+      <td>secret-exfil</td>
+    </tr>
+    
+    <tr>
+      <td class="mono">2026-06-14T12:00:00Z</td>
+      <td>ash</td>
+      <td class="mono">WebFetch</td>
+      <td><span class="pill block">block</span></td>
+      <td>blocklist</td>
+    </tr>
+    
+    <tr>
+      <td class="mono">2026-06-14T12:00:00Z</td>
+      <td>ash</td>
+      <td class="mono">Write</td>
+      <td><span class="pill ratelimit">ratelimit</span></td>
+      <td>rate</td>
+    </tr>
+    
+    <tr>
+      <td class="mono">2026-06-14T12:00:00Z</td>
+      <td>kit</td>
+      <td class="mono">nockcc_kill_switch_set</td>
+      <td><span class="pill approval-granted">approval-granted</span></td>
+      <td>human ok</td>
+    </tr>
+    
+  </table>
+  
+
+  <footer>
+    Generated by NockGuard — the MCP firewall for AI agent fleets. The Integrity Attestation above is produced by
+    the same cryptographic verifier (<span class="mono">nockguard audit verify</span>) that signs the trail; a PASS
+    means the chain was checked end-to-end and is unbroken. Align. Decide. Deploy.
+  </footer>
+
+</div>
+</body>
+</html>

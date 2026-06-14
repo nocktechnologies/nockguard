@@ -13,6 +13,7 @@ import (
 
 	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
+	"github.com/nocktechnologies/nockguard/internal/evidence"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 	"github.com/nocktechnologies/nockguard/internal/proxy"
 )
@@ -66,6 +67,11 @@ func main() {
 
 	if args[0] == "init" {
 		runInit(args[1:])
+		return
+	}
+
+	if args[0] == "evidence" {
+		runEvidence(args[1:])
 		return
 	}
 
@@ -312,6 +318,216 @@ func runAudit(args []string) {
 	fmt.Printf("OK — %d entries verified, hash chain intact: %s\n", n, auditPath)
 }
 
+// runEvidence handles `nockguard evidence` — it builds a compliance-evidence
+// pack from one or more signed audit trails, mapping their entries onto a
+// framework's controls and rendering an Integrity Attestation produced by the
+// SAME verifier as `audit verify`. The attestation fails LOUD: a broken chain
+// renders a FAILED banner and the command exits 2, but the pack is still written
+// so a reviewer sees exactly what broke.
+//
+// Verification mode (exactly one):
+//   - --agent <name>: derives the audit file (<audit-dir>/<name>.audit.jsonl)
+//     and the Ed25519 public-key env var (NOCKGUARD_AGENT_<NAME>_ED25519_PUB).
+//   - --ed25519-pub-env <ENV>: explicit Ed25519 public-key env var, with --audit.
+//   - --key-env <ENV>: HMAC key env var (tamper-evident), with --audit.
+//
+// Exit 0 = chain intact, 2 = chain broken (pack still produced), 1 = setup error.
+func runEvidence(args []string) {
+	var (
+		framework = "soc2"
+		auditPath string
+		auditDir  string
+		agentName string
+		keyEnv    string
+		pubEnv    string
+		fromStr   string
+		toStr     string
+		format    = "html"
+		outPath   string
+	)
+	needsValue := func(i int, name string) string {
+		if i+1 >= len(args) {
+			fmt.Fprintf(os.Stderr, "error: %s requires a value\n", name)
+			os.Exit(1)
+		}
+		return args[i+1]
+	}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--framework":
+			framework = strings.ToLower(needsValue(i, "--framework"))
+			i++
+		case "--audit":
+			auditPath = needsValue(i, "--audit")
+			i++
+		case "--audit-dir":
+			auditDir = needsValue(i, "--audit-dir")
+			i++
+		case "--agent":
+			agentName = needsValue(i, "--agent")
+			i++
+		case "--key-env":
+			keyEnv = needsValue(i, "--key-env")
+			i++
+		case "--ed25519-pub-env":
+			pubEnv = needsValue(i, "--ed25519-pub-env")
+			i++
+		case "--from":
+			fromStr = needsValue(i, "--from")
+			i++
+		case "--to":
+			toStr = needsValue(i, "--to")
+			i++
+		case "--format":
+			format = strings.ToLower(needsValue(i, "--format"))
+			i++
+		case "-o", "--output":
+			outPath = needsValue(i, args[i])
+			i++
+		default:
+			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", args[i])
+			os.Exit(1)
+		}
+	}
+
+	if format != "html" && format != "json" {
+		fmt.Fprintf(os.Stderr, "error: --format must be html or json (got %q)\n", format)
+		os.Exit(1)
+	}
+	fw := evidence.Framework(framework)
+	if !evidence.KnownFramework(fw) {
+		fmt.Fprintf(os.Stderr, "error: unknown framework %q (supported: soc2; gdpr, pci, hipaa are stubs)\n", framework)
+		os.Exit(1)
+	}
+
+	// Resolve the audit file path and verification key. --agent derives both the
+	// path and the Ed25519 pub-key env, mirroring `audit verify --agent`.
+	if agentName != "" {
+		if !policy.ValidAgentName(agentName) {
+			fmt.Fprintf(os.Stderr, "error: invalid agent name %q: only alphanumerics, hyphens, and dots are allowed\n", agentName)
+			os.Exit(1)
+		}
+		baseDir := auditDir
+		if baseDir == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+				os.Exit(1)
+			}
+			baseDir = filepath.Join(home, filepath.Dir(policy.DefaultAuditPath))
+		}
+		basePath := filepath.Join(baseDir, filepath.Base(policy.DefaultAuditPath))
+		auditPath = policy.AgentAuditPath(basePath, agentName)
+		if pubEnv == "" && keyEnv == "" {
+			pubEnv = policy.AgentPubKeyEnvName(agentName)
+		}
+	}
+	if auditPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+			os.Exit(1)
+		}
+		auditPath = filepath.Join(home, policy.DefaultAuditPath)
+	}
+
+	// Exactly one key source.
+	if (keyEnv == "") == (pubEnv == "") {
+		fmt.Fprintln(os.Stderr, "error: provide exactly one verification key: --agent <name>, --ed25519-pub-env <ENV>, or --key-env <ENV>")
+		os.Exit(1)
+	}
+
+	opts := evidence.PackOptions{
+		Framework:  fw,
+		AuditFiles: []string{auditPath},
+		Agent:      agentName,
+	}
+	if pubEnv != "" {
+		pubHex := os.Getenv(pubEnv)
+		if pubHex == "" {
+			fmt.Fprintf(os.Stderr, "error: %s is not set in the environment\n", pubEnv)
+			os.Exit(1)
+		}
+		opts.Ed25519PubHex = pubHex
+	} else {
+		key := os.Getenv(keyEnv)
+		if key == "" {
+			fmt.Fprintf(os.Stderr, "error: %s is not set in the environment\n", keyEnv)
+			os.Exit(1)
+		}
+		opts.HMACKey = []byte(key)
+	}
+	if fromStr != "" {
+		from, err := parseDateFlag(fromStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: --from: %v\n", err)
+			os.Exit(1)
+		}
+		opts.From = from
+	}
+	if toStr != "" {
+		to, err := parseDateFlag(toStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: --to: %v\n", err)
+			os.Exit(1)
+		}
+		opts.To = to
+	}
+
+	pack, err := evidence.BuildPack(opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error building evidence pack: %v\n", err)
+		os.Exit(1)
+	}
+
+	var rendered []byte
+	if format == "json" {
+		rendered, err = evidence.RenderJSON(pack)
+	} else {
+		rendered, err = evidence.RenderHTML(pack)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error rendering evidence pack: %v\n", err)
+		os.Exit(1)
+	}
+
+	if outPath != "" {
+		if werr := os.WriteFile(outPath, rendered, 0o644); werr != nil {
+			fmt.Fprintf(os.Stderr, "error writing %s: %v\n", outPath, werr)
+			os.Exit(1)
+		}
+		dest := outPath
+		fmt.Fprintf(os.Stderr, "Wrote %s evidence pack: %s\n", strings.ToUpper(format), dest)
+	} else {
+		os.Stdout.Write(rendered)
+		if format == "html" {
+			fmt.Fprintln(os.Stdout)
+		}
+	}
+
+	// Fail LOUD on a broken chain: report it to stderr and exit 2, mirroring
+	// `audit verify`. The pack is already written/printed so the failure is
+	// visible, not hidden behind a non-zero exit.
+	if !pack.Verification.ChainIntact {
+		fmt.Fprintf(os.Stderr, "TAMPER DETECTED — the audit chain backing this evidence is BROKEN (%d entries verified before the break): %s\n", pack.Verification.EntriesVerified, pack.Verification.Detail)
+		os.Exit(2)
+	}
+	fmt.Fprintf(os.Stderr, "OK — %d entries verified, chain intact; evidence pack reflects a trustworthy trail.\n", pack.Verification.EntriesVerified)
+}
+
+// parseDateFlag accepts either a date (2006-01-02) or a full RFC3339 timestamp.
+// A bare date is interpreted at UTC midnight.
+func parseDateFlag(s string) (time.Time, error) {
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t.UTC(), nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("date must be YYYY-MM-DD or RFC3339, got %q", s)
+	}
+	return t.UTC(), nil
+}
+
 // runKeygen generates a fresh Ed25519 keypair for non-repudiable audit signing.
 // With --agent <name> it emits agent-namespaced variable names
 // (NOCKGUARD_AGENT_<UPPER>_ED25519_KEY / _PUB) so each agent can hold its own
@@ -402,6 +618,7 @@ Usage:
   nockguard init [--policy <path>] [--force]
   nockguard proxy --upstream <command> --agent <name> [--policy <path>]
   nockguard audit verify (--agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
+  nockguard evidence --framework soc2 (--agent <name> | --ed25519-pub-env <ENV> | --key-env <ENV>) [--audit <path>] [--audit-dir <dir>] [--from <date>] [--to <date>] [--format html|json] [-o <file>]
   nockguard keygen [--agent <name>]
   nockguard version
 
@@ -413,18 +630,29 @@ Options:
   --key-env          Env var holding the HMAC signing key (tamper-evident verify)
   --ed25519-pub-env  Env var holding the hex Ed25519 public key (non-repudiable verify)
   --audit            Path to the audit JSONL (default: ~/.nockguard/logs/audit.jsonl)
-  --audit-dir        Directory holding per-agent audit files (for: audit verify --agent)
+  --audit-dir        Directory holding per-agent audit files (for: audit verify / evidence --agent)
+  --framework        Compliance framework to map against (for: evidence) — soc2 (gdpr/pci/hipaa are stubs)
+  --from / --to      Inclusive date filter for evidence entries (YYYY-MM-DD or RFC3339)
+  --format           Evidence output format: html (default) or json
+  -o, --output       Write the evidence pack to a file instead of stdout
 
 Per-agent signing:
   Each agent gets its own Ed25519 keypair. The trail is signed with the agent's
   private key and written to <agent>.audit.jsonl, verifiable with only that
   agent's public key — non-repudiable: proves which agent did what.
 
+Evidence packs:
+  `+"`nockguard evidence`"+` reads the SAME signed trail `+"`audit verify`"+` checks, maps its
+  entries onto a framework's controls (SOC 2 today), and renders an Integrity
+  Attestation. A broken chain renders a prominent FAILED banner and exits 2 — the
+  pack is still produced so the break is visible, never silently dropped.
+
 Examples:
   nockguard init                                        # scaffold a default-deny starter policy
   nockguard proxy --upstream "npx mcp-server-nockcc" --agent kit --policy policy.yaml
   nockguard keygen --agent kit                          # generate per-agent keypair
   nockguard audit verify --agent kit                    # verify kit's trail (reads NOCKGUARD_AGENT_KIT_ED25519_PUB)
+  nockguard evidence --framework soc2 --agent kit -o kit-soc2.html   # SOC2 pack for kit's signed trail
   nockguard keygen                                      # generate global keypair (legacy)
   nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB  # verify global trail`)
 }
