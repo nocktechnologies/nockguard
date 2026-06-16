@@ -17,6 +17,7 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/jsonrpc"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 	"github.com/nocktechnologies/nockguard/internal/ratelimit"
+	"github.com/nocktechnologies/nockguard/internal/trust"
 	"github.com/nocktechnologies/nockguard/internal/validate"
 )
 
@@ -28,6 +29,7 @@ type StdioProxy struct {
 	limiter   *ratelimit.Limiter
 	auditor   *audit.Auditor
 	forwarder *forward.Forwarder
+	trust     *trust.Accumulator
 	approver  approval.Approver // Phase 5; nil = no approval gate (Phase 1-4 behavior)
 	logger    *log.Logger
 
@@ -56,6 +58,14 @@ func (p *StdioProxy) WithApprover(a approval.Approver) *StdioProxy {
 	return p
 }
 
+func (p *StdioProxy) WithTrust(t *trust.Accumulator) *StdioProxy {
+	p.trust = t
+	if p.limiter != nil && t.Enabled() {
+		p.limiter.WithMaxCallsFunc(t.RateLimitFor)
+	}
+	return p
+}
+
 func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, validator *validate.Validator, limiter *ratelimit.Limiter, auditor *audit.Auditor, forwarder *forward.Forwarder, logger *log.Logger) *StdioProxy {
 	return &StdioProxy{
 		upstream:  upstream,
@@ -74,6 +84,11 @@ func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, valid
 // fail-open: a write or forward problem is logged but never blocks or fails the
 // tool call.
 func (p *StdioProxy) audit(tool, decision, reason string) {
+	if p.trust.Enabled() {
+		if outcome, ok := trust.DecisionToOutcome(decision); ok {
+			p.trust.ApplyOutcome(outcome)
+		}
+	}
 	if p.auditor.Enabled() {
 		if err := p.auditor.Record(audit.Event{Agent: p.agent, Tool: tool, Decision: decision, Reason: reason}); err != nil {
 			p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, tool, err)

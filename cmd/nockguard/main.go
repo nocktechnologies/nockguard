@@ -16,6 +16,7 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/evidence"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 	"github.com/nocktechnologies/nockguard/internal/proxy"
+	"github.com/nocktechnologies/nockguard/internal/trust"
 )
 
 // buildApprover wires the Phase 5 approval gate. For now: a deterministic test
@@ -71,6 +72,11 @@ func main() {
 
 	if args[0] == "evidence" {
 		runEvidence(args[1:])
+		return
+	}
+
+	if args[0] == "trust" {
+		runTrust(args[1:])
 		return
 	}
 
@@ -147,6 +153,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error building rate limiter for agent %s: %v\n", agent, err)
 		os.Exit(1)
 	}
+	trustAccumulator, err := engine.TrustFor(agent)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error building trust accumulator for agent %s: %v\n", agent, err)
+		os.Exit(1)
+	}
 
 	auditor, err := engine.AuditorFor(agent)
 	if err != nil {
@@ -167,6 +178,7 @@ func main() {
 	upstream := parseCommand(upstreamCmd)
 
 	p := proxy.NewStdioProxy(upstream, agent, engine, validator, limiter, auditor, forwarder, logger).
+		WithTrust(trustAccumulator).
 		WithApprover(buildApprover(logger))
 	if err := p.Run(); err != nil {
 		logger.Fatalf("proxy error: %v", err)
@@ -527,6 +539,42 @@ func parseDateFlag(s string) (time.Time, error) {
 	return t.UTC(), nil
 }
 
+func runTrust(args []string) {
+	if len(args) == 0 || args[0] != "show" {
+		fmt.Fprintln(os.Stderr, "usage: nockguard trust show --agent <name>")
+		os.Exit(1)
+	}
+	var agentName string
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--agent":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "error: --agent requires a value")
+				os.Exit(1)
+			}
+			i++
+			agentName = args[i]
+		default:
+			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", args[i])
+			os.Exit(1)
+		}
+	}
+	if !policy.ValidAgentName(agentName) {
+		fmt.Fprintf(os.Stderr, "error: invalid agent name %q: only alphanumerics, hyphens, and dots are allowed\n", agentName)
+		os.Exit(1)
+	}
+	acc, err := trust.New(trust.Config{Enabled: true, Agent: agentName})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error loading trust score for agent %s: %v\n", agentName, err)
+		os.Exit(1)
+	}
+	score := acc.Score()
+	fmt.Printf("agent: %s\n", agentName)
+	fmt.Printf("score: %.3f\n", score)
+	fmt.Printf("tier: %s\n", trust.TierFor(score))
+	fmt.Printf("effective_multiplier: %.1fx\n", trust.MultiplierFor(score))
+}
+
 // runKeygen generates a fresh Ed25519 keypair for non-repudiable audit signing.
 // With --agent <name> it emits agent-namespaced variable names
 // (NOCKGUARD_AGENT_<UPPER>_ED25519_KEY / _PUB) so each agent can hold its own
@@ -616,6 +664,7 @@ func printUsage() {
 Usage:
   nockguard init [--policy <path>] [--force]
   nockguard proxy --upstream <command> --agent <name> [--policy <path>]
+  nockguard trust show --agent <name>
   nockguard audit verify (--agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
   nockguard evidence --framework soc2 (--agent <name> | --ed25519-pub-env <ENV> | --key-env <ENV>) [--audit <path>] [--audit-dir <dir>] [--from <date>] [--to <date>] [--format html|json] [-o <file>]
   nockguard keygen [--agent <name>]

@@ -108,3 +108,23 @@ func TestSpendCapTakesPrecedenceOverRate(t *testing.T) {
 		t.Fatalf("expected spend-cap precedence, got ok=%v reason=%q", ok, reason)
 	}
 }
+
+func TestDynamicMaxCalls(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := clocked(t, Config{MaxCalls: 10, Window: time.Minute}, &now).
+		WithMaxCallsFunc(func(baseMax int) int {
+			if baseMax != 10 {
+				t.Fatalf("dynamic cap saw baseMax=%d, want 10", baseMax)
+			}
+			return 5
+		})
+
+	for i := 0; i < 5; i++ {
+		if reason, ok := l.Allow(); !ok {
+			t.Fatalf("call %d should pass under dynamic cap, got %q", i+1, reason)
+		}
+	}
+	if reason, ok := l.Allow(); ok || reason != "rate" {
+		t.Fatalf("6th call should hit dynamic rate cap, got ok=%v reason=%q", ok, reason)
+	}
+}

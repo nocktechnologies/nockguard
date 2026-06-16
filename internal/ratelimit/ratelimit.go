@@ -35,8 +35,9 @@ type Config struct {
 // Limiter enforces a Config against a single proxy session. It is safe for
 // concurrent use. A nil *Limiter is treated as disabled.
 type Limiter struct {
-	cfg   Config
-	clock func() time.Time
+	cfg          Config
+	clock        func() time.Time
+	maxCallsFunc func(baseMax int) int
 
 	mu    sync.Mutex
 	times []time.Time // timestamps of allowed calls still inside the window
@@ -47,6 +48,16 @@ type Limiter struct {
 // clock; tests substitute clock.
 func New(cfg Config) *Limiter {
 	return &Limiter{cfg: cfg, clock: time.Now}
+}
+
+// WithMaxCallsFunc installs an optional dynamic rate cap. The function receives
+// the configured MaxCalls and returns the effective MaxCalls for this moment.
+func (l *Limiter) WithMaxCallsFunc(fn func(baseMax int) int) *Limiter {
+	if l == nil {
+		return nil
+	}
+	l.maxCallsFunc = fn
+	return l
 }
 
 // Enabled reports whether any control is configured. A nil limiter is disabled,
@@ -78,9 +89,13 @@ func (l *Limiter) Allow() (string, bool) {
 	}
 
 	now := l.clock()
-	if l.cfg.MaxCalls > 0 {
+	maxCalls := l.cfg.MaxCalls
+	if l.maxCallsFunc != nil {
+		maxCalls = l.maxCallsFunc(l.cfg.MaxCalls)
+	}
+	if maxCalls > 0 {
 		l.prune(now)
-		if len(l.times) >= l.cfg.MaxCalls {
+		if len(l.times) >= maxCalls {
 			return "rate", false
 		}
 		l.times = append(l.times, now)
