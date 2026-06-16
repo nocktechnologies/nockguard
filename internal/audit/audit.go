@@ -53,17 +53,19 @@ type Event struct {
 	Sig      string `json:"sig,omitempty"`
 }
 
-// Auditor appends Events as JSON Lines to a file. It is safe for concurrent use.
-// A nil *Auditor and one built from an empty path are both disabled. When a
-// signing key is set, each Record links into a tamper-evident hash chain.
+// Auditor appends Events as JSON Lines to a file. It is safe for concurrent use
+// both within a process (the mutex) and ACROSS processes when signing is enabled
+// (an flock held across each signed append — see Record). A nil *Auditor and one
+// built from an empty path are both disabled. When a signing key is set, each
+// Record links into a tamper-evident hash chain.
 type Auditor struct {
 	clock func() time.Time
 
-	mu      sync.Mutex
-	f       *os.File
-	key     []byte             // HMAC signing key; empty = unsigned trail
-	edPriv  ed25519.PrivateKey // Ed25519 signing key; non-nil = non-repudiable trail (takes precedence over key)
-	prevSig string             // last written signature, seeded from the file on open
+	mu     sync.Mutex
+	f      *os.File
+	path   string             // audit file path; used to re-read the on-disk chain head under the flock
+	key    []byte             // HMAC signing key; empty = unsigned trail
+	edPriv ed25519.PrivateKey // Ed25519 signing key; non-nil = non-repudiable trail (takes precedence over key)
 }
 
 // Option configures an Auditor at construction.
@@ -119,26 +121,24 @@ func New(path string, opts ...Option) (*Auditor, error) {
 		return nil, err
 	}
 	if a.signing() {
-		// Verify the existing chain BEFORE seeding prevSig from its tail. Without
+		// Verify the existing chain BEFORE the auditor starts appending. Without
 		// this, a trail tampered or truncated mid-chain during downtime would be
 		// silently accepted: the next append chains onto the broken tail, baking
 		// the tamper in as the new baseline so the trail verifies clean from that
 		// point on forever. Refuse to open instead — turn a silent permanent
-		// corruption into a loud startup failure.
+		// corruption into a loud startup failure. The chain head is re-read from
+		// the file under a lock on each append (see Record), so there is no
+		// in-memory tail to seed here.
 		if err := a.verifyExisting(path); err != nil {
 			return nil, fmt.Errorf("audit trail %s failed verification on open — refusing to append onto a tampered or broken chain: %w", path, err)
 		}
-		last, err := lastSig(path)
-		if err != nil {
-			return nil, err
-		}
-		a.prevSig = last
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, err
 	}
 	a.f = f
+	a.path = path
 	return a, nil
 }
 
@@ -173,9 +173,10 @@ func (a *Auditor) Enabled() bool {
 }
 
 // Record stamps the event with the current time and appends it as one JSON line.
-// It is a no-op on a disabled (or nil) Auditor. The write is serialized so that
-// concurrent records never interleave within a line and the signature chain
-// stays consistent.
+// It is a no-op on a disabled (or nil) Auditor. The write is serialized within the
+// process by the mutex; when signing, it is ALSO serialized across processes by an
+// flock so that concurrent records never interleave within a line and the
+// signature chain stays consistent end to end.
 func (a *Auditor) Record(ev Event) error {
 	if !a.Enabled() {
 		return nil
@@ -187,13 +188,31 @@ func (a *Auditor) Record(ev Event) error {
 	defer a.mu.Unlock()
 
 	if a.signing() {
+		// Cross-process safety. The mutex only serializes writers within ONE
+		// process. Multiple proxy processes each seed prevSig from the tail at
+		// open and, left to their in-memory copy, would chain off a stale head —
+		// forking the single on-disk chain and tripping a false TAMPER on Verify.
+		// Hold an exclusive flock across the whole read-tail → sign → append
+		// sequence, and re-read the TRUE on-disk chain head under it, so every
+		// entry links onto the real tail regardless of how many processes write.
+		// (lastSig rescans the file per append; fine for audit volumes, and the
+		// flock makes the rescan see a stable tail. Optimize to a seek-from-end
+		// only if this becomes a write hotspot.)
+		if err := lockExclusive(a.f.Fd()); err != nil {
+			return err
+		}
+		defer unlockFile(a.f.Fd())
+
+		last, err := lastSig(a.path)
+		if err != nil {
+			return err
+		}
 		canonical, err := json.Marshal(ev)
 		if err != nil {
 			return err
 		}
-		sig := a.sign(canonical, a.prevSig)
+		sig := a.sign(canonical, last)
 		ev.Sig = sig
-		a.prevSig = sig
 	}
 
 	line, err := json.Marshal(ev)
