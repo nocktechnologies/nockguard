@@ -3,6 +3,7 @@ package policy
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -242,16 +243,101 @@ agents:
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dec := eng.Evaluate(tt.agent, tt.tool)
-			if dec.Allowed != tt.wantAllowed {
-				t.Errorf("Evaluate(%q, %q).Allowed = %v, want %v", tt.agent, tt.tool, dec.Allowed, tt.wantAllowed)
+			if dec.Allowed() != tt.wantAllowed {
+				t.Errorf("Evaluate(%q, %q).Allowed() = %v, want %v", tt.agent, tt.tool, dec.Allowed(), tt.wantAllowed)
 			}
 			if dec.Reason != tt.wantReason {
 				t.Errorf("Evaluate(%q, %q).Reason = %q, want %q", tt.agent, tt.tool, dec.Reason, tt.wantReason)
 			}
 			// Check must never disagree with Evaluate's verdict — it delegates.
-			if got := eng.Check(tt.agent, tt.tool); got != dec.Allowed {
-				t.Errorf("Check(%q, %q) = %v but Evaluate.Allowed = %v — verdict drift", tt.agent, tt.tool, got, dec.Allowed)
+			if got := eng.Check(tt.agent, tt.tool); got != dec.Allowed() {
+				t.Errorf("Check(%q, %q) = %v but Evaluate.Allowed() = %v — verdict drift", tt.agent, tt.tool, got, dec.Allowed())
 			}
 		})
+	}
+}
+
+func TestEvaluateTristateVerdict(t *testing.T) {
+	path := writePolicy(t, `
+agents:
+  kit:
+    allow:
+      - "nockcc_*"
+    deny:
+      - "nockcc_kill_switch_set"
+    ask:
+      - "nockcc_spend_*"
+  permissive:
+    mode: allow
+    ask:
+      - "shell_*"
+`)
+	eng, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name          string
+		agent, tool   string
+		wantVerdict   Verdict
+		wantAllowed   bool
+		wantWithheld  bool
+		reasonSnippet string
+	}{
+		{"deny short-circuits ask/allow", "kit", "nockcc_kill_switch_set", Deny, false, false, `deny-rule "nockcc_kill_switch_set"`},
+		{"ask after deny before allow", "kit", "nockcc_spend_add", Ask, false, true, `ask-rule "nockcc_spend_*"`},
+		{"allow still works", "kit", "nockcc_nock_list", Allow, true, false, `allow-rule "nockcc_*"`},
+		{"ask works without allow list", "permissive", "shell_exec", Ask, false, true, `ask-rule "shell_*"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dec := eng.Evaluate(tt.agent, tt.tool)
+			if dec.Verdict != tt.wantVerdict {
+				t.Fatalf("Verdict = %v, want %v", dec.Verdict, tt.wantVerdict)
+			}
+			if dec.Allowed() != tt.wantAllowed {
+				t.Errorf("Allowed() = %v, want %v", dec.Allowed(), tt.wantAllowed)
+			}
+			if (len(dec.Withheld) > 0) != tt.wantWithheld {
+				t.Errorf("len(Withheld) = %d, want withheld=%v", len(dec.Withheld), tt.wantWithheld)
+			}
+			if !strings.Contains(dec.Reason, tt.reasonSnippet) {
+				t.Errorf("Reason = %q, want to contain %q", dec.Reason, tt.reasonSnippet)
+			}
+		})
+	}
+}
+
+func TestFailMode(t *testing.T) {
+	path := writePolicy(t, `
+agents:
+  kit:
+    allow: ["*"]
+  review:
+    allow: ["*"]
+    fail_mode: ask
+  explicit:
+    allow: ["*"]
+    fail_mode: deny
+`)
+	eng, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		agent string
+		want  Verdict
+	}{
+		{"kit", Deny},
+		{"review", Ask},
+		{"explicit", Deny},
+		{"unknown", Deny},
+	}
+	for _, tt := range tests {
+		if got := eng.FailModeVerdict(tt.agent, "unextractable-name").Verdict; got != tt.want {
+			t.Errorf("FailModeVerdict(%q).Verdict = %v, want %v", tt.agent, got, tt.want)
+		}
 	}
 }

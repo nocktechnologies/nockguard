@@ -38,9 +38,9 @@ func TestStarterPolicyLoadsAndIsDefaultDeny(t *testing.T) {
 		}
 	}
 
-	// The Phase 5 gate is present and matches.
-	if !eng.RequiresApproval("my-agent", "nockcc_kill_switch_set") {
-		t.Error("starter should require approval on kill_switch tools")
+	// The Phase 5 Ask verdict is present and matches before allow/default logic.
+	if dec := eng.Evaluate("my-agent", "nockcc_kill_switch_set"); dec.Verdict != Ask {
+		t.Errorf("starter should ask on kill_switch tools, got %s (%s)", dec.Verdict, dec.Reason)
 	}
 }
 

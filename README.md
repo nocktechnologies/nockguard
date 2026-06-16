@@ -90,6 +90,8 @@ nockguard proxy \
 
 - **allow**: Tool patterns the agent can use. Supports `*` wildcards.
 - **deny**: Tool patterns blocked regardless of allow rules. Deny takes precedence.
+- **ask**: Tool patterns that return the `Ask` verdict. NockGuard holds the call for a human approval decision before forwarding it. Denial or timeout drops the call.
+- **fail_mode**: `deny` (default) rejects malformed or ambiguous `tools/call` messages that NockGuard cannot safely interpret; `ask` parks those failures behind approval instead.
 - **mode**: `allow` (default) permits unlisted tools, `deny` blocks them.
 - **default**: Fallback policy for agents not listed by name.
 - **validate_input** (Phase 2): built-in input-validation categories applied to tool-call arguments — `sqli`, `path_traversal`, `secrets`. Opt-in per agent.
@@ -101,6 +103,8 @@ nockguard proxy \
 agents:
   kit:
     allow: ["read_*", "search_*"]
+    ask: ["deploy_*"]
+    fail_mode: ask
     validate_input: ["sqli", "path_traversal", "secrets"]
     block_params:
       - "(?i)rm\\s+-rf\\s+/"
@@ -111,7 +115,9 @@ agents:
       max_calls: 5000
 ```
 
-Rate limiting and spend caps are opt-in and independent — set one, both, or neither. NockGuard sits at the MCP layer and sees tool *calls*, not upstream API token spend, so the spend cap is denominated in tool calls (a proxy for cost), enforced before the call reaches the server. When a call clears the allowlist and input validation but exceeds a limit, the agent receives a JSON-RPC error (`rate limit exceeded` / `spend cap exceeded`); denied or input-blocked calls never consume budget.
+Policy verdict precedence is `deny` first, then `ask`, then normal allow/mode logic. An `Ask` verdict is not a warning or "flag but pass" result: the call is withheld until approval. Any state-write intents attached to the policy decision are also withheld; NockGuard applies them only after approval, and drops them on denial or timeout. The legacy `require_approval` key remains accepted for existing policies, but new policies should use `ask`.
+
+Rate limiting and spend caps are opt-in and independent — set one, both, or neither. NockGuard sits at the MCP layer and sees tool *calls*, not upstream API token spend, so the spend cap is denominated in tool calls (a proxy for cost), enforced before the call reaches the server. When a call clears the allowlist and input validation but exceeds a limit, the agent receives a JSON-RPC error (`rate limit exceeded` / `spend cap exceeded`); policy-denied or input-blocked calls never consume budget. Ask calls are metered before the approval prompt, preserving the existing Phase 5 gate order.
 
 ## Audit Trail (Phase 4)
 
@@ -133,7 +139,7 @@ Each decision is one JSON object per line (JSON Lines):
 {"ts":"2026-06-03T18:30:01Z","agent":"kit","tool":"nockcc_nock_list","decision":"allow","reason":"allow-rule \"nockcc_nock_*\""}
 ```
 
-`decision` is one of `allow`, `deny`, `block` (input validation), `ratelimit`, or `hide` (filtered from `tools/list`). Auditing is opt-in (absent or `enabled: false` keeps Phase 1–3 behavior) and fail-open — an audit write error is logged but never blocks or fails a tool call.
+`decision` is one of `allow`, `deny`, `block` (input validation), `ratelimit`, `approval-granted`, `approval-denied`, `state-write`, or `hide` (filtered from `tools/list`). Auditing is opt-in (absent or `enabled: false` keeps Phase 1–3 behavior) and fail-open — an audit write error is logged but never blocks or fails a tool call.
 
 `reason` names the specific policy rule behind each decision — `deny-rule "…"`, `allow-rule "…"`, `no allow-rule matched`, `default-allow (no allow list)`, or `no policy for agent (fail-closed)` — so the trail is *explainable* rather than an opaque `policy`. The matched rule is recorded operator-side only; the error returned to the agent stays minimal (`denied by policy`), so a hostile agent cannot map the policy surface from rejections.
 
@@ -141,7 +147,7 @@ Each decision is one JSON object per line (JSON Lines):
 
 ### Forwarding to the NockCC ops-log
 
-NockGuard can stream **enforcement decisions** (`deny`, `block`, `ratelimit`) to the [NockCC](https://cc.nocktechnologies.io) ops-log, so what the firewall blocks across the fleet shows up in one Command Center feed. Allowed calls and tool-list hides are not forwarded — the centralized feed stays high-signal, while the local JSONL keeps the complete record.
+NockGuard can stream **enforcement decisions** (`deny`, `block`, `ratelimit`, `approval-granted`, `approval-denied`) to the [NockCC](https://cc.nocktechnologies.io) ops-log, so what the firewall blocks or parks across the fleet shows up in one Command Center feed. Allowed calls, state-write records, and tool-list hides are not forwarded — the centralized feed stays high-signal, while the local JSONL keeps the complete record.
 
 ```yaml
 audit:
@@ -203,7 +209,7 @@ It binds to loopback by default (private), embeds its own page (single binary, n
 NockGuard intercepts two MCP methods:
 
 - **tools/list**: Filters the tool list response, hiding denied tools from the agent.
-- **tools/call**: Checks the tool name against policy before forwarding. With Phase 2 validation enabled, it also scans the call's arguments (recursively, keys and values) against the configured rule categories and custom patterns, blocking injection attempts and outbound sensitive-data leaks. With Phase 3 limits enabled, a call that clears policy and validation is then metered against the agent's rate limit and spend cap. Denied, blocked, or over-limit calls get a JSON-RPC error response.
+- **tools/call**: Checks the tool name against policy before forwarding. `Deny` rejects immediately. `Ask` holds the call for the configured approver and forwards only on approval, applying any withheld state writes after that approval. With Phase 2 validation enabled, NockGuard also scans the call's arguments (recursively, keys and values) against the configured rule categories and custom patterns, blocking injection attempts and outbound sensitive-data leaks. With Phase 3 limits enabled, a call that clears policy and validation is then metered against the agent's rate limit and spend cap. Denied, ask-denied, blocked, or over-limit calls get a JSON-RPC error response.
 
 All other MCP traffic passes through unmodified. NockGuard is version-transparent — it works with any MCP protocol version. Input validation is opt-in: an allowlist-only policy behaves exactly as in Phase 1.
 

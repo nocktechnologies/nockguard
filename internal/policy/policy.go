@@ -58,7 +58,12 @@ const DefaultAuditPath = ".nockguard/logs/audit.jsonl"
 type AgentPolicy struct {
 	Allow []string `yaml:"allow"`
 	Deny  []string `yaml:"deny"`
-	Mode  string   `yaml:"mode"` // "allow" or "deny"
+	// Ask holds tools for a human verdict as a policy-engine-native approval
+	// verdict. RequireApproval remains below as the legacy Phase 5 gate so
+	// existing policy files keep their original tool-list visibility.
+	Ask      []string `yaml:"ask"`
+	FailMode string   `yaml:"fail_mode"`
+	Mode     string   `yaml:"mode"` // "allow" or "deny"
 	// Phase 2 input validation (opt-in). ValidateInput lists built-in rule
 	// categories ("sqli", "path_traversal", "secrets"); BlockParams adds
 	// custom regexes. Empty = no validation (Phase 1 behavior preserved).
@@ -136,18 +141,65 @@ func (e *Engine) HasPolicyFor(agent string) bool {
 	return ok
 }
 
+type Verdict int
+
+const (
+	Allow Verdict = iota
+	Deny
+	Ask
+)
+
+func (v Verdict) String() string {
+	switch v {
+	case Allow:
+		return "allow"
+	case Deny:
+		return "deny"
+	case Ask:
+		return "ask"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(v))
+	}
+}
+
+// StateWrite is an explicit side-effect intent produced by policy evaluation.
+// The proxy applies these only after an Ask verdict is approved; denied or timed
+// out approval prompts drop them.
+type StateWrite struct {
+	Label string
+	State string
+}
+
+func (w StateWrite) Reason() string {
+	if w.Label == "" && w.State == "" {
+		return "state-write"
+	}
+	if w.Label == "" {
+		return w.State
+	}
+	if w.State == "" {
+		return w.Label
+	}
+	return w.Label + " " + w.State
+}
+
 // Decision is the outcome of evaluating a (agent, tool) pair against policy. It
 // carries not just the allow/deny verdict but the BASIS for it — which rule
 // matched, or that none did — so the audit trail can name WHY a call was allowed
 // or denied instead of recording an opaque "policy". Every enforcement decision
 // points back at its source rule; this is the explainability layer.
 type Decision struct {
-	Allowed bool
+	Verdict Verdict
 	// Reason is a short, audit-ready phrase naming the basis for the verdict,
 	// e.g. `deny-rule "*delete*"`, `allow-rule "nockcc_nock_*"`,
 	// "no allow-rule matched", "default-allow (no allow list)", or
 	// "no policy for agent (fail-closed)".
-	Reason string
+	Reason   string
+	Withheld []StateWrite
+}
+
+func (d Decision) Allowed() bool {
+	return d.Verdict == Allow
 }
 
 // Evaluate resolves the policy decision for a (agent, tool) pair AND its basis.
@@ -164,35 +216,46 @@ func (e *Engine) Evaluate(agent, tool string) Decision {
 			// unrecognized, so denying every tool is the only safe reading of
 			// "default-deny". (Previously Check returned true — allow-everything —
 			// which silently unrestricted any unconfigured --agent value.)
-			return Decision{Allowed: false, Reason: "no policy for agent (fail-closed)"}
+			return Decision{Verdict: Deny, Reason: "no policy for agent (fail-closed)"}
 		}
 	}
 
 	for _, pattern := range pol.Deny {
 		if matchPattern(pattern, tool) {
-			return Decision{Allowed: false, Reason: fmt.Sprintf("deny-rule %q", pattern)}
+			return Decision{Verdict: Deny, Reason: fmt.Sprintf("deny-rule %q", pattern)}
+		}
+	}
+
+	for _, pattern := range pol.Ask {
+		if matchPattern(pattern, tool) {
+			reason := fmt.Sprintf("ask-rule %q", pattern)
+			return Decision{
+				Verdict:  Ask,
+				Reason:   reason,
+				Withheld: []StateWrite{{Label: "approval-state", State: "approved for " + reason}},
+			}
 		}
 	}
 
 	if len(pol.Allow) > 0 {
 		for _, pattern := range pol.Allow {
 			if matchPattern(pattern, tool) {
-				return Decision{Allowed: true, Reason: fmt.Sprintf("allow-rule %q", pattern)}
+				return Decision{Verdict: Allow, Reason: fmt.Sprintf("allow-rule %q", pattern)}
 			}
 		}
-		return Decision{Allowed: false, Reason: "no allow-rule matched"}
+		return Decision{Verdict: Deny, Reason: "no allow-rule matched"}
 	}
 
 	if pol.Mode == "deny" {
-		return Decision{Allowed: false, Reason: `mode "deny", no allow list`}
+		return Decision{Verdict: Deny, Reason: `mode "deny", no allow list`}
 	}
-	return Decision{Allowed: true, Reason: "default-allow (no allow list)"}
+	return Decision{Verdict: Allow, Reason: "default-allow (no allow list)"}
 }
 
 // Check reports whether a (agent, tool) call is permitted. It is the boolean
 // view of Evaluate, preserved for callers that only need the verdict.
 func (e *Engine) Check(agent, tool string) bool {
-	return e.Evaluate(agent, tool).Allowed
+	return e.Evaluate(agent, tool).Allowed()
 }
 
 // RequiresApproval reports whether a (agent, tool) call must be held for a human
@@ -214,6 +277,24 @@ func (e *Engine) RequiresApproval(agent, tool string) bool {
 		}
 	}
 	return false
+}
+
+func (e *Engine) FailModeVerdict(agent, reason string) Decision {
+	pol, ok := e.config.Agents[agent]
+	if !ok {
+		pol, ok = e.config.Agents["default"]
+		if !ok {
+			return Decision{Verdict: Deny, Reason: reason}
+		}
+	}
+	if pol.FailMode == "ask" {
+		return Decision{
+			Verdict:  Ask,
+			Reason:   reason,
+			Withheld: []StateWrite{{Label: "approval-state", State: "approved for " + reason}},
+		}
+	}
+	return Decision{Verdict: Deny, Reason: reason}
 }
 
 // ValidatorFor builds the input validator for an agent (falling back to the
