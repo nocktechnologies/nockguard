@@ -30,6 +30,29 @@ pool:
     cooldown_seconds: 60
 `
 
+const validBudgetConfig = `
+pool:
+  listen: "127.0.0.1:4141"
+  upstreams:
+    - label: cheap-1
+      codex_home: ~/.codex-cheap
+      tier: cheap
+      cost_per_call_usd: 0.01
+    - label: opus-1
+      codex_home: ~/.codex-opus
+      tier: expensive
+      cost_per_call_usd: 0.10
+    - label: legacy-untiered
+      codex_home: ~/.codex-legacy
+      cost_per_call_usd: 0.25
+  routing:
+    strategy: headroom
+    cooldown_seconds: 60
+  budget:
+    max_cost_usd: 1.00
+    ask_thresholds_usd: [0.50, 0.75]
+`
+
 func TestLoadValidConfig(t *testing.T) {
 	cfg, err := Load(writeConfig(t, validConfig))
 	if err != nil {
@@ -44,6 +67,60 @@ func TestLoadValidConfig(t *testing.T) {
 	}
 	if cfg.Pool.Routing.Cooldown() != 60*time.Second {
 		t.Errorf("cooldown = %v, want 60s", cfg.Pool.Routing.Cooldown())
+	}
+}
+
+func TestLoadValidBudgetConfig(t *testing.T) {
+	cfg, err := Load(writeConfig(t, validBudgetConfig))
+	if err != nil {
+		t.Fatalf("valid budget config rejected: %v", err)
+	}
+	cfg.Normalize()
+	if !cfg.Pool.Budget.Enabled() {
+		t.Fatal("budget with max_cost_usd should be enabled")
+	}
+	if cfg.Pool.Upstreams[0].Tier != TierCheap {
+		t.Errorf("tier = %q, want cheap", cfg.Pool.Upstreams[0].Tier)
+	}
+	if cfg.Pool.Upstreams[2].EffectiveTier() != TierExpensive {
+		t.Errorf("untiered upstream effective tier = %q, want expensive", cfg.Pool.Upstreams[2].EffectiveTier())
+	}
+	if got := cfg.Pool.Upstreams[1].CostPerCallUSD; got != 0.10 {
+		t.Errorf("cost_per_call_usd = %v, want 0.10", got)
+	}
+}
+
+func TestBudgetAbsentIsDisabled(t *testing.T) {
+	cfg, err := Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Pool.Budget.Enabled() {
+		t.Fatal("absent/zero budget must be disabled")
+	}
+}
+
+func TestUnknownTierRejected(t *testing.T) {
+	body := strings.Replace(validBudgetConfig, "tier: expensive", "tier: premium", 1)
+	_, err := Load(writeConfig(t, body))
+	if err == nil || !strings.Contains(err.Error(), "unknown tier") {
+		t.Fatalf("unknown tier must fail loud, got: %v", err)
+	}
+}
+
+func TestNegativeBudgetCostRejected(t *testing.T) {
+	body := strings.Replace(validBudgetConfig, "cost_per_call_usd: 0.10", "cost_per_call_usd: -0.01", 1)
+	_, err := Load(writeConfig(t, body))
+	if err == nil || !strings.Contains(err.Error(), "cost_per_call_usd must be >= 0") {
+		t.Fatalf("negative upstream cost must fail loud, got: %v", err)
+	}
+}
+
+func TestNegativeAskThresholdRejected(t *testing.T) {
+	body := strings.Replace(validBudgetConfig, "ask_thresholds_usd: [0.50, 0.75]", "ask_thresholds_usd: [0.50, -0.01]", 1)
+	_, err := Load(writeConfig(t, body))
+	if err == nil || !strings.Contains(err.Error(), "ask_thresholds_usd[1] must be >= 0") {
+		t.Fatalf("negative ask threshold must fail loud, got: %v", err)
 	}
 }
 

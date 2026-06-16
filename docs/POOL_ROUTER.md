@@ -29,8 +29,13 @@ that is a bug to be reported and fixed, not a feature.
    returns to the account that holds its server-side state; (b) otherwise
    maximum quota headroom; (c) a temporary cooldown demotes an account that
    just failed (rate-limited / 5xx / auth error).
-6. Write one signed audit event per routing decision (see "Audit events").
-7. Refresh an upstream's OAuth token on auth failure and persist the rotated
+6. When budget config is present, aggregate configured call cost across the
+   `rootSessionID` spawn tree. At or above the cap, route to the best cheap
+   upstream instead of killing the request.
+7. Emit budget threshold asks and downgrade events to the optional NockCC Live
+   Wall forwarder when it is configured.
+8. Write one signed audit event per routing decision (see "Audit events").
+9. Refresh an upstream's OAuth token on auth failure and persist the rotated
    token back to that account's own `auth.json`.
 
 **It does NOT:**
@@ -52,6 +57,7 @@ that is a bug to be reported and fixed, not a feature.
 | Audit events | Signed JSONL (existing NockGuard audit trail) | timestamp, agent, model, chosen account *label*, decision, reason, latency, HTTP status. **No prompt text, no tokens, no account emails.** |
 | Quota state | Memory only (lost on restart) | per-account used-percent, window, reset-at, as self-reported by the backend |
 | Session pins | Memory only (V1) | session-id → account label |
+| Budget state | Memory only (lost on restart) | rootSessionID → configured spend total, plus one threshold-ask marker per root/threshold |
 | Credentials | Never stored by the router | read from each `codex_home`'s `auth.json`; rotated tokens written back to the same file and nowhere else |
 
 ## Configuration (`pool.yaml`)
@@ -62,11 +68,18 @@ pool:
   upstreams:
     - label: sub-1            # the name that appears in audit events
       codex_home: ~/.codex
+      tier: cheap             # cheap | standard | expensive; empty = expensive
+      cost_per_call_usd: 0.01 # configured estimate added to rootSessionID spend
     - label: sub-2
       codex_home: ~/.codex-sub2
+      tier: expensive
+      cost_per_call_usd: 0.10
   routing:
     strategy: headroom        # max remaining quota; sticky sessions always win
     cooldown_seconds: 60      # demotion window after an upstream failure
+  budget:
+    max_cost_usd: 1.00        # absent or 0 = disabled / today's routing
+    ask_thresholds_usd: [0.50, 0.75]
 
 # The audit block is the same one the MCP proxy uses — same signing, same
 # verification, same Wall. See README "Audit trail".
@@ -87,8 +100,33 @@ shape (one per routed request):
 ```
 
 Reason strings are enumerated, not free text: `sticky-session <label>`,
-`max-headroom <label>`, `cooldown-skip <label>`, `refresh-retry <label>`,
+`max-headroom <label>`, `cooldown-skip <label>`, `budget-downgrade <label>`,
+`budget-no-cheap-upstreams`, `refresh-retry <label>`,
 `all-upstreams-exhausted`.
+
+## Budget and downgrade semantics
+
+Budget routing is opt-in. If `pool.budget.max_cost_usd` is absent or `0`,
+`RouteWithBudget` delegates to the existing `Route` behavior and records no
+spend.
+
+When budget routing is enabled:
+
+- Each routed call adds the chosen upstream's `cost_per_call_usd` to the
+  `rootSessionID` tree. If no root is provided, the router falls back to the
+  session id, then to a process-local default bucket.
+- Each configured `ask_thresholds_usd` value emits at most one `budget-ask`
+  event per root. The ask is a Live Wall signal; it does not block the route in
+  this increment.
+- Once tree spend is at or above `max_cost_usd`, expensive and untiered
+  upstreams are excluded. The router chooses the eligible cheap upstream with
+  the best normal headroom, respecting cooldowns.
+- Untiered upstreams fail closed as expensive, so adding a new model without a
+  tier cannot bypass the cap.
+- Downgrade is preferred over kill: if at least one cheap upstream is available,
+  at-cap routing returns `budget-downgrade <label>` and no
+  `ErrAllExhausted`. `ErrAllExhausted` is returned only when every eligible
+  cheap upstream is unavailable.
 
 ## Client setup
 
