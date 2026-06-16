@@ -20,9 +20,8 @@ import (
 
 // buildApprover wires the Phase 5 approval gate. For now: a deterministic test
 // seam (NOCKGUARD_APPROVAL_TEST=approve|deny) used by e2e tests, otherwise no
-// approver (nil) — the real Telegram approver lands in the next piece. nil means
-// require_approval rules are present but un-enforced; that is logged loud so a
-// deployment never silently skips the gate.
+// approver (nil). nil preserves the legacy require_approval behavior; the new
+// Ask verdict fails closed without an approver.
 func buildApprover(logger *log.Logger) approval.Approver {
 	switch os.Getenv("NOCKGUARD_APPROVAL_TEST") {
 	case "approve":
@@ -39,7 +38,7 @@ func buildApprover(logger *log.Logger) approval.Approver {
 		logger.Printf("Phase 5 approval gate ON — Telegram (dedicated bot), %s timeout, fail-safe deny", timeout)
 		return approval.NewTelegramApprover(token, chatID, timeout)
 	}
-	logger.Printf("Phase 5 approval gate: no approver configured (set NOCKGUARD_APPROVAL_BOT_TOKEN + NOCKGUARD_APPROVAL_CHAT_ID); require_approval rules are present but un-enforced")
+	logger.Printf("Phase 5 approval gate: no approver configured (set NOCKGUARD_APPROVAL_BOT_TOKEN + NOCKGUARD_APPROVAL_CHAT_ID); ask rules fail closed, legacy require_approval rules are un-enforced")
 	return nil
 }
 

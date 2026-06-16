@@ -182,6 +182,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 		}
 		canonicalLine, err := json.Marshal(topLevel)
 		if err != nil {
+			p.handleFailModeAsk("", nil, "canonical-marshal-failed")
 			p.logger.Printf("REJECT agent=%s reason=canonical-marshal-failed", p.agent)
 			errResp := jsonrpc.ErrorResponse(json.RawMessage("null"), -32603,
 				"nockguard: rejected — message could not be canonicalized")
@@ -212,11 +213,18 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			if !ok || toolName == "" {
 				// A tools/call whose name we cannot extract fails CLOSED — the
 				// upstream might still resolve a name the proxy could not see.
-				p.logger.Printf("DENY agent=%s reason=unextractable-name", p.agent)
-				p.audit("", "deny", "unextractable-name")
-				if werr := p.rejectToAgent(msg.ID, -32600,
-					"nockguard: tools/call rejected — tool name could not be extracted"); werr != nil {
-					return werr
+				dec := p.engine.FailModeVerdict(p.agent, "unextractable-name")
+				if dec.Verdict == policy.Ask && p.approveAsk("", canonicalLine, dec, false) {
+					if _, writeErr := fmt.Fprintf(w, "%s\n", canonicalLine); writeErr != nil {
+						return writeErr
+					}
+				} else {
+					p.logger.Printf("DENY agent=%s reason=unextractable-name", p.agent)
+					p.audit("", "deny", "unextractable-name")
+					if werr := p.rejectToAgent(msg.ID, -32600,
+						"nockguard: tools/call rejected — tool name could not be extracted"); werr != nil {
+						return werr
+					}
 				}
 				continue
 			}
@@ -227,7 +235,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			// agent-facing error on purpose — revealing it would let a hostile
 			// agent map the policy surface — so it lands only in the log + audit.
 			dec := p.engine.Evaluate(p.agent, toolName)
-			if !dec.Allowed {
+			if dec.Verdict == policy.Deny {
 				p.logger.Printf("DENY agent=%s tool=%s reason=%q", p.agent, toolName, dec.Reason)
 				p.audit(toolName, "deny", dec.Reason)
 				if werr := p.rejectToAgent(msg.ID, -32600,
@@ -235,6 +243,11 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 					return werr
 				}
 				continue
+			}
+			allowWithoutApprover := false
+			if dec.Verdict == policy.Allow && p.engine.RequiresApproval(p.agent, toolName) {
+				dec.Verdict = policy.Ask
+				allowWithoutApprover = true
 			}
 
 			// Phase 2: input validation on the canonical tool-call arguments
@@ -266,24 +279,12 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				}
 			}
 
-			// Phase 5: interactive approval gate. The call has cleared policy,
-			// validation and limits, so it WOULD be allowed — but a tool matching
-			// require_approval is HELD for a human nod first. Fail-safe: the
-			// approver returns Approved=false on timeout/transport error, so a
-			// missed prompt never auto-approves a consequential call.
-			if p.approver != nil && p.engine.RequiresApproval(p.agent, toolName) {
-				v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: toolName, Params: canonicalParams})
-				if !v.Approved {
-					p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=%s", p.agent, toolName, v.Reason)
-					p.audit(toolName, "approval-denied", v.Reason)
-					if werr := p.rejectToAgent(msg.ID, -32600,
-						fmt.Sprintf("nockguard: tool %q denied by approval gate (%s)", toolName, v.Reason)); werr != nil {
-						return werr
-					}
-					continue
+			if dec.Verdict == policy.Ask && !p.approveAsk(toolName, canonicalParams, dec, allowWithoutApprover) {
+				if werr := p.rejectToAgent(msg.ID, -32600,
+					fmt.Sprintf("nockguard: tool %q denied by approval gate", toolName)); werr != nil {
+					return werr
 				}
-				p.logger.Printf("APPROVAL-GRANTED agent=%s tool=%s reason=%s", p.agent, toolName, v.Reason)
-				p.audit(toolName, "approval-granted", v.Reason)
+				continue
 			}
 
 			// Cleared every gate — forward CANONICAL bytes, never the raw line.
@@ -293,6 +294,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			topLevel["params"] = canonicalParams
 			out, mErr := json.Marshal(topLevel)
 			if mErr != nil {
+				p.handleFailModeAsk(toolName, canonicalParams, "canonical-marshal-failed")
 				p.logger.Printf("DENY agent=%s tool=%s reason=canonical-marshal-failed", p.agent, toolName)
 				p.audit(toolName, "deny", "canonical-marshal-failed")
 				if werr := p.rejectToAgent(msg.ID, -32603,
@@ -324,6 +326,43 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 		}
 	}
 	return scanner.Err()
+}
+
+func (p *StdioProxy) approveAsk(tool string, params json.RawMessage, dec policy.Decision, allowWithoutApprover bool) bool {
+	if p.approver == nil {
+		p.logger.Printf("APPROVAL-SKIPPED agent=%s tool=%s reason=no-approver-configured", p.agent, tool)
+		if allowWithoutApprover {
+			return true
+		}
+		p.audit(tool, "approval-denied", "no-approver-configured")
+		return false
+	}
+	v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: tool, Params: params})
+	if !v.Approved {
+		p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)
+		p.audit(tool, "approval-denied", v.Reason)
+		return false
+	}
+	p.logger.Printf("APPROVAL-GRANTED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)
+	p.audit(tool, "approval-granted", v.Reason)
+	p.applyWithheld(tool, dec.Withheld)
+	return true
+}
+
+func (p *StdioProxy) handleFailModeAsk(tool string, params json.RawMessage, reason string) bool {
+	dec := p.engine.FailModeVerdict(p.agent, reason)
+	if dec.Verdict != policy.Ask {
+		return false
+	}
+	return p.approveAsk(tool, params, dec, false)
+}
+
+func (p *StdioProxy) applyWithheld(tool string, writes []policy.StateWrite) {
+	for _, write := range writes {
+		reason := write.Reason()
+		p.logger.Printf("STATE-WRITE agent=%s tool=%s reason=%q", p.agent, tool, reason)
+		p.audit(tool, "state-write", reason)
+	}
 }
 
 // rejectToAgent returns a JSON-RPC error to the agent for a denied REQUEST
@@ -389,7 +428,7 @@ func (p *StdioProxy) filterToolListResponse(line []byte) []byte {
 		InputSchema json.RawMessage `json:"inputSchema,omitempty"`
 	}
 	for _, t := range resp.Result.Tools {
-		if dec := p.engine.Evaluate(p.agent, t.Name); dec.Allowed {
+		if dec := p.engine.Evaluate(p.agent, t.Name); dec.Allowed() {
 			filtered = append(filtered, t)
 		} else {
 			p.logger.Printf("HIDE agent=%s tool=%s reason=%q", p.agent, t.Name, dec.Reason)

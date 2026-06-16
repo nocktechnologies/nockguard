@@ -50,6 +50,14 @@ const approvalPolicy = `agents:
   kit:
     allow:
       - "nockcc_*"
+    ask:
+      - "nockcc_kill_switch_set"
+`
+
+const legacyApprovalPolicy = `agents:
+  kit:
+    allow:
+      - "nockcc_*"
     require_approval:
       - "nockcc_kill_switch_set"
 `
@@ -85,13 +93,108 @@ func TestApprovalGateGranted(t *testing.T) {
 	}
 }
 
-func TestApprovalGateAbsentByDefault(t *testing.T) {
-	// No NOCKGUARD_APPROVAL_TEST and no real approver wired -> approver is nil, so
-	// require_approval is present but un-enforced and the call passes (Phase 1-4
-	// behavior preserved; the gate is strictly opt-in on having an approver).
+func TestAskGateFailsClosedWithoutApprover(t *testing.T) {
 	byID := runProxyEnv(t, approvalPolicy, approvalRequests())
 
+	if msg := errorMessage(t, byID[1]); !strings.Contains(msg, "denied by approval gate") {
+		t.Errorf("with no approver wired, ask call should fail closed, got message: %q", msg)
+	}
+	if byID[2]["error"] != nil {
+		t.Errorf("call 2 (no ask rule) should pass, got error: %v", byID[2]["error"])
+	}
+}
+
+func TestLegacyApprovalGateAbsentByDefault(t *testing.T) {
+	// No NOCKGUARD_APPROVAL_TEST and no real approver wired -> approver is nil, so
+	// legacy require_approval is present but un-enforced and the call passes
+	// (Phase 1-5 behavior preserved for existing policy files).
+	byID := runProxyEnv(t, legacyApprovalPolicy, approvalRequests())
+
 	if byID[1]["error"] != nil {
-		t.Errorf("with no approver wired, the call should pass through, got error: %v", byID[1]["error"])
+		t.Errorf("with no approver wired, legacy require_approval should pass through, got error: %v", byID[1]["error"])
+	}
+}
+
+func TestLegacyRequireApprovalStillGatesWithoutHidingFromList(t *testing.T) {
+	byID := runProxyEnv(t, legacyApprovalPolicy, []string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"nockcc_kill_switch_set"}}`,
+	}, "NOCKGUARD_APPROVAL_TEST=deny")
+
+	result := byID[1]["result"].(map[string]interface{})
+	tools := result["tools"].([]interface{})
+	found := false
+	for _, tool := range tools {
+		if tool.(map[string]interface{})["name"] == "nockcc_kill_switch_set" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("legacy require_approval tool should remain visible in tools/list")
+	}
+	if msg := errorMessage(t, byID[2]); !strings.Contains(msg, "denied by approval gate") {
+		t.Errorf("legacy require_approval call should still be held then denied, got message: %q", msg)
+	}
+}
+
+func TestAskVerdictAppliesWithheldWritesOnlyOnApprove(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		approval       string
+		wantCallError  bool
+		wantStateWrite bool
+	}{
+		{"approved applies withheld write", "approve", false, true},
+		{"denied drops withheld write", "deny", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			auditPath := filepath.Join(dir, "audit.jsonl")
+			policyContent := `audit:
+  enabled: true
+  path: ` + auditPath + `
+` + approvalPolicy
+
+			byID := runProxyEnv(t, policyContent, []string{
+				`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nockcc_kill_switch_set"}}`,
+			}, "NOCKGUARD_APPROVAL_TEST="+tc.approval)
+
+			if gotError := byID[1]["error"] != nil; gotError != tc.wantCallError {
+				t.Fatalf("call error = %v, want %v: %v", gotError, tc.wantCallError, byID[1])
+			}
+
+			lines := readAuditFile(t, auditPath)
+			foundStateWrite := false
+			for _, ev := range lines {
+				if ev["decision"] == "state-write" && ev["reason"] == `approval-state approved for ask-rule "nockcc_kill_switch_set"` {
+					foundStateWrite = true
+				}
+			}
+			if foundStateWrite != tc.wantStateWrite {
+				t.Errorf("state-write audit present = %v, want %v; audit=%v", foundStateWrite, tc.wantStateWrite, lines)
+			}
+		})
+	}
+}
+
+func TestFailModeAskParksUnextractableToolName(t *testing.T) {
+	policyContent := `agents:
+  kit:
+    allow:
+      - "nockcc_*"
+    fail_mode: ask
+`
+	request := []string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"arguments":{"x":1}}}`,
+	}
+
+	denied := runProxyEnv(t, policyContent, request, "NOCKGUARD_APPROVAL_TEST=deny")
+	if msg := errorMessage(t, denied[1]); !strings.Contains(msg, "tool name could not be extracted") {
+		t.Fatalf("fail_mode ask denied should reject unextractable name, got %q", msg)
+	}
+
+	approved := runProxyEnv(t, policyContent, request, "NOCKGUARD_APPROVAL_TEST=approve")
+	if approved[1]["error"] != nil {
+		t.Fatalf("fail_mode ask approved should forward the canonical call, got error: %v", approved[1]["error"])
 	}
 }
