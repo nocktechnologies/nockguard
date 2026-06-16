@@ -216,6 +216,24 @@ NockGuard intercepts two MCP methods:
 
 All other MCP traffic passes through unmodified. NockGuard is version-transparent — it works with any MCP protocol version. Input validation is opt-in: an allowlist-only policy behaves exactly as in Phase 1.
 
+## Coverage Scope
+
+NockGuard operates at the **MCP transport layer**. It intercepts messages on the stdio pipe between the agent and an MCP server. That is its coverage boundary.
+
+**What NockGuard covers:**
+- Every `tools/list` and `tools/call` MCP message the agent sends through the proxy.
+- All policy decisions (allow, deny, ask, rate-limit, spend-cap) on those calls.
+- The full audit trail and Live Wall feed for those decisions.
+
+**What NockGuard does not cover:**
+- Direct HTTP/REST calls an agent makes to a backend service (e.g., NockCC's REST API via `curl` or an HTTP client) that bypass the MCP proxy entirely.
+- Network egress to arbitrary URLs — NockGuard is not an HTTP forward proxy.
+- Calls routed to MCP servers that are not wired through NockGuard (an agent can have multiple MCP servers; only the ones using `nockguard proxy` as their command are gated).
+
+This is a deliberate design constraint, not a defect. An agent that calls the backing REST API directly — rather than through its MCP server — operates outside the gated channel. The accountability guarantee is: **every MCP tool call through NockGuard is policy-checked, audited, and optionally non-repudiably signed**. It does not extend to direct HTTP traffic that never touches the proxy.
+
+If your threat model includes agents switching to curl/HTTP as a bypass, enforce that at the network layer (egress firewall, outbound proxy, NockLock seccomp policy) rather than at the MCP layer. HTTP forward-proxy coverage for NockGuard is a planned feature.
+
 ## Relationship to NockLock
 
 - **NockLock** = secret isolation ("Fence your environment")
