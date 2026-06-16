@@ -11,6 +11,7 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/forward"
 	"github.com/nocktechnologies/nockguard/internal/ratelimit"
+	"github.com/nocktechnologies/nockguard/internal/trust"
 	"github.com/nocktechnologies/nockguard/internal/validate"
 	"gopkg.in/yaml.v3"
 )
@@ -73,6 +74,9 @@ type AgentPolicy struct {
 	// (Phase 1/2 behavior preserved).
 	RateLimit *RateLimitPolicy `yaml:"rate_limit"`
 	SpendCap  *SpendCapPolicy  `yaml:"spend_cap"`
+	// Behavioral trust scoring is opt-in. When enabled, audit decisions persist
+	// to ~/.nockguard/trust/<agent>.json and scale the rate_limit cap.
+	Trust *TrustPolicy `yaml:"trust"`
 	// Phase 5 interactive approval gates (opt-in). Tool patterns that require a
 	// human nod before the call is forwarded upstream, even when the tool is
 	// allowed by policy. Empty = no approval gate (Phase 1-4 behavior preserved).
@@ -91,6 +95,11 @@ type RateLimitPolicy struct {
 // session. It never refills.
 type SpendCapPolicy struct {
 	MaxCalls int `yaml:"max_calls"`
+}
+
+type TrustPolicy struct {
+	Enabled bool   `yaml:"enabled"`
+	Path    string `yaml:"path"`
 }
 
 type Engine struct {
@@ -341,6 +350,27 @@ func (e *Engine) LimiterFor(agent string) (*ratelimit.Limiter, error) {
 		cfg.SpendCap = pol.SpendCap.MaxCalls
 	}
 	return ratelimit.New(cfg), nil
+}
+
+// TrustFor builds the opt-in behavioral trust accumulator for an agent. Missing
+// or disabled trust config returns nil, preserving the previous static limiter
+// behavior.
+func (e *Engine) TrustFor(agent string) (*trust.Accumulator, error) {
+	if !ValidAgentName(agent) {
+		return nil, fmt.Errorf("invalid agent name %q: only alphanumerics, hyphens, and dots are allowed", agent)
+	}
+	pol, ok := e.config.Agents[agent]
+	if !ok {
+		pol = e.config.Agents["default"]
+	}
+	if pol.Trust == nil || !pol.Trust.Enabled {
+		return nil, nil
+	}
+	return trust.New(trust.Config{
+		Enabled: true,
+		Path:    pol.Trust.Path,
+		Agent:   agent,
+	})
 }
 
 // Auditor builds the Phase 4 audit trail sink from config. Returns a disabled

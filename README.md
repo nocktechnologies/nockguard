@@ -98,6 +98,7 @@ nockguard proxy \
 - **block_params** (Phase 2): custom regex patterns; a tool call is blocked if any argument matches.
 - **rate_limit** (Phase 3): at most `max_calls` tool calls within a sliding `window` (a Go duration — `30s`, `1m`, `1h`). The allowance refills as the window slides — this bounds bursts and runaway tool-call loops without blocking normal traffic.
 - **spend_cap** (Phase 3): a hard cumulative ceiling of `max_calls` tool calls for the whole proxy session. It never refills — once hit, every further call is blocked. This is the kill-before-runaway stop that bounds total cost for an agent left running unattended.
+- **trust**: opt-in behavioral trust scoring. When `enabled: true`, NockGuard persists a per-agent score at `~/.nockguard/trust/<agent>.json` and scales the configured rate-limit cap from `0.1x` to `2.0x` based on recent allow/warn/deny outcomes. See `docs/TRUST.md`.
 
 ```yaml
 agents:
@@ -111,6 +112,8 @@ agents:
     rate_limit:
       max_calls: 60
       window: 1m
+    trust:
+      enabled: true
     spend_cap:
       max_calls: 5000
 ```
