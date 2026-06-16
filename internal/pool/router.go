@@ -24,6 +24,7 @@ type Router struct {
 	headroom  map[string]float64   // label → remaining quota (0–1; default 1.0 = unknown/full)
 	coolUntil map[string]time.Time // label → cooldown expiry (zero = not cooling)
 	cooldown  time.Duration
+	budget    *budgetState
 }
 
 // NewRouter creates a Router from an ordered list of account labels and a
@@ -47,7 +48,9 @@ func NewRouterFromConfig(cfg *Config) *Router {
 	for i, u := range cfg.Pool.Upstreams {
 		labels[i] = u.Label
 	}
-	return NewRouter(labels, cfg.Pool.Routing.Cooldown())
+	r := NewRouter(labels, cfg.Pool.Routing.Cooldown())
+	r.budget = newBudgetState(cfg)
+	return r
 }
 
 // Route picks an upstream for the given request.

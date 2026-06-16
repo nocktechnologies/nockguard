@@ -50,6 +50,12 @@ func main() {
 		fmt.Printf("OK: %d upstream(s), strategy=%s, cooldown=%s, listen=%s\n",
 			len(cfg.Pool.Upstreams), cfg.Pool.Routing.Strategy,
 			cfg.Pool.Routing.Cooldown(), cfg.Pool.Listen)
+		if cfg.Pool.Budget.Enabled() {
+			fmt.Printf("Budget: max_cost_usd=%.2f, ask_thresholds=%v\n",
+				cfg.Pool.Budget.MaxCostUSD, cfg.Pool.Budget.AskThresholdsUSD)
+		} else {
+			fmt.Println("Budget: disabled")
+		}
 		for _, u := range cfg.Pool.Upstreams {
 			authPath, err := u.AuthJSONPath()
 			if err != nil {
@@ -60,7 +66,8 @@ func main() {
 			if _, statErr := os.Stat(authPath); statErr != nil {
 				state = "auth.json MISSING (run codex login in that home)"
 			}
-			fmt.Printf("  - %s (%s): %s — %s\n", u.Label, u.Provider, u.CodexHome, state)
+			fmt.Printf("  - %s (%s, tier=%s, cost=$%.4f): %s — %s\n",
+				u.Label, u.Provider, u.EffectiveTier(), u.CostPerCallUSD, u.CodexHome, state)
 		}
 	case "serve":
 		fmt.Fprintln(os.Stderr, "serve: not implemented in the scaffold — the routing lane ships against docs/POOL_ROUTER.md next. Refusing to half-route spend.")

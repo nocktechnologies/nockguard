@@ -27,6 +27,7 @@ type PoolConfig struct {
 	AllowNonLocal bool             `yaml:"allow_non_local"`
 	Upstreams     []UpstreamConfig `yaml:"upstreams"`
 	Routing       RoutingConfig    `yaml:"routing"`
+	Budget        BudgetConfig     `yaml:"budget"`
 }
 
 // UpstreamConfig is one subscription account. V1 supports provider "codex"
@@ -43,6 +44,13 @@ type UpstreamConfig struct {
 	// and rejected until the V1.5 spike confirms proxy pass-through.
 	Provider  string `yaml:"provider"`
 	CodexHome string `yaml:"codex_home"`
+	// Tier classifies the upstream for budget-aware downgrade routing. Empty
+	// means untiered, which is treated as expensive by EffectiveTier so an
+	// unclassified model cannot bypass a cap.
+	Tier Tier `yaml:"tier"`
+	// CostPerCallUSD is the configured estimated cost charged to the root
+	// session tree whenever this upstream is selected by RouteWithBudget.
+	CostPerCallUSD float64 `yaml:"cost_per_call_usd"`
 }
 
 // RoutingConfig holds the V1 routing knobs.
@@ -53,6 +61,17 @@ type RoutingConfig struct {
 	// CooldownSeconds demotes an upstream after a failure (429/5xx/auth) for
 	// this many seconds. 0 means the documented default of 60.
 	CooldownSeconds int `yaml:"cooldown_seconds"`
+}
+
+// BudgetConfig holds opt-in cost guardrails. Zero MaxCostUSD disables the gate.
+type BudgetConfig struct {
+	MaxCostUSD       float64   `yaml:"max_cost_usd"`
+	AskThresholdsUSD []float64 `yaml:"ask_thresholds_usd"`
+}
+
+// Enabled reports whether budget routing is active.
+func (b BudgetConfig) Enabled() bool {
+	return b.MaxCostUSD > 0
 }
 
 const defaultCooldown = 60 * time.Second
@@ -123,6 +142,12 @@ func (c *Config) Validate() error {
 		if u.CodexHome == "" {
 			return fmt.Errorf("pool.upstreams[%d] (%s): codex_home is required", i, u.Label)
 		}
+		if !u.Tier.Valid() {
+			return fmt.Errorf("pool.upstreams[%d] (%s): unknown tier %q (want cheap, standard, expensive, or empty)", i, u.Label, u.Tier)
+		}
+		if u.CostPerCallUSD < 0 {
+			return fmt.Errorf("pool.upstreams[%d] (%s): cost_per_call_usd must be >= 0", i, u.Label)
+		}
 		if seenLabel[u.Label] {
 			return fmt.Errorf("pool.upstreams: duplicate label %q", u.Label)
 		}
@@ -141,6 +166,14 @@ func (c *Config) Validate() error {
 		// "" defaults to headroom; recorded explicitly by Normalize.
 	default:
 		return fmt.Errorf("pool.routing.strategy %q is not supported in V1 (only \"headroom\")", p.Routing.Strategy)
+	}
+	if p.Budget.MaxCostUSD < 0 {
+		return fmt.Errorf("pool.budget.max_cost_usd must be >= 0")
+	}
+	for i, threshold := range p.Budget.AskThresholdsUSD {
+		if threshold < 0 {
+			return fmt.Errorf("pool.budget.ask_thresholds_usd[%d] must be >= 0", i)
+		}
 	}
 	return nil
 }
