@@ -34,6 +34,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -195,9 +196,8 @@ func (a *Auditor) Record(ev Event) error {
 		// Hold an exclusive flock across the whole read-tail → sign → append
 		// sequence, and re-read the TRUE on-disk chain head under it, so every
 		// entry links onto the real tail regardless of how many processes write.
-		// (lastSig rescans the file per append; fine for audit volumes, and the
-		// flock makes the rescan see a stable tail. Optimize to a seek-from-end
-		// only if this becomes a write hotspot.)
+		// lastSig seeks from end (O(1) in file size); the flock makes the read
+		// see the stable tail regardless of how many processes write.
 		if err := lockExclusive(a.f.Fd()); err != nil {
 			return err
 		}
@@ -301,6 +301,11 @@ func PublicKeyFromHex(s string) (ed25519.PublicKey, error) {
 
 // lastSig returns the signature of the final non-empty line in the file, or ""
 // if the file is absent or empty. Used to seed the chain on open.
+//
+// Implementation seeks from end rather than scanning the whole file, giving
+// O(1) behavior in file size. It reads backward in expanding windows (4 KB →
+// 16 KB → 64 KB → whole file) so that unusually long entries are handled
+// without the O(n) scan the naive scanner would require.
 func lastSig(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -310,20 +315,79 @@ func lastSig(path string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	last := ""
-	for sc.Scan() {
-		if len(bytes.TrimSpace(sc.Bytes())) == 0 {
+	return lastSigSeek(f)
+}
+
+// lastSigSeek implements the seek-from-end strategy for lastSig.
+func lastSigSeek(f *os.File) (string, error) {
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return "", err
+	}
+	if size == 0 {
+		return "", nil
+	}
+
+	// Try progressively larger windows until we find a complete JSON line.
+	// 4 KB covers hundreds of typical audit entries in a single read.
+	for _, window := range []int64{4 * 1024, 16 * 1024, 64 * 1024, size} {
+		readSize := window
+		if readSize > size {
+			readSize = size
+		}
+		offset := size - readSize
+		buf := make([]byte, readSize)
+		if _, err := f.ReadAt(buf, offset); err != nil {
+			return "", err
+		}
+
+		// When offset > 0 the first bytes may be a partial line from the
+		// previous chunk. Skip forward to the first newline so that
+		// buf[start:] contains only complete lines.
+		start := 0
+		if offset > 0 {
+			idx := bytes.IndexByte(buf, '\n')
+			if idx < 0 {
+				// No newline at all — the last line is longer than this
+				// window. Try a bigger window.
+				continue
+			}
+			start = idx + 1
+		}
+
+		sig, found, err := lastSigInSlice(buf[start:])
+		if err != nil {
+			return "", err
+		}
+		if found {
+			return sig, nil
+		}
+		// All lines in this window were empty. If we read the whole file,
+		// the file contains no entries with signatures.
+		if readSize == size {
+			return "", nil
+		}
+	}
+	return "", nil
+}
+
+// lastSigInSlice scans b backward over newline-separated JSON lines and
+// returns the Sig field of the last non-empty entry, plus found=true.
+// Returns ("", false, nil) when b contains no non-empty entry.
+func lastSigInSlice(b []byte) (string, bool, error) {
+	lines := bytes.Split(b, []byte("\n"))
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := bytes.TrimSpace(lines[i])
+		if len(line) == 0 {
 			continue
 		}
 		var ev Event
-		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
-			return "", fmt.Errorf("seed chain: %w", err)
+		if err := json.Unmarshal(line, &ev); err != nil {
+			return "", false, fmt.Errorf("seed chain: %w", err)
 		}
-		last = ev.Sig
+		return ev.Sig, true, nil
 	}
-	return last, sc.Err()
+	return "", false, nil
 }
 
 // Verify walks a signed audit file and checks the hash chain end to end. It
