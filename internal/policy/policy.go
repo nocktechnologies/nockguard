@@ -388,9 +388,24 @@ func (e *Engine) Auditor() (*audit.Auditor, error) {
 		}
 		path = filepath.Join(home, DefaultAuditPath)
 	}
+	return e.auditorAt(path)
+}
+
+// AuditorAt builds an Auditor at an explicit path while reusing the policy's
+// existing signing-key configuration. It is used by CLI modes that accept an
+// --audit path override but must keep the same signed-chain semantics.
+func (e *Engine) AuditorAt(path string) (*audit.Auditor, error) {
+	if path == "" {
+		return e.Auditor()
+	}
+	return e.auditorAt(path)
+}
+
+func (e *Engine) auditorAt(path string) (*audit.Auditor, error) {
 	var opts []audit.Option
 	// Ed25519 (non-repudiable) takes precedence over HMAC when both are configured.
-	if env := e.config.Audit.SignEd25519KeyEnv; env != "" {
+	if e.config.Audit != nil && e.config.Audit.SignEd25519KeyEnv != "" {
+		env := e.config.Audit.SignEd25519KeyEnv
 		raw := os.Getenv(env)
 		if raw == "" {
 			return nil, fmt.Errorf("audit.sign_ed25519_key_env %q is not set in the environment", env)
@@ -400,7 +415,8 @@ func (e *Engine) Auditor() (*audit.Auditor, error) {
 			return nil, fmt.Errorf("audit.sign_ed25519_key_env %q: %w", env, err)
 		}
 		opts = append(opts, audit.WithEd25519Key(priv))
-	} else if env := e.config.Audit.SignKeyEnv; env != "" {
+	} else if e.config.Audit != nil && e.config.Audit.SignKeyEnv != "" {
+		env := e.config.Audit.SignKeyEnv
 		key := os.Getenv(env)
 		if key == "" {
 			return nil, fmt.Errorf("audit.sign_key_env %q is not set in the environment", env)

@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/approval"
@@ -16,6 +19,7 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/evidence"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 	"github.com/nocktechnologies/nockguard/internal/proxy"
+	"github.com/nocktechnologies/nockguard/internal/proxy/forwardhttp"
 	"github.com/nocktechnologies/nockguard/internal/trust"
 )
 
@@ -77,6 +81,11 @@ func main() {
 
 	if args[0] == "trust" {
 		runTrust(args[1:])
+		return
+	}
+
+	if args[0] == "egress-proxy" {
+		runEgressProxy(args[1:])
 		return
 	}
 
@@ -182,6 +191,88 @@ func main() {
 		WithApprover(buildApprover(logger))
 	if err := p.Run(); err != nil {
 		logger.Fatalf("proxy error: %v", err)
+	}
+}
+
+func runEgressProxy(args []string) {
+	var (
+		listen     string
+		agent      string
+		policyPath string
+		auditPath  string
+		enforce    bool
+	)
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--listen":
+			if i+1 < len(args) {
+				i++
+				listen = args[i]
+			}
+		case "--agent":
+			if i+1 < len(args) {
+				i++
+				agent = args[i]
+			}
+		case "--policy":
+			if i+1 < len(args) {
+				i++
+				policyPath = args[i]
+			}
+		case "--audit":
+			if i+1 < len(args) {
+				i++
+				auditPath = args[i]
+			}
+		case "--enforce":
+			enforce = true
+		}
+	}
+
+	if policyPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+			os.Exit(1)
+		}
+		policyPath = home + "/.nockguard/policy.yaml"
+	}
+	engine, err := policy.Load(policyPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error loading policy %s: %v\n", policyPath, err)
+		os.Exit(1)
+	}
+	if err := forwardhttp.ValidateConfig(listen, agent, engine); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if !engine.HasPolicyFor(agent) {
+		fmt.Fprintf(os.Stderr, "warning: no policy for agent %q and no \"default\" — ALL egress hosts will audit as DENIED (observe-only). Add an agent or \"default\" policy in %s.\n", agent, policyPath)
+	}
+
+	var auditor *audit.Auditor
+	if auditPath != "" {
+		auditor, err = engine.AuditorAt(auditPath)
+	} else {
+		auditor, err = engine.AuditorFor(agent)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error opening audit trail: %v\n", err)
+		os.Exit(1)
+	}
+	defer auditor.Close()
+
+	logger := log.New(os.Stderr, "[nockguard-egress] ", log.LstdFlags)
+	logger.Printf("starting observe-only HTTP/HTTPS egress proxy listen=%s agent=%s policy=%s", listen, agent, policyPath)
+	if enforce {
+		logger.Printf("--enforce requested, but Phase-2 enforcement is not implemented in this build; continuing observe-only")
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := forwardhttp.New(listen, agent, engine, auditor, logger).Run(ctx); err != nil {
+		logger.Fatalf("egress proxy error: %v", err)
 	}
 }
 
@@ -664,6 +755,7 @@ func printUsage() {
 Usage:
   nockguard init [--policy <path>] [--force]
   nockguard proxy --upstream <command> --agent <name> [--policy <path>]
+  nockguard egress-proxy --listen <addr> --agent <name> --policy <path> [--audit <path>] [--enforce]
   nockguard trust show --agent <name>
   nockguard audit verify (--agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
   nockguard evidence --framework soc2 (--agent <name> | --ed25519-pub-env <ENV> | --key-env <ENV>) [--audit <path>] [--audit-dir <dir>] [--from <date>] [--to <date>] [--format html|json] [-o <file>]
@@ -672,8 +764,10 @@ Usage:
 
 Options:
   --upstream         MCP server command to proxy (required)
+  --listen           HTTP/HTTPS forward-proxy listen address (for: egress-proxy)
   --agent            Agent identity for policy lookup / per-agent keypair flow
   --policy           Path to policy YAML (default: ~/.nockguard/policy.yaml)
+  --enforce          Declared for Phase 2; currently logs and stays observe-only
   --force            Overwrite an existing policy (for: init)
   --key-env          Env var holding the HMAC signing key (tamper-evident verify)
   --ed25519-pub-env  Env var holding the hex Ed25519 public key (non-repudiable verify)
@@ -698,6 +792,7 @@ Evidence packs:
 Examples:
   nockguard init                                        # scaffold a default-deny starter policy
   nockguard proxy --upstream "npx mcp-server-nockcc" --agent kit --policy policy.yaml
+  nockguard egress-proxy --listen 127.0.0.1:8899 --agent kit --policy egress.yaml
   nockguard keygen --agent kit                          # generate per-agent keypair
   nockguard audit verify --agent kit                    # verify kit's trail (reads NOCKGUARD_AGENT_KIT_ED25519_PUB)
   nockguard evidence --framework soc2 --agent kit -o kit-soc2.html   # SOC2 pack for kit's signed trail

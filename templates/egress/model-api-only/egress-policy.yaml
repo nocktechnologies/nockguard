@@ -1,0 +1,12 @@
+audit:
+  enabled: true
+  path: .nockguard/logs/egress-audit.jsonl
+  sign_ed25519_key_env: NOCKGUARD_AUDIT_ED25519_KEY
+agents:
+  model-api-only:
+    allow:
+      - "api.anthropic.com"
+      - "*.anthropic.com"
+      - "api.openai.com"
+      - "*.openai.com"
+      - "cc.nocktechnologies.io"
