@@ -12,9 +12,31 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// syncBuffer is a goroutine-safe bytes.Buffer wrapper. The os/exec stderr-copy
+// goroutine writes to it while the test reads stderr.String() to assert on the
+// still-running proxy subprocess, so Write/String must be mutex-guarded to be
+// clean under `go test -race`.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 func TestEgressProxyObserveOnlyAuditsAndDoesNotBlock(t *testing.T) {
 	binary := buildBinary(t)
@@ -56,7 +78,7 @@ agents:
 		t.Fatalf("close reserved proxy listener: %v", err)
 	}
 
-	var stderr bytes.Buffer
+	stderr := &syncBuffer{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, "egress-proxy",
@@ -66,7 +88,7 @@ agents:
 		"--audit", auditPath,
 	)
 	cmd.Env = append(os.Environ(), "NOCKGUARD_AUDIT_ED25519_KEY="+seedHex)
-	cmd.Stderr = &stderr
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start egress proxy: %v", err)
 	}
