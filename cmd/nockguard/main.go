@@ -301,14 +301,83 @@ func parseCommand(cmd string) []string {
 //     the pre-Phase-5 flow.
 //
 // Exit 0 = chain intact, 2 = tampering detected, 1 = usage/setup error.
+// verifyAllAgents verifies EVERY per-agent Ed25519 trail (<agent>.audit.jsonl)
+// in the audit dir — the "prove the whole fleet is accountable in one command"
+// path behind `nockguard verify --all`. Each trail is checked with that agent's
+// own public key (NOCKGUARD_AGENT_<NAME>_ED25519_PUB). Exit 0 = all intact,
+// 2 = any tampered, 1 = any trail it could not verify (missing/invalid key).
+func verifyAllAgents(auditDir string) {
+	baseDir := auditDir
+	if baseDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+			os.Exit(1)
+		}
+		baseDir = filepath.Join(home, filepath.Dir(policy.DefaultAuditPath))
+	}
+	suffix := "." + filepath.Base(policy.DefaultAuditPath) // ".audit.jsonl"
+	matches, err := filepath.Glob(filepath.Join(baseDir, "*"+suffix))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error scanning %s: %v\n", baseDir, err)
+		os.Exit(1)
+	}
+	if len(matches) == 0 {
+		fmt.Printf("No per-agent audit trails (*%s) found in %s\n", suffix, baseDir)
+		os.Exit(0)
+	}
+	var intact, tampered, unverifiable int
+	for _, path := range matches {
+		agent := strings.TrimSuffix(filepath.Base(path), suffix)
+		if agent == "" || !policy.ValidAgentName(agent) {
+			fmt.Printf("  [SKIP]   %-18s invalid agent name\n", agent)
+			unverifiable++
+			continue
+		}
+		envName := policy.AgentPubKeyEnvName(agent)
+		pubHex := os.Getenv(envName)
+		if pubHex == "" {
+			fmt.Printf("  [NO KEY] %-18s %s not set\n", agent, envName)
+			unverifiable++
+			continue
+		}
+		pub, perr := audit.PublicKeyFromHex(pubHex)
+		if perr != nil {
+			fmt.Printf("  [NO KEY] %-18s %v\n", agent, perr)
+			unverifiable++
+			continue
+		}
+		n, verr := audit.VerifyEd25519(path, pub)
+		if verr != nil {
+			fmt.Printf("  [TAMPER] %-18s %v\n", agent, verr)
+			tampered++
+			continue
+		}
+		fmt.Printf("  [OK]     %-18s %d entries, chain intact\n", agent, n)
+		intact++
+	}
+	fmt.Printf("\n%d trails in %s — %d intact, %d tampered, %d unverifiable\n", len(matches), baseDir, intact, tampered, unverifiable)
+	switch {
+	case tampered > 0:
+		os.Exit(2)
+	case unverifiable > 0:
+		os.Exit(1)
+	default:
+		os.Exit(0)
+	}
+}
+
 func runAudit(args []string) {
 	if len(args) == 0 || args[0] != "verify" {
 		fmt.Fprintln(os.Stderr, "usage: nockguard audit verify (--agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]")
 		os.Exit(1)
 	}
 	var auditPath, auditDir, agentName, keyEnv, pubEnv string
+	allMode := false
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
+		case "--all":
+			allMode = true
 		case "--audit":
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "error: --audit requires a value")
@@ -345,6 +414,13 @@ func runAudit(args []string) {
 			i++
 			pubEnv = args[i]
 		}
+	}
+
+	// --all verifies EVERY per-agent trail in one command ("prove the whole fleet
+	// is accountable") and short-circuits the single-trail modes below.
+	if allMode {
+		verifyAllAgents(auditDir)
+		return
 	}
 
 	// Exactly one verification mode must be specified.
@@ -765,7 +841,7 @@ Usage:
   nockguard init [--policy <path>] [--force]
   nockguard proxy --upstream <command> --agent <name> [--policy <path>]
   nockguard egress-proxy --listen <addr> --agent <name> --policy <path> [--audit <path>] [--enforce]
-  nockguard verify (--agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
+  nockguard verify (--all | --agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
   nockguard trust show --agent <name>
   nockguard audit verify ...   # same as 'nockguard verify' (the audit-namespaced form)
   nockguard evidence --framework soc2 (--agent <name> | --ed25519-pub-env <ENV> | --key-env <ENV>) [--audit <path>] [--audit-dir <dir>] [--from <date>] [--to <date>] [--format html|json] [-o <file>]
@@ -805,6 +881,7 @@ Examples:
   nockguard egress-proxy --listen 127.0.0.1:8899 --agent kit --policy egress.yaml
   nockguard keygen --agent kit                          # generate per-agent keypair
   nockguard verify --agent kit                          # prove kit's trail is intact + non-repudiable (exit 0 = clean, 2 = tampered)
+  nockguard verify --all                                # prove EVERY per-agent trail in ~/.nockguard/logs in one command
   nockguard evidence --framework soc2 --agent kit -o kit-soc2.html   # SOC2 pack for kit's signed trail
   nockguard keygen                                      # generate global keypair (legacy)
   nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB  # verify global trail`)

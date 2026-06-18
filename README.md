@@ -127,10 +127,11 @@ Rate limiting and spend caps are opt-in and independent — set one, both, or ne
 Any signed audit trail can be proven intact and non-repudiable **offline** — no daemon, no signing key, only the public key:
 
 ```bash
-nockguard verify --agent kit    # exit 0 = trail intact + authentic, exit 2 = tampered
+nockguard verify --agent kit    # one agent's trail (exit 0 = intact + authentic, 2 = tampered)
+nockguard verify --all          # every per-agent trail in one shot — prove the whole fleet
 ```
 
-That single command replays the whole hash chain and the per-entry signatures: it proves the trail was not edited, reordered, truncated, or signed by anyone but the holder of the agent's private key. `verify` is the first-class form of `audit verify` (below), which documents HMAC vs Ed25519 signing, per-agent keys, and the compliance evidence packs.
+`--all` scans the audit dir for every `<agent>.audit.jsonl`, verifies each with that agent's own public key, and prints a per-agent summary (exit 0 = all intact, 2 = any tampered, 1 = any it could not verify). That single command replays the whole hash chain and the per-entry signatures: it proves the trail was not edited, reordered, truncated, or signed by anyone but the holder of the agent's private key. `verify` is the first-class form of `audit verify` (below), which documents HMAC vs Ed25519 signing, per-agent keys, and the compliance evidence packs.
 
 ## Audit Trail (Phase 4)
 
