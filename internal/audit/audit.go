@@ -220,8 +220,16 @@ func (a *Auditor) Record(ev Event) error {
 		return err
 	}
 	line = append(line, '\n')
-	_, err = a.f.Write(line)
-	return err
+	if _, err = a.f.Write(line); err != nil {
+		return err
+	}
+	// Signing mode only, still under the flock held above: advance the
+	// tail-truncation high-water-mark so a later removal of this entry is
+	// detectable (N8154). ev.Sig is this entry's signature.
+	if a.signing() {
+		return a.updateHighWaterMark(ev.Sig)
+	}
+	return nil
 }
 
 // Close flushes and closes the underlying file. Safe to call on a disabled Auditor.
@@ -234,6 +242,46 @@ func (a *Auditor) Close() error {
 	err := a.f.Close()
 	a.f = nil
 	return err
+}
+
+// updateHighWaterMark rewrites the signed sidecar after an entry is appended.
+// MUST be called under the same exclusive flock Record holds while signing, so
+// the count read -> increment -> write is atomic across processes. newSig is the
+// signature of the just-appended entry and becomes the checkpoint's last_sig.
+// The sidecar is written AFTER the trail append (never before): a crash between
+// the two leaves the sidecar one entry BEHIND the trail (n >= count, which Verify
+// accepts), never ahead (which would false-trip truncation). Best-effort: a
+// sidecar write failure is returned to Record but the entry is already durably
+// appended, so the chain itself is never compromised by a checkpoint problem.
+func (a *Auditor) updateHighWaterMark(newSig string) error {
+	hwmPath := a.path + hwmSuffix
+	prev, err := readHighWaterMark(hwmPath)
+	if err != nil {
+		return err
+	}
+	var count int
+	if prev != nil {
+		count = prev.Count + 1
+	} else {
+		// First checkpoint on this trail: count the file once (it now includes
+		// the just-appended entry). O(n) one time; O(1) increments thereafter.
+		count, err = countEntries(a.path)
+		if err != nil {
+			return err
+		}
+	}
+	hwm := highWaterMark{Count: count, LastSig: newSig}
+	hwm.Sig = a.sign(hwmSignedBytes(count, newSig), "")
+	data, err := json.Marshal(hwm)
+	if err != nil {
+		return err
+	}
+	// Atomic replace so a reader never sees a half-written checkpoint.
+	tmp := hwmPath + ".tmp"
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, hwmPath)
 }
 
 // signLine computes the hex HMAC-SHA256 of an entry's canonical bytes chained to
@@ -390,6 +438,99 @@ func lastSigInSlice(b []byte) (string, bool, error) {
 	return "", false, nil
 }
 
+// --- N8154: tail-truncation detection via a signed high-water-mark -----------
+//
+// A pure hash chain catches edits, reorders, and MID-deletes (the next entry's
+// prev-sig link breaks), but a truncated PREFIX still verifies clean. A signed
+// sidecar at "<trail>.hwm" records the entry COUNT and the last entry's
+// signature, so a SHORTENED trail (the tail lopped off) becomes detectable.
+//
+// Honest threat model: this is DEFENSE-IN-DEPTH, not absolute. An attacker with
+// write access to truncate the trail can also delete the sidecar — verification
+// then falls back to the legacy chain-only check (fail-open on absence). It
+// raises the bar (automated/sloppy truncation is caught; the attacker must now
+// destroy BOTH) and pairs with the off-box NockCC forward, which is the real
+// anti-truncation anchor. The sidecar is signed with the SAME key as the chain,
+// so its count cannot be forged downward without the signing key.
+
+const hwmSuffix = ".hwm"
+
+type highWaterMark struct {
+	Count   int    `json:"count"`
+	LastSig string `json:"last_sig"`
+	Sig     string `json:"sig"`
+}
+
+// hwmSignedBytes is the canonical, domain-separated message signed for a
+// high-water-mark. The distinct prefix means an entry signature can never be
+// replayed as a checkpoint signature, or vice versa.
+func hwmSignedBytes(count int, lastSig string) []byte {
+	return []byte(fmt.Sprintf("nockguard-hwm-v1\n%d\n%s", count, lastSig))
+}
+
+// readHighWaterMark loads the sidecar at hwmPath. Returns (nil, nil) when it is
+// absent — a legacy trail with no checkpoint, which callers verify chain-only.
+func readHighWaterMark(hwmPath string) (*highWaterMark, error) {
+	data, err := os.ReadFile(hwmPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var hwm highWaterMark
+	if err := json.Unmarshal(bytes.TrimSpace(data), &hwm); err != nil {
+		return nil, fmt.Errorf("high-water-mark %s is corrupt: %w", hwmPath, err)
+	}
+	return &hwm, nil
+}
+
+// countEntries returns the number of non-empty lines in a JSONL trail. Used once
+// when a high-water-mark is first written onto a pre-existing trail; thereafter
+// the count is incremented from the sidecar in O(1).
+func countEntries(path string) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	n := 0
+	for sc.Scan() {
+		if len(bytes.TrimSpace(sc.Bytes())) > 0 {
+			n++
+		}
+	}
+	return n, sc.Err()
+}
+
+// checkHighWaterMark validates a freshly-walked chain against the signed
+// checkpoint. n is the number of entries the walk verified; sigAtCount is the
+// signature of the entry at the checkpoint's count (or "" if the walk never
+// reached it). verifySig checks the checkpoint's OWN signature with the trail's
+// key. A nil hwm (absent sidecar) passes — legacy trails are unaffected. Fails
+// if the trail is shorter than the checkpoint (tail truncated) or the checkpoint
+// entry's signature does not match (the recorded entry was altered or replaced).
+func checkHighWaterMark(hwm *highWaterMark, n int, sigAtCount string, verifySig func(signed []byte, sigHex string) bool) error {
+	if hwm == nil {
+		return nil
+	}
+	if !verifySig(hwmSignedBytes(hwm.Count, hwm.LastSig), hwm.Sig) {
+		return fmt.Errorf("high-water-mark signature invalid — checkpoint was tampered or signed with a different key")
+	}
+	if n < hwm.Count {
+		return fmt.Errorf("trail truncated — %d entries on disk but the signed high-water-mark records %d (entries removed from the tail)", n, hwm.Count)
+	}
+	if sigAtCount != hwm.LastSig {
+		return fmt.Errorf("high-water-mark mismatch — entry %d signature does not match the signed checkpoint (entry altered or replaced)", hwm.Count)
+	}
+	return nil
+}
+
 // Verify walks a signed audit file and checks the hash chain end to end. It
 // returns the number of entries verified, or the 1-based line number and an
 // error at the first entry whose signature does not match — which happens if any
@@ -400,10 +541,15 @@ func Verify(path string, key []byte) (int, error) {
 		return 0, err
 	}
 	defer f.Close()
+	hwm, herr := readHighWaterMark(path + hwmSuffix)
+	if herr != nil {
+		return 0, herr
+	}
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	prev := ""
 	n := 0
+	sigAtCount := ""
 	for sc.Scan() {
 		raw := sc.Bytes()
 		if len(bytes.TrimSpace(raw)) == 0 {
@@ -428,8 +574,16 @@ func Verify(path string, key []byte) (int, error) {
 			return n, fmt.Errorf("line %d: signature mismatch — trail was tampered, deleted from, reordered, or signed with a different key", n)
 		}
 		prev = got
+		if hwm != nil && n == hwm.Count {
+			sigAtCount = got
+		}
 	}
 	if err := sc.Err(); err != nil {
+		return n, err
+	}
+	if err := checkHighWaterMark(hwm, n, sigAtCount, func(signed []byte, sigHex string) bool {
+		return hmac.Equal([]byte(signLine(key, signed, "")), []byte(sigHex))
+	}); err != nil {
 		return n, err
 	}
 	return n, nil
@@ -448,10 +602,15 @@ func VerifyEd25519(path string, pub ed25519.PublicKey) (int, error) {
 		return 0, err
 	}
 	defer f.Close()
+	hwm, herr := readHighWaterMark(path + hwmSuffix)
+	if herr != nil {
+		return 0, herr
+	}
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	prev := ""
 	n := 0
+	sigAtCount := ""
 	for sc.Scan() {
 		raw := sc.Bytes()
 		if len(bytes.TrimSpace(raw)) == 0 {
@@ -479,8 +638,20 @@ func VerifyEd25519(path string, pub ed25519.PublicKey) (int, error) {
 			return n, fmt.Errorf("line %d: signature mismatch — trail was tampered, deleted from, reordered, or signed with a different key", n)
 		}
 		prev = got
+		if hwm != nil && n == hwm.Count {
+			sigAtCount = got
+		}
 	}
 	if err := sc.Err(); err != nil {
+		return n, err
+	}
+	if err := checkHighWaterMark(hwm, n, sigAtCount, func(signed []byte, sigHex string) bool {
+		sigBytes, derr := hex.DecodeString(sigHex)
+		if derr != nil {
+			return false
+		}
+		return ed25519.Verify(pub, chainedMessage(signed, ""), sigBytes)
+	}); err != nil {
 		return n, err
 	}
 	return n, nil

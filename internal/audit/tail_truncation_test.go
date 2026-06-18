@@ -73,3 +73,48 @@ func TestEd25519LegacyTrailWithoutHighWaterMarkStillVerifies(t *testing.T) {
 		t.Errorf("a legacy trail without a high-water-mark must verify as before: %v", err)
 	}
 }
+
+// TestHMACTailTruncationIsDetected proves the high-water-mark closes the gap in
+// the symmetric HMAC mode too, not only Ed25519.
+func TestHMACTailTruncationIsDetected(t *testing.T) {
+	key := []byte("test-hmac-key-32-bytes-long-okay")
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	a, err := New(path, WithSigningKey(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := a.Record(Event{Agent: "kit", Tool: "x", Decision: "allow"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(path, key); err != nil {
+		t.Fatalf("the full HMAC trail must verify: %v", err)
+	}
+	truncateLastLine(t, path)
+	if _, err := Verify(path, key); err == nil {
+		t.Error("HMAC: tail truncation must be detected via the high-water-mark")
+	}
+}
+
+// TestForgedHighWaterMarkRejected proves an attacker who truncates the trail and
+// rewrites the sidecar to a matching lower count cannot hide it: the checkpoint
+// is signed, so a forged (wrong-key / bogus) signature is rejected.
+func TestForgedHighWaterMarkRejected(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	recordN(t, path, priv, 4)
+	truncateLastLine(t, path) // 3 entries remain on disk, still chain-clean
+
+	// Forge an hwm claiming count=3 with a bogus signature (no signing key).
+	forged := `{"count":3,"last_sig":"abc","sig":"deadbeef"}` + "\n"
+	if err := os.WriteFile(path+".hwm", []byte(forged), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyEd25519(path, pub); err == nil {
+		t.Error("a forged high-water-mark (bogus signature) must be rejected")
+	}
+}
