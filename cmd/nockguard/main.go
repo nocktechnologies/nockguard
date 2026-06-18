@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -48,20 +49,22 @@ func buildApprover(logger *log.Logger) approval.Approver {
 }
 
 func main() {
-	args := os.Args[1:]
+	os.Exit(runCLI(os.Args[1:]))
+}
+
+func runCLI(args []string) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		printUsage()
-		os.Exit(0)
+		return 0
 	}
 
 	if args[0] == "version" {
 		fmt.Println("nockguard v0.1.0")
-		os.Exit(0)
+		return 0
 	}
 
 	if args[0] == "audit" {
-		runAudit(args[1:])
-		return
+		return runAudit(args[1:])
 	}
 
 	// `verify` is a first-class top-level alias for `audit verify`. The one-command
@@ -69,39 +72,33 @@ func main() {
 	// agent fleet's trail is intact and non-repudiable in one command"), so it gets
 	// the verb a user reaches for directly: `nockguard verify --agent <name>`.
 	if args[0] == "verify" {
-		runAudit(args)
-		return
+		return runAudit(args)
 	}
 
 	if args[0] == "keygen" {
-		runKeygen(args[1:])
-		return
+		return runKeygen(args[1:])
 	}
 
 	if args[0] == "init" {
-		runInit(args[1:])
-		return
+		return runInit(args[1:])
 	}
 
 	if args[0] == "evidence" {
-		runEvidence(args[1:])
-		return
+		return runEvidence(args[1:])
 	}
 
 	if args[0] == "trust" {
-		runTrust(args[1:])
-		return
+		return runTrust(args[1:])
 	}
 
 	if args[0] == "egress-proxy" {
-		runEgressProxy(args[1:])
-		return
+		return runEgressProxy(args[1:])
 	}
 
 	if args[0] != "proxy" {
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
 		printUsage()
-		os.Exit(1)
+		return 1
 	}
 
 	var (
@@ -132,17 +129,17 @@ func main() {
 
 	if upstreamCmd == "" {
 		fmt.Fprintln(os.Stderr, "error: --upstream is required")
-		os.Exit(1)
+		return 1
 	}
 	if agent == "" {
 		fmt.Fprintln(os.Stderr, "error: --agent is required")
-		os.Exit(1)
+		return 1
 	}
 	if policyPath == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		policyPath = home + "/.nockguard/policy.yaml"
 	}
@@ -150,7 +147,7 @@ func main() {
 	engine, err := policy.Load(policyPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading policy %s: %v\n", policyPath, err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Fail-closed is correct but should never be a silent surprise: if the named
@@ -163,31 +160,31 @@ func main() {
 	validator, err := engine.ValidatorFor(agent)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error building input validator for agent %s: %v\n", agent, err)
-		os.Exit(1)
+		return 1
 	}
 
 	limiter, err := engine.LimiterFor(agent)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error building rate limiter for agent %s: %v\n", agent, err)
-		os.Exit(1)
+		return 1
 	}
 	trustAccumulator, err := engine.TrustFor(agent)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error building trust accumulator for agent %s: %v\n", agent, err)
-		os.Exit(1)
+		return 1
 	}
 
 	auditor, err := engine.AuditorFor(agent)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error opening audit trail: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	defer auditor.Close()
 
 	forwarder, err := engine.Forwarder()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error configuring ops-log forwarder: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	forwarder.Start()
 	defer forwarder.Stop()
@@ -199,11 +196,13 @@ func main() {
 		WithTrust(trustAccumulator).
 		WithApprover(buildApprover(logger))
 	if err := p.Run(); err != nil {
-		logger.Fatalf("proxy error: %v", err)
+		logger.Printf("proxy error: %v", err)
+		return 1
 	}
+	return 0
 }
 
-func runEgressProxy(args []string) {
+func runEgressProxy(args []string) int {
 	var (
 		listen     string
 		agent      string
@@ -243,18 +242,18 @@ func runEgressProxy(args []string) {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		policyPath = home + "/.nockguard/policy.yaml"
 	}
 	engine, err := policy.Load(policyPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading policy %s: %v\n", policyPath, err)
-		os.Exit(1)
+		return 1
 	}
 	if err := forwardhttp.ValidateConfig(listen, agent, engine); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	if !engine.HasPolicyFor(agent) {
 		fmt.Fprintf(os.Stderr, "warning: no policy for agent %q and no \"default\" — ALL egress hosts will audit as DENIED (observe-only). Add an agent or \"default\" policy in %s.\n", agent, policyPath)
@@ -268,7 +267,7 @@ func runEgressProxy(args []string) {
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error opening audit trail: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	defer auditor.Close()
 
@@ -281,8 +280,10 @@ func runEgressProxy(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := forwardhttp.New(listen, agent, engine, auditor, logger).Run(ctx); err != nil {
-		logger.Fatalf("egress proxy error: %v", err)
+		logger.Printf("egress proxy error: %v", err)
+		return 1
 	}
+	return 0
 }
 
 func parseCommand(cmd string) []string {
@@ -306,13 +307,44 @@ func parseCommand(cmd string) []string {
 // path behind `nockguard verify --all`. Each trail is checked with that agent's
 // own public key (NOCKGUARD_AGENT_<NAME>_ED25519_PUB). Exit 0 = all intact,
 // 2 = any tampered, 1 = any trail it could not verify (missing/invalid key).
-func verifyAllAgents(auditDir string) {
+type verifyResult struct {
+	Verdict         string `json:"verdict"`
+	AuditPath       string `json:"audit_path,omitempty"`
+	EntriesVerified int    `json:"entries_verified"`
+	Error           string `json:"error,omitempty"`
+}
+
+type verifyAllResult struct {
+	Verdict      string              `json:"verdict"`
+	AuditDir     string              `json:"audit_dir"`
+	Total        int                 `json:"total"`
+	Intact       int                 `json:"intact"`
+	Tampered     int                 `json:"tampered"`
+	Unverifiable int                 `json:"unverifiable"`
+	Trails       []verifyTrailResult `json:"trails"`
+}
+
+type verifyTrailResult struct {
+	Agent           string `json:"agent"`
+	Path            string `json:"path"`
+	Status          string `json:"status"`
+	EntriesVerified int    `json:"entries_verified,omitempty"`
+	Error           string `json:"error,omitempty"`
+}
+
+func writeJSON(value any) {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(value)
+}
+
+func verifyAllAgents(auditDir string, jsonOutput bool) int {
 	baseDir := auditDir
 	if baseDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		baseDir = filepath.Join(home, filepath.Dir(policy.DefaultAuditPath))
 	}
@@ -320,107 +352,153 @@ func verifyAllAgents(auditDir string) {
 	matches, err := filepath.Glob(filepath.Join(baseDir, "*"+suffix))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error scanning %s: %v\n", baseDir, err)
-		os.Exit(1)
+		return 1
 	}
 	if len(matches) == 0 {
-		fmt.Printf("No per-agent audit trails (*%s) found in %s\n", suffix, baseDir)
-		os.Exit(0)
+		if jsonOutput {
+			writeJSON(verifyAllResult{Verdict: "PROTECTED", AuditDir: baseDir})
+		} else {
+			fmt.Printf("No per-agent audit trails (*%s) found in %s\n", suffix, baseDir)
+			fmt.Println("VERDICT: PROTECTED")
+		}
+		return 0
 	}
 	var intact, tampered, unverifiable int
+	results := make([]verifyTrailResult, 0, len(matches))
 	for _, path := range matches {
 		agent := strings.TrimSuffix(filepath.Base(path), suffix)
 		if agent == "" || !policy.ValidAgentName(agent) {
-			fmt.Printf("  [SKIP]   %-18s invalid agent name\n", agent)
+			if !jsonOutput {
+				fmt.Printf("  [SKIP]   %-18s invalid agent name\n", agent)
+			}
+			results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: "UNVERIFIABLE", Error: "invalid agent name"})
 			unverifiable++
 			continue
 		}
 		envName := policy.AgentPubKeyEnvName(agent)
 		pubHex := os.Getenv(envName)
 		if pubHex == "" {
-			fmt.Printf("  [NO KEY] %-18s %s not set\n", agent, envName)
+			msg := envName + " not set"
+			if !jsonOutput {
+				fmt.Printf("  [NO KEY] %-18s %s\n", agent, msg)
+			}
+			results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: "UNVERIFIABLE", Error: msg})
 			unverifiable++
 			continue
 		}
 		pub, perr := audit.PublicKeyFromHex(pubHex)
 		if perr != nil {
-			fmt.Printf("  [NO KEY] %-18s %v\n", agent, perr)
+			if !jsonOutput {
+				fmt.Printf("  [NO KEY] %-18s %v\n", agent, perr)
+			}
+			results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: "UNVERIFIABLE", Error: perr.Error()})
 			unverifiable++
 			continue
 		}
 		n, verr := audit.VerifyEd25519(path, pub)
 		if verr != nil {
-			fmt.Printf("  [TAMPER] %-18s %v\n", agent, verr)
+			if !jsonOutput {
+				fmt.Printf("  [TAMPER] %-18s %v\n", agent, verr)
+			}
+			results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: "TAMPERED", EntriesVerified: n, Error: verr.Error()})
 			tampered++
 			continue
 		}
-		fmt.Printf("  [OK]     %-18s %d entries, chain intact\n", agent, n)
+		if !jsonOutput {
+			fmt.Printf("  [OK]     %-18s %d entries, chain intact\n", agent, n)
+		}
+		results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: "PROTECTED", EntriesVerified: n})
 		intact++
 	}
-	fmt.Printf("\n%d trails in %s — %d intact, %d tampered, %d unverifiable\n", len(matches), baseDir, intact, tampered, unverifiable)
+	verdict := "PROTECTED"
+	if tampered > 0 {
+		verdict = "TAMPERED"
+	} else if unverifiable > 0 {
+		verdict = "UNVERIFIABLE"
+	}
+	if jsonOutput {
+		writeJSON(verifyAllResult{
+			Verdict:      verdict,
+			AuditDir:     baseDir,
+			Total:        len(matches),
+			Intact:       intact,
+			Tampered:     tampered,
+			Unverifiable: unverifiable,
+			Trails:       results,
+		})
+	} else {
+		fmt.Printf("\n%d trails in %s — %d intact, %d tampered, %d unverifiable\n", len(matches), baseDir, intact, tampered, unverifiable)
+		fmt.Printf("VERDICT: %s\n", verdict)
+	}
 	switch {
 	case tampered > 0:
-		os.Exit(2)
+		return 2
 	case unverifiable > 0:
-		os.Exit(1)
+		return 1
 	default:
-		os.Exit(0)
+		return 0
 	}
 }
 
-func runAudit(args []string) {
+func runAudit(args []string) int {
 	if len(args) == 0 || args[0] != "verify" {
 		fmt.Fprintln(os.Stderr, "usage: nockguard audit verify (--agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]")
-		os.Exit(1)
+		return 1
 	}
 	var auditPath, auditDir, agentName, keyEnv, pubEnv string
 	allMode := false
+	jsonOutput := false
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--all":
 			allMode = true
+		case "--json":
+			jsonOutput = true
 		case "--audit":
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "error: --audit requires a value")
-				os.Exit(1)
+				return 1
 			}
 			i++
 			auditPath = args[i]
 		case "--audit-dir":
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "error: --audit-dir requires a value")
-				os.Exit(1)
+				return 1
 			}
 			i++
 			auditDir = args[i]
 		case "--agent":
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "error: --agent requires a value")
-				os.Exit(1)
+				return 1
 			}
 			i++
 			agentName = args[i]
 		case "--key-env":
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "error: --key-env requires a value")
-				os.Exit(1)
+				return 1
 			}
 			i++
 			keyEnv = args[i]
 		case "--ed25519-pub-env":
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "error: --ed25519-pub-env requires a value")
-				os.Exit(1)
+				return 1
 			}
 			i++
 			pubEnv = args[i]
+		default:
+			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", args[i])
+			return 1
 		}
 	}
 
 	// --all verifies EVERY per-agent trail in one command ("prove the whole fleet
 	// is accountable") and short-circuits the single-trail modes below.
 	if allMode {
-		verifyAllAgents(auditDir)
-		return
+		return verifyAllAgents(auditDir, jsonOutput)
 	}
 
 	// Exactly one verification mode must be specified.
@@ -436,21 +514,21 @@ func runAudit(args []string) {
 	}
 	if modeCount != 1 {
 		fmt.Fprintln(os.Stderr, "error: provide exactly one of --agent <name>, --key-env <ENV>, or --ed25519-pub-env <ENV>")
-		os.Exit(1)
+		return 1
 	}
 
 	// Per-agent mode: derive path and pub-key env from agent name.
 	if agentName != "" {
 		if !policy.ValidAgentName(agentName) {
 			fmt.Fprintf(os.Stderr, "error: invalid agent name %q: only alphanumerics, hyphens, and dots are allowed\n", agentName)
-			os.Exit(1)
+			return 1
 		}
 		baseDir := auditDir
 		if baseDir == "" {
 			home, err := os.UserHomeDir()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
-				os.Exit(1)
+				return 1
 			}
 			baseDir = filepath.Join(home, filepath.Dir(policy.DefaultAuditPath))
 		}
@@ -464,13 +542,13 @@ func runAudit(args []string) {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		auditPath = filepath.Join(home, policy.DefaultAuditPath)
 	}
 	if (keyEnv == "") == (pubEnv == "") {
 		fmt.Fprintln(os.Stderr, "error: provide --agent <name>, --key-env <ENV> (HMAC), or --ed25519-pub-env <ENV> (Ed25519 public key)")
-		os.Exit(1)
+		return 1
 	}
 
 	var (
@@ -481,28 +559,38 @@ func runAudit(args []string) {
 		pubHex := os.Getenv(pubEnv)
 		if pubHex == "" {
 			fmt.Fprintf(os.Stderr, "error: %s is not set in the environment\n", pubEnv)
-			os.Exit(1)
+			return 1
 		}
 		pub, perr := audit.PublicKeyFromHex(pubHex)
 		if perr != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", perr)
-			os.Exit(1)
+			return 1
 		}
 		n, err = audit.VerifyEd25519(auditPath, pub)
 	} else {
 		key := os.Getenv(keyEnv)
 		if key == "" {
 			fmt.Fprintf(os.Stderr, "error: %s is not set in the environment\n", keyEnv)
-			os.Exit(1)
+			return 1
 		}
 		n, err = audit.Verify(auditPath, []byte(key))
 	}
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "TAMPER DETECTED — %s (verified %d before the break): %v\n", auditPath, n, err)
-		os.Exit(2)
+		if jsonOutput {
+			writeJSON(verifyResult{Verdict: "TAMPERED", AuditPath: auditPath, EntriesVerified: n, Error: err.Error()})
+		} else {
+			fmt.Fprintf(os.Stderr, "TAMPER DETECTED — %s (verified %d before the break): %v\n", auditPath, n, err)
+		}
+		return 2
 	}
-	fmt.Printf("OK — %d entries verified, hash chain intact: %s\n", n, auditPath)
+	if jsonOutput {
+		writeJSON(verifyResult{Verdict: "PROTECTED", AuditPath: auditPath, EntriesVerified: n})
+	} else {
+		fmt.Printf("OK — %d entries verified, hash chain intact: %s\n", n, auditPath)
+		fmt.Println("VERDICT: PROTECTED")
+	}
+	return 0
 }
 
 // runEvidence handles `nockguard evidence` — it builds a compliance-evidence
@@ -519,7 +607,7 @@ func runAudit(args []string) {
 //   - --key-env <ENV>: HMAC key env var (tamper-evident), with --audit.
 //
 // Exit 0 = chain intact, 2 = chain broken (pack still produced), 1 = setup error.
-func runEvidence(args []string) {
+func runEvidence(args []string) int {
 	var (
 		framework = "soc2"
 		auditPath string
@@ -535,7 +623,7 @@ func runEvidence(args []string) {
 	needsValue := func(i int, name string) string {
 		if i+1 >= len(args) {
 			fmt.Fprintf(os.Stderr, "error: %s requires a value\n", name)
-			os.Exit(1)
+			return ""
 		}
 		return args[i+1]
 	}
@@ -543,48 +631,78 @@ func runEvidence(args []string) {
 		switch args[i] {
 		case "--framework":
 			framework = strings.ToLower(needsValue(i, "--framework"))
+			if framework == "" {
+				return 1
+			}
 			i++
 		case "--audit":
 			auditPath = needsValue(i, "--audit")
+			if auditPath == "" {
+				return 1
+			}
 			i++
 		case "--audit-dir":
 			auditDir = needsValue(i, "--audit-dir")
+			if auditDir == "" {
+				return 1
+			}
 			i++
 		case "--agent":
 			agentName = needsValue(i, "--agent")
+			if agentName == "" {
+				return 1
+			}
 			i++
 		case "--key-env":
 			keyEnv = needsValue(i, "--key-env")
+			if keyEnv == "" {
+				return 1
+			}
 			i++
 		case "--ed25519-pub-env":
 			pubEnv = needsValue(i, "--ed25519-pub-env")
+			if pubEnv == "" {
+				return 1
+			}
 			i++
 		case "--from":
 			fromStr = needsValue(i, "--from")
+			if fromStr == "" {
+				return 1
+			}
 			i++
 		case "--to":
 			toStr = needsValue(i, "--to")
+			if toStr == "" {
+				return 1
+			}
 			i++
 		case "--format":
 			format = strings.ToLower(needsValue(i, "--format"))
+			if format == "" {
+				return 1
+			}
 			i++
 		case "-o", "--output":
 			outPath = needsValue(i, args[i])
+			if outPath == "" {
+				return 1
+			}
 			i++
 		default:
 			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", args[i])
-			os.Exit(1)
+			return 1
 		}
 	}
 
 	if format != "html" && format != "json" {
 		fmt.Fprintf(os.Stderr, "error: --format must be html or json (got %q)\n", format)
-		os.Exit(1)
+		return 1
 	}
 	fw := evidence.Framework(framework)
 	if !evidence.KnownFramework(fw) {
 		fmt.Fprintf(os.Stderr, "error: unknown framework %q (supported: soc2; gdpr, pci, hipaa are stubs)\n", framework)
-		os.Exit(1)
+		return 1
 	}
 
 	// Resolve the audit file path and verification key. --agent derives both the
@@ -592,14 +710,14 @@ func runEvidence(args []string) {
 	if agentName != "" {
 		if !policy.ValidAgentName(agentName) {
 			fmt.Fprintf(os.Stderr, "error: invalid agent name %q: only alphanumerics, hyphens, and dots are allowed\n", agentName)
-			os.Exit(1)
+			return 1
 		}
 		baseDir := auditDir
 		if baseDir == "" {
 			home, err := os.UserHomeDir()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
-				os.Exit(1)
+				return 1
 			}
 			baseDir = filepath.Join(home, filepath.Dir(policy.DefaultAuditPath))
 		}
@@ -613,7 +731,7 @@ func runEvidence(args []string) {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		auditPath = filepath.Join(home, policy.DefaultAuditPath)
 	}
@@ -621,7 +739,7 @@ func runEvidence(args []string) {
 	// Exactly one key source.
 	if (keyEnv == "") == (pubEnv == "") {
 		fmt.Fprintln(os.Stderr, "error: provide exactly one verification key: --agent <name>, --ed25519-pub-env <ENV>, or --key-env <ENV>")
-		os.Exit(1)
+		return 1
 	}
 
 	opts := evidence.PackOptions{
@@ -633,14 +751,14 @@ func runEvidence(args []string) {
 		pubHex := os.Getenv(pubEnv)
 		if pubHex == "" {
 			fmt.Fprintf(os.Stderr, "error: %s is not set in the environment\n", pubEnv)
-			os.Exit(1)
+			return 1
 		}
 		opts.Ed25519PubHex = pubHex
 	} else {
 		key := os.Getenv(keyEnv)
 		if key == "" {
 			fmt.Fprintf(os.Stderr, "error: %s is not set in the environment\n", keyEnv)
-			os.Exit(1)
+			return 1
 		}
 		opts.HMACKey = []byte(key)
 	}
@@ -648,7 +766,7 @@ func runEvidence(args []string) {
 		from, err := parseDateFlag(fromStr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: --from: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		opts.From = from
 	}
@@ -656,7 +774,7 @@ func runEvidence(args []string) {
 		to, err := parseDateFlag(toStr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: --to: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		opts.To = to
 	}
@@ -664,7 +782,7 @@ func runEvidence(args []string) {
 	pack, err := evidence.BuildPack(opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error building evidence pack: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	var rendered []byte
@@ -675,13 +793,13 @@ func runEvidence(args []string) {
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error rendering evidence pack: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if outPath != "" {
 		if werr := os.WriteFile(outPath, rendered, 0o644); werr != nil {
 			fmt.Fprintf(os.Stderr, "error writing %s: %v\n", outPath, werr)
-			os.Exit(1)
+			return 1
 		}
 		dest := outPath
 		fmt.Fprintf(os.Stderr, "Wrote %s evidence pack: %s\n", strings.ToUpper(format), dest)
@@ -697,9 +815,10 @@ func runEvidence(args []string) {
 	// visible, not hidden behind a non-zero exit.
 	if !pack.Verification.ChainIntact {
 		fmt.Fprintf(os.Stderr, "TAMPER DETECTED — the audit chain backing this evidence is BROKEN (%d entries verified before the break): %s\n", pack.Verification.EntriesVerified, pack.Verification.Detail)
-		os.Exit(2)
+		return 2
 	}
 	fmt.Fprintf(os.Stderr, "OK — %d entries verified, chain intact; evidence pack reflects a trustworthy trail.\n", pack.Verification.EntriesVerified)
+	return 0
 }
 
 // parseDateFlag accepts either a date (2006-01-02) or a full RFC3339 timestamp.
@@ -715,10 +834,10 @@ func parseDateFlag(s string) (time.Time, error) {
 	return t.UTC(), nil
 }
 
-func runTrust(args []string) {
+func runTrust(args []string) int {
 	if len(args) == 0 || args[0] != "show" {
 		fmt.Fprintln(os.Stderr, "usage: nockguard trust show --agent <name>")
-		os.Exit(1)
+		return 1
 	}
 	var agentName string
 	for i := 1; i < len(args); i++ {
@@ -726,55 +845,56 @@ func runTrust(args []string) {
 		case "--agent":
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "error: --agent requires a value")
-				os.Exit(1)
+				return 1
 			}
 			i++
 			agentName = args[i]
 		default:
 			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", args[i])
-			os.Exit(1)
+			return 1
 		}
 	}
 	if !policy.ValidAgentName(agentName) {
 		fmt.Fprintf(os.Stderr, "error: invalid agent name %q: only alphanumerics, hyphens, and dots are allowed\n", agentName)
-		os.Exit(1)
+		return 1
 	}
 	acc, err := trust.New(trust.Config{Enabled: true, Agent: agentName})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading trust score for agent %s: %v\n", agentName, err)
-		os.Exit(1)
+		return 1
 	}
 	score := acc.Score()
 	fmt.Printf("agent: %s\n", agentName)
 	fmt.Printf("score: %.3f\n", score)
 	fmt.Printf("tier: %s\n", trust.TierFor(score))
 	fmt.Printf("effective_multiplier: %.1fx\n", trust.MultiplierFor(score))
+	return 0
 }
 
 // runKeygen generates a fresh Ed25519 keypair for non-repudiable audit signing.
 // With --agent <name> it emits agent-namespaced variable names
 // (NOCKGUARD_AGENT_<UPPER>_ED25519_KEY / _PUB) so each agent can hold its own
 // signing identity. Without --agent it emits the legacy global variable names.
-func runKeygen(args []string) {
+func runKeygen(args []string) int {
 	var agentName string
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--agent" {
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "error: --agent requires a value")
-				os.Exit(1)
+				return 1
 			}
 			i++
 			agentName = args[i]
 			if !policy.ValidAgentName(agentName) {
 				fmt.Fprintf(os.Stderr, "error: invalid agent name %q: only alphanumerics, hyphens, and dots are allowed\n", agentName)
-				os.Exit(1)
+				return 1
 			}
 		}
 	}
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "keygen failed: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	if agentName != "" {
 		keyEnv := policy.AgentKeyEnvName(agentName)
@@ -791,12 +911,13 @@ func runKeygen(args []string) {
 		fmt.Printf("# PUBLIC key — share with verifiers. Cannot forge entries.\n")
 		fmt.Printf("NOCKGUARD_AUDIT_ED25519_PUB=%s\n", hex.EncodeToString(pub))
 	}
+	return 0
 }
 
 // runInit handles `nockguard init` — it scaffolds a sensible, default-deny
 // starter policy so a new user is guarded in seconds instead of hand-writing
 // YAML. It never overwrites an existing policy without --force.
-func runInit(args []string) {
+func runInit(args []string) int {
 	var policyPath string
 	force := false
 	for i := 0; i < len(args); i++ {
@@ -814,7 +935,7 @@ func runInit(args []string) {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		policyPath = filepath.Join(home, ".nockguard", "policy.yaml")
 	}
@@ -822,16 +943,17 @@ func runInit(args []string) {
 	written, err := policy.WriteStarter(policyPath, force)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	if !written {
-		return
+		return 0
 	}
 	fmt.Printf("Wrote starter policy: %s\n\n", policyPath)
 	fmt.Println("Next:")
 	fmt.Printf("  1. Edit %s — rename the agent and set its allow/deny lists.\n", policyPath)
 	fmt.Println("  2. Run the firewall in front of your MCP server:")
 	fmt.Printf("     nockguard proxy --upstream \"<your mcp server cmd>\" --agent <name> --policy %s\n", policyPath)
+	return 0
 }
 
 func printUsage() {
