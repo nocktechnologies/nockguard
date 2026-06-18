@@ -122,6 +122,16 @@ Policy verdict precedence is `deny` first, then `ask`, then normal allow/mode lo
 
 Rate limiting and spend caps are opt-in and independent — set one, both, or neither. NockGuard sits at the MCP layer and sees tool *calls*, not upstream API token spend, so the spend cap is denominated in tool calls (a proxy for cost), enforced before the call reaches the server. When a call clears the allowlist and input validation but exceeds a limit, the agent receives a JSON-RPC error (`rate limit exceeded` / `spend cap exceeded`); policy-denied or input-blocked calls never consume budget. Ask calls are metered before the approval prompt, preserving the existing Phase 5 gate order.
 
+## Verify a trail in one command
+
+Any signed audit trail can be proven intact and non-repudiable **offline** — no daemon, no signing key, only the public key:
+
+```bash
+nockguard verify --agent kit    # exit 0 = trail intact + authentic, exit 2 = tampered
+```
+
+That single command replays the whole hash chain and the per-entry signatures: it proves the trail was not edited, reordered, truncated, or signed by anyone but the holder of the agent's private key. `verify` is the first-class form of `audit verify` (below), which documents HMAC vs Ed25519 signing, per-agent keys, and the compliance evidence packs.
+
 ## Audit Trail (Phase 4)
 
 NockGuard can write a structured, append-only record of every policy decision — turning the firewall from a gate into an accountable trail of what each agent attempted and what the policy did about it. Enable it with a top-level `audit` block:
