@@ -64,6 +64,15 @@ func main() {
 		return
 	}
 
+	// `verify` is a first-class top-level alias for `audit verify`. The one-command
+	// offline trail proof is the headline accountability artifact ("prove your
+	// agent fleet's trail is intact and non-repudiable in one command"), so it gets
+	// the verb a user reaches for directly: `nockguard verify --agent <name>`.
+	if args[0] == "verify" {
+		runAudit(args)
+		return
+	}
+
 	if args[0] == "keygen" {
 		runKeygen(args[1:])
 		return
@@ -756,8 +765,9 @@ Usage:
   nockguard init [--policy <path>] [--force]
   nockguard proxy --upstream <command> --agent <name> [--policy <path>]
   nockguard egress-proxy --listen <addr> --agent <name> --policy <path> [--audit <path>] [--enforce]
+  nockguard verify (--agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
   nockguard trust show --agent <name>
-  nockguard audit verify (--agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
+  nockguard audit verify ...   # same as 'nockguard verify' (the audit-namespaced form)
   nockguard evidence --framework soc2 (--agent <name> | --ed25519-pub-env <ENV> | --key-env <ENV>) [--audit <path>] [--audit-dir <dir>] [--from <date>] [--to <date>] [--format html|json] [-o <file>]
   nockguard keygen [--agent <name>]
   nockguard version
@@ -794,7 +804,7 @@ Examples:
   nockguard proxy --upstream "npx mcp-server-nockcc" --agent kit --policy policy.yaml
   nockguard egress-proxy --listen 127.0.0.1:8899 --agent kit --policy egress.yaml
   nockguard keygen --agent kit                          # generate per-agent keypair
-  nockguard audit verify --agent kit                    # verify kit's trail (reads NOCKGUARD_AGENT_KIT_ED25519_PUB)
+  nockguard verify --agent kit                          # prove kit's trail is intact + non-repudiable (exit 0 = clean, 2 = tampered)
   nockguard evidence --framework soc2 --agent kit -o kit-soc2.html   # SOC2 pack for kit's signed trail
   nockguard keygen                                      # generate global keypair (legacy)
   nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB  # verify global trail`)
