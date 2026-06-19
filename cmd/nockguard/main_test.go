@@ -160,6 +160,46 @@ func TestEvidenceCommandVerifiesBackingTrail(t *testing.T) {
 	}
 }
 
+func TestPolicyProposeCommandPrintsShadowAllowlist(t *testing.T) {
+	dir := t.TempDir()
+	writePlainTrail(t, dir, "kit", []audit.Event{
+		{Agent: "kit", Tool: "Read", Decision: "allow"},
+		{Agent: "kit", Tool: "Read", Decision: "allow"},
+		{Agent: "kit", Tool: "Bash", Decision: "allow"},
+		{Agent: "kit", Tool: "Write", Decision: "deny"},
+		{Agent: "ash", Tool: "WebSearch", Decision: "allow"},
+	})
+
+	code, stdout, stderr := runCommandForTest(t, "policy", "propose", "--agent", "kit", "--audit-dir", dir)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "shadow:") || !strings.Contains(stdout, "- Bash") || !strings.Contains(stdout, "- Read") {
+		t.Fatalf("policy propose should print distinct allowed tools as shadow YAML, got:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "Write") || strings.Contains(stdout, "WebSearch") {
+		t.Fatalf("policy propose included denied or other-agent tools:\n%s", stdout)
+	}
+}
+
+func TestPolicyShadowReportCommandCountsWouldDeny(t *testing.T) {
+	dir := t.TempDir()
+	writePlainTrail(t, dir, "kit", []audit.Event{
+		{Agent: "kit", Tool: "Bash", Decision: "would-deny"},
+		{Agent: "kit", Tool: "Bash", Decision: "would-deny"},
+		{Agent: "kit", Tool: "Write", Decision: "would-deny"},
+		{Agent: "kit", Tool: "Read", Decision: "allow"},
+	})
+
+	code, stdout, stderr := runCommandForTest(t, "policy", "shadow-report", "--agent", "kit", "--audit-dir", dir)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Bash 2") || !strings.Contains(stdout, "Write 1") {
+		t.Fatalf("shadow-report should count would-deny by tool, got:\n%s", stdout)
+	}
+}
+
 func runCommandForTest(t *testing.T, args ...string) (int, string, string) {
 	t.Helper()
 	oldStdout := os.Stdout
@@ -192,6 +232,24 @@ func runCommandForTest(t *testing.T, args ...string) (int, string, string) {
 	os.Stdout = oldStdout
 	os.Stderr = oldStderr
 	return code, <-stdoutDone, <-stderrDone
+}
+
+func writePlainTrail(t *testing.T, dir, agent string, events []audit.Event) string {
+	t.Helper()
+	path := policy.AgentAuditPath(filepath.Join(dir, filepath.Base(policy.DefaultAuditPath)), agent)
+	a, err := audit.New(path)
+	if err != nil {
+		t.Fatalf("audit.New: %v", err)
+	}
+	for _, ev := range events {
+		if err := a.Record(ev); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	return path
 }
 
 func writeEd25519Trail(t *testing.T, dir, agent string) (string, string) {

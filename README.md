@@ -90,6 +90,8 @@ nockguard proxy \
 
 - **allow**: Tool patterns the agent can use. Supports `*` wildcards.
 - **deny**: Tool patterns blocked regardless of allow rules. Deny takes precedence.
+- **shadow**: Dry-run allowlist for observe-to-enforce staging. A tool outside
+  `shadow` records `would-deny` in the audit trail but is not blocked.
 - **ask**: Tool patterns that return the `Ask` verdict. NockGuard holds the call for a human approval decision before forwarding it. Denial or timeout drops the call.
 - **fail_mode**: `deny` (default) rejects malformed or ambiguous `tools/call` messages that NockGuard cannot safely interpret; `ask` parks those failures behind approval instead.
 - **mode**: `allow` (default) permits unlisted tools, `deny` blocks them.
@@ -104,6 +106,7 @@ nockguard proxy \
 agents:
   kit:
     allow: ["read_*", "search_*"]
+    shadow: ["read_*", "search_*"]
     ask: ["deploy_*"]
     fail_mode: ask
     validate_input: ["sqli", "path_traversal", "secrets"]
@@ -153,7 +156,7 @@ Each decision is one JSON object per line (JSON Lines):
 {"ts":"2026-06-03T18:30:01Z","agent":"kit","tool":"nockcc_nock_list","decision":"allow","reason":"allow-rule \"nockcc_nock_*\""}
 ```
 
-`decision` is one of `allow`, `deny`, `block` (input validation), `ratelimit`, `approval-granted`, `approval-denied`, `state-write`, or `hide` (filtered from `tools/list`). Auditing is opt-in (absent or `enabled: false` keeps Phase 1–3 behavior) and fail-open — an audit write error is logged but never blocks or fails a tool call.
+`decision` is one of `allow`, `deny`, `would-deny` (shadow dry-run miss), `block` (input validation), `ratelimit`, `approval-granted`, `approval-denied`, `state-write`, or `hide` (filtered from `tools/list`). Auditing is opt-in (absent or `enabled: false` keeps Phase 1–3 behavior) and fail-open — an audit write error is logged but never blocks or fails a tool call.
 
 `reason` names the specific policy rule behind each decision — `deny-rule "…"`, `allow-rule "…"`, `no allow-rule matched`, `default-allow (no allow list)`, or `no policy for agent (fail-closed)` — so the trail is *explainable* rather than an opaque `policy`. The matched rule is recorded operator-side only; the error returned to the agent stays minimal (`denied by policy`), so a hostile agent cannot map the policy surface from rejections.
 
@@ -172,7 +175,27 @@ audit:
     api_key_env: NOCKCC_API_KEY   # the key is read from this env var, never stored in the policy file
 ```
 
-Forwarding is **asynchronous and fail-open**: events post on a background worker, `Enqueue` never blocks (it drops if the buffer saturates), and any HTTP/transport error is swallowed — a slow or unreachable NockCC can never stall or fail a tool call. Severity maps as `block → high` (an injection / secret-exfil attempt) and `deny` / `ratelimit → warn`. Misconfiguration (forwarding enabled with no `url`, or an `api_key_env` that doesn't resolve) fails loud at startup rather than silently dropping every event.
+Forwarding is **asynchronous and fail-open**: events post on a background worker, `Enqueue` never blocks (it drops if the buffer saturates), and any HTTP/transport error is swallowed — a slow or unreachable NockCC can never stall or fail a tool call. Severity maps as `block → high` (an injection / secret-exfil attempt), `would-deny → info`, and `deny` / `ratelimit → warn`. Misconfiguration (forwarding enabled with no `url`, or an `api_key_env` that doesn't resolve) fails loud at startup rather than silently dropping every event.
+
+## Observe to Enforce
+
+Use the signed audit trail to derive enforcement from the tools an agent actually
+used:
+
+```bash
+nockguard policy propose --agent kit
+```
+
+The command reads `~/.nockguard/logs/kit.audit.jsonl`, extracts distinct allowed
+tools, and prints a proposed `shadow:` allowlist. After adding that block to the
+agent policy, run in observe mode and preview false positives:
+
+```bash
+nockguard policy shadow-report --agent kit
+```
+
+`0 would-deny entries` means the shadow window is clean enough for human review
+before flipping `mode: allow` to `mode: deny`.
 
 ### Tamper-evidence (HMAC hash-chain)
 

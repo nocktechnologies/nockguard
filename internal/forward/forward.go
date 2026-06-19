@@ -170,10 +170,13 @@ func (f *Forwarder) logError(stage string, ev Event, err error) {
 
 // severityFor maps a decision to an ops-log severity. A blocked call (an
 // injection or secret-exfil attempt caught by input validation) is the loudest
-// signal; policy denies and rate limits are warnings.
+// signal; shadow would-deny is dry-run evidence, not a live block.
 func severityFor(decision string) string {
 	if decision == "block" {
 		return "high"
+	}
+	if decision == "would-deny" {
+		return "info"
 	}
 	return "warn"
 }
