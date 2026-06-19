@@ -114,6 +114,7 @@ func TestSeverityMapping(t *testing.T) {
 	f.Enqueue(Event{Agent: "kit", Tool: "a", Decision: "block", Reason: "sqli"})
 	f.Enqueue(Event{Agent: "kit", Tool: "b", Decision: "deny", Reason: "policy"})
 	f.Enqueue(Event{Agent: "kit", Tool: "c", Decision: "ratelimit", Reason: "rate"})
+	f.Enqueue(Event{Agent: "kit", Tool: "d", Decision: "would-deny", Reason: "shadow"})
 	f.Stop()
 
 	got := map[string]string{} // decision -> severity
@@ -123,7 +124,7 @@ func TestSeverityMapping(t *testing.T) {
 		sev, _ := r.body["severity"].(string)
 		got[dec] = sev
 	}
-	want := map[string]string{"block": "high", "deny": "warn", "ratelimit": "warn"}
+	want := map[string]string{"block": "high", "deny": "warn", "ratelimit": "warn", "would-deny": "info"}
 	for dec, sev := range want {
 		if got[dec] != sev {
 			t.Errorf("decision %q severity = %q, want %q", dec, got[dec], sev)

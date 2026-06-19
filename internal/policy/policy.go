@@ -59,6 +59,10 @@ const DefaultAuditPath = ".nockguard/logs/audit.jsonl"
 type AgentPolicy struct {
 	Allow []string `yaml:"allow"`
 	Deny  []string `yaml:"deny"`
+	// Shadow is a dry-run allowlist. A miss is recorded as a would-deny basis
+	// while preserving the live verdict, so observe mode can measure an enforce
+	// allowlist before a human flips mode to deny.
+	Shadow []string `yaml:"shadow"`
 	// Ask holds tools for a human verdict as a policy-engine-native approval
 	// verdict. RequireApproval remains below as the legacy Phase 5 gate so
 	// existing policy files keep their original tool-list visibility.
@@ -205,6 +209,9 @@ type Decision struct {
 	// "no policy for agent (fail-closed)".
 	Reason   string
 	Withheld []StateWrite
+	// ShadowWouldDeny marks a dry-run Shadow allowlist miss. It never changes
+	// Verdict; callers record it as a separate would-deny audit event.
+	ShadowWouldDeny bool
 }
 
 func (d Decision) Allowed() bool {
@@ -229,6 +236,16 @@ func (e *Engine) Evaluate(agent, tool string) Decision {
 		}
 	}
 
+	shadowMiss := len(pol.Shadow) > 0 && !matchesAny(pol.Shadow, tool)
+
+	withShadow := func(dec Decision) Decision {
+		if shadowMiss && dec.Verdict == Allow {
+			dec.ShadowWouldDeny = true
+			dec.Reason = dec.Reason + "; would-deny shadow (no shadow-rule matched)"
+		}
+		return dec
+	}
+
 	for _, pattern := range pol.Deny {
 		if matchPattern(pattern, tool) {
 			return Decision{Verdict: Deny, Reason: fmt.Sprintf("deny-rule %q", pattern)}
@@ -249,7 +266,7 @@ func (e *Engine) Evaluate(agent, tool string) Decision {
 	if len(pol.Allow) > 0 {
 		for _, pattern := range pol.Allow {
 			if matchPattern(pattern, tool) {
-				return Decision{Verdict: Allow, Reason: fmt.Sprintf("allow-rule %q", pattern)}
+				return withShadow(Decision{Verdict: Allow, Reason: fmt.Sprintf("allow-rule %q", pattern)})
 			}
 		}
 		return Decision{Verdict: Deny, Reason: "no allow-rule matched"}
@@ -258,7 +275,7 @@ func (e *Engine) Evaluate(agent, tool string) Decision {
 	if pol.Mode == "deny" {
 		return Decision{Verdict: Deny, Reason: `mode "deny", no allow list`}
 	}
-	return Decision{Verdict: Allow, Reason: "default-allow (no allow list)"}
+	return withShadow(Decision{Verdict: Allow, Reason: "default-allow (no allow list)"})
 }
 
 // Check reports whether a (agent, tool) call is permitted. It is the boolean
@@ -569,4 +586,13 @@ func matchPattern(pattern, tool string) bool {
 		return matched
 	}
 	return pattern == tool
+}
+
+func matchesAny(patterns []string, tool string) bool {
+	for _, pattern := range patterns {
+		if matchPattern(pattern, tool) {
+			return true
+		}
+	}
+	return false
 }

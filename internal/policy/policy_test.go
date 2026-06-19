@@ -309,6 +309,46 @@ agents:
 	}
 }
 
+func TestEvaluateShadowMissRecordsWouldDenyBasisWithoutDenying(t *testing.T) {
+	path := writePolicy(t, `
+agents:
+  kit:
+    mode: allow
+    deny:
+      - "nockcc_kill_switch_set"
+    shadow:
+      - "nockcc_nock_*"
+`)
+	eng, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	allowed := eng.Evaluate("kit", "nockcc_nock_list")
+	if !allowed.Allowed() {
+		t.Fatalf("shadow-listed tool should keep live allow verdict, got %+v", allowed)
+	}
+	if strings.Contains(allowed.Reason, "would-deny") {
+		t.Fatalf("shadow-listed tool should not add would-deny basis: %q", allowed.Reason)
+	}
+
+	miss := eng.Evaluate("kit", "nockcc_spend_summary")
+	if !miss.Allowed() {
+		t.Fatalf("shadow miss in observe mode must not deny live call, got %+v", miss)
+	}
+	if !strings.Contains(miss.Reason, "would-deny") || !strings.Contains(miss.Reason, "shadow") {
+		t.Fatalf("shadow miss should be recorded in reason, got %q", miss.Reason)
+	}
+
+	denied := eng.Evaluate("kit", "nockcc_kill_switch_set")
+	if denied.Allowed() {
+		t.Fatalf("explicit deny must still deny, got %+v", denied)
+	}
+	if strings.Contains(denied.Reason, "would-deny") {
+		t.Fatalf("explicit deny should not be rewritten as shadow miss: %q", denied.Reason)
+	}
+}
+
 func TestFailMode(t *testing.T) {
 	path := writePolicy(t, `
 agents:

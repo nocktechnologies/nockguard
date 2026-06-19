@@ -22,6 +22,7 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/proxy"
 	"github.com/nocktechnologies/nockguard/internal/proxy/forwardhttp"
 	"github.com/nocktechnologies/nockguard/internal/trust"
+	"gopkg.in/yaml.v3"
 )
 
 // buildApprover wires the Phase 5 approval gate. For now: a deterministic test
@@ -65,6 +66,10 @@ func runCLI(args []string) int {
 
 	if args[0] == "audit" {
 		return runAudit(args[1:])
+	}
+
+	if args[0] == "policy" {
+		return runPolicy(args[1:])
 	}
 
 	// `verify` is a first-class top-level alias for `audit verify`. The one-command
@@ -200,6 +205,130 @@ func runCLI(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func runPolicy(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: nockguard policy (propose | shadow-report) --agent <name> [--audit-dir <dir> | --audit <path>]")
+		return 1
+	}
+	switch args[0] {
+	case "propose":
+		return runPolicyPropose(args[1:])
+	case "shadow-report":
+		return runPolicyShadowReport(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown policy command: %s\n", args[0])
+		return 1
+	}
+}
+
+func runPolicyPropose(args []string) int {
+	agent, auditPath, ok := parsePolicyAuditArgs(args)
+	if !ok {
+		return 1
+	}
+	tools, err := policy.ProposeShadowFromAudit(agent, auditPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading audit trail: %v\n", err)
+		return 1
+	}
+	type proposedAgentPolicy struct {
+		Mode   string   `yaml:"mode"`
+		Shadow []string `yaml:"shadow"`
+	}
+	out := struct {
+		Agents map[string]proposedAgentPolicy `yaml:"agents"`
+	}{
+		Agents: map[string]proposedAgentPolicy{
+			agent: {Mode: "allow", Shadow: tools},
+		},
+	}
+	data, err := yaml.Marshal(out)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error rendering proposal: %v\n", err)
+		return 1
+	}
+	fmt.Print(string(data))
+	return 0
+}
+
+func runPolicyShadowReport(args []string) int {
+	agent, auditPath, ok := parsePolicyAuditArgs(args)
+	if !ok {
+		return 1
+	}
+	misses, err := policy.ShadowReportFromAudit(agent, auditPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading audit trail: %v\n", err)
+		return 1
+	}
+	if len(misses) == 0 {
+		fmt.Printf("0 would-deny entries for %s\n", agent)
+		return 0
+	}
+	fmt.Printf("would-deny entries for %s:\n", agent)
+	for _, miss := range misses {
+		fmt.Printf("%s %d\n", miss.Tool, miss.Count)
+	}
+	return 0
+}
+
+func parsePolicyAuditArgs(args []string) (agent, auditPath string, ok bool) {
+	var auditDir string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--agent":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "error: --agent requires a value")
+				return "", "", false
+			}
+			i++
+			agent = args[i]
+		case "--audit":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "error: --audit requires a value")
+				return "", "", false
+			}
+			i++
+			auditPath = args[i]
+		case "--audit-dir":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "error: --audit-dir requires a value")
+				return "", "", false
+			}
+			i++
+			auditDir = args[i]
+		default:
+			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", args[i])
+			return "", "", false
+		}
+	}
+	if agent == "" {
+		fmt.Fprintln(os.Stderr, "error: --agent is required")
+		return "", "", false
+	}
+	if !policy.ValidAgentName(agent) {
+		fmt.Fprintf(os.Stderr, "error: invalid agent name %q: only alphanumerics, hyphens, and dots are allowed\n", agent)
+		return "", "", false
+	}
+	if auditPath != "" && auditDir != "" {
+		fmt.Fprintln(os.Stderr, "error: provide only one of --audit or --audit-dir")
+		return "", "", false
+	}
+	if auditPath == "" {
+		if auditDir == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+				return "", "", false
+			}
+			auditDir = filepath.Join(home, filepath.Dir(policy.DefaultAuditPath))
+		}
+		basePath := filepath.Join(auditDir, filepath.Base(policy.DefaultAuditPath))
+		auditPath = policy.AgentAuditPath(basePath, agent)
+	}
+	return agent, auditPath, true
 }
 
 func runEgressProxy(args []string) int {
@@ -964,6 +1093,8 @@ Usage:
   nockguard proxy --upstream <command> --agent <name> [--policy <path>]
   nockguard egress-proxy --listen <addr> --agent <name> --policy <path> [--audit <path>] [--enforce]
   nockguard verify (--all | --agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
+  nockguard policy propose --agent <name> [--audit <path>] [--audit-dir <dir>]
+  nockguard policy shadow-report --agent <name> [--audit <path>] [--audit-dir <dir>]
   nockguard trust show --agent <name>
   nockguard audit verify ...   # same as 'nockguard verify' (the audit-namespaced form)
   nockguard evidence --framework soc2 (--agent <name> | --ed25519-pub-env <ENV> | --key-env <ENV>) [--audit <path>] [--audit-dir <dir>] [--from <date>] [--to <date>] [--format html|json] [-o <file>]
@@ -1004,6 +1135,8 @@ Examples:
   nockguard keygen --agent kit                          # generate per-agent keypair
   nockguard verify --agent kit                          # prove kit's trail is intact + non-repudiable (exit 0 = clean, 2 = tampered)
   nockguard verify --all                                # prove EVERY per-agent trail in ~/.nockguard/logs in one command
+  nockguard policy propose --agent kit                   # derive a shadow allowlist from kit's observed allowed tools
+  nockguard policy shadow-report --agent kit             # count shadow would-deny misses by tool
   nockguard evidence --framework soc2 --agent kit -o kit-soc2.html   # SOC2 pack for kit's signed trail
   nockguard keygen                                      # generate global keypair (legacy)
   nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB  # verify global trail`)

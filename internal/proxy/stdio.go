@@ -101,10 +101,10 @@ func (p *StdioProxy) audit(tool, decision, reason string) {
 
 // isEnforcement reports whether a decision is a policy action worth surfacing in
 // the NockCC ops-log. Allowed calls and tool-list hides are excluded to keep the
-// centralized feed to genuine enforcement signal.
+// centralized feed to notable enforcement or shadow-enforcement signal.
 func isEnforcement(decision string) bool {
 	switch decision {
-	case "deny", "block", "ratelimit", "approval-granted", "approval-denied":
+	case "deny", "block", "ratelimit", "approval-granted", "approval-denied", "would-deny":
 		// approval-* are the highest-signal events NockGuard captures: a human
 		// had to intervene on a consequential call, so both outcomes surface.
 		return true
@@ -319,6 +319,9 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				continue
 			}
 			p.logger.Printf("ALLOW agent=%s tool=%s", p.agent, toolName)
+			if dec.ShadowWouldDeny {
+				p.audit(toolName, "would-deny", dec.Reason)
+			}
 			p.audit(toolName, "allow", dec.Reason)
 			if _, writeErr := fmt.Fprintf(w, "%s\n", out); writeErr != nil {
 				return writeErr
