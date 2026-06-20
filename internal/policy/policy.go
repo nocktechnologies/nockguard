@@ -119,7 +119,46 @@ func Load(path string) (*Engine, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
+	// Validate every glob pattern at load time so a malformed wildcard fails
+	// LOUD here rather than silently voiding a control at evaluate time (N8180).
+	// A malformed DENY glob is the dangerous case — filepath.Match returning an
+	// error was discarded, so the deny silently no-matched and a broad allow let
+	// the call through (fail-open in the engine's strongest control). This makes
+	// the policy engine match the fail-loud posture of LimiterFor and
+	// validate.New, which both error on misconfiguration at startup.
+	for agent, pol := range cfg.Agents {
+		for field, patterns := range map[string][]string{
+			"allow":            pol.Allow,
+			"deny":             pol.Deny,
+			"ask":              pol.Ask,
+			"shadow":           pol.Shadow,
+			"require_approval": pol.RequireApproval,
+		} {
+			for _, pattern := range patterns {
+				if err := validateGlob(pattern); err != nil {
+					return nil, fmt.Errorf("agent %q %s rule %q: %w", agent, field, pattern, err)
+				}
+			}
+		}
+	}
 	return &Engine{config: cfg}, nil
+}
+
+// validateGlob confirms a policy pattern is a usable glob. A literal (no '*') is
+// always valid; a wildcard pattern is validated with filepath.Match so a
+// malformed glob (e.g. an unclosed character class like "nockcc_[spend*") is
+// rejected at Load() instead of silently failing to match — and, for a deny rule,
+// silently failing OPEN — at evaluate time.
+func validateGlob(pattern string) error {
+	if !strings.Contains(pattern, "*") {
+		return nil
+	}
+	// The candidate string is irrelevant for syntax validation; filepath.Match
+	// reports ErrBadPattern on a malformed pattern regardless of the name.
+	if _, err := filepath.Match(pattern, ""); err != nil {
+		return fmt.Errorf("malformed glob: %w", err)
+	}
+	return nil
 }
 
 // SigningKeyEnvNames returns the names of the environment variables that hold
@@ -247,7 +286,15 @@ func (e *Engine) Evaluate(agent, tool string) Decision {
 	}
 
 	for _, pattern := range pol.Deny {
-		if matchPattern(pattern, tool) {
+		matched, err := matchPatternErr(pattern, tool)
+		if err != nil {
+			// Fail CLOSED: a malformed deny glob must never silently void the
+			// control and let the call through (N8180). Deny on error. Load()
+			// already rejects malformed globs at startup; this is the
+			// evaluate-time backstop if one ever slips through.
+			return Decision{Verdict: Deny, Reason: fmt.Sprintf("deny-rule %q malformed (fail-closed): %v", pattern, err)}
+		}
+		if matched {
 			return Decision{Verdict: Deny, Reason: fmt.Sprintf("deny-rule %q", pattern)}
 		}
 	}
@@ -581,11 +628,21 @@ func (e *Engine) FilterTools(agent string, tools []string) []string {
 }
 
 func matchPattern(pattern, tool string) bool {
+	matched, _ := matchPatternErr(pattern, tool)
+	return matched
+}
+
+// matchPatternErr is matchPattern that surfaces a filepath.Match error instead
+// of discarding it. The deny path uses this to fail CLOSED on a malformed glob:
+// a deny rule that errors must be treated as a MATCH (deny the call), never
+// silently skipped into a fail-open. Load() validates globs up front (see
+// validateGlob), so this is defense-in-depth for any pattern that slips past
+// validation.
+func matchPatternErr(pattern, tool string) (bool, error) {
 	if strings.Contains(pattern, "*") {
-		matched, _ := filepath.Match(pattern, tool)
-		return matched
+		return filepath.Match(pattern, tool)
 	}
-	return pattern == tool
+	return pattern == tool, nil
 }
 
 func matchesAny(patterns []string, tool string) bool {

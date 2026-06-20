@@ -531,6 +531,103 @@ func checkHighWaterMark(hwm *highWaterMark, n int, sigAtCount string, verifySig 
 	return nil
 }
 
+// rejectDuplicateTopLevelKeys returns an error if raw is not a single JSON
+// object or contains a duplicate top-level key. This closes a forgery the typed
+// unmarshal + re-marshal verification path is blind to (N8179): Go's
+// encoding/json is LAST-WINS on duplicate keys, so a line such as
+//
+//	{"decision":"deny", <the originally-signed allow body incl decision:"allow">, "sig":...}
+//
+// decodes Decision="allow", re-canonicalizes to the originally-signed bytes, and
+// passes ed25519/HMAC verification — while a human reading the raw JSONL sees the
+// forged "deny". By rejecting duplicate top-level keys before signature checking,
+// the verifier refuses any line that is not in canonical (one-key-each) form, so
+// the only bytes that can verify are the bytes that were actually signed. This
+// mirrors the proxy's canonicalToolCall defense in internal/proxy/stdio.go, which
+// collapses such parser differentials on the request path.
+//
+// It uses a streaming token decoder (not json.Unmarshal into a map, which would
+// itself silently collapse the duplicate) so the duplicate is observed before it
+// is discarded.
+func rejectDuplicateTopLevelKeys(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("invalid json: %w", err)
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return fmt.Errorf("audit line is not a JSON object")
+	}
+	seen := make(map[string]struct{})
+	depth := 0 // depth of nested objects/arrays below the top-level object
+	for dec.More() || depth > 0 {
+		t, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("invalid json: %w", err)
+		}
+		if d, isDelim := t.(json.Delim); isDelim {
+			switch d {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+			continue
+		}
+		// Object keys appear as strings at depth 0 in key position. At depth 0,
+		// the decoder alternates key, value, key, value; nested values are
+		// consumed under depth > 0, so a top-level string token here is a key.
+		if depth == 0 {
+			if key, isStr := t.(string); isStr {
+				if _, dup := seen[key]; dup {
+					return fmt.Errorf("duplicate top-level key %q — non-canonical (possible forgery)", key)
+				}
+				seen[key] = struct{}{}
+				// Consume the value for this key.
+				if err := consumeValue(dec, &depth); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// consumeValue reads exactly one JSON value from dec, tracking object/array
+// nesting through the shared depth counter so the caller's top-level key scan
+// resumes correctly after the value.
+func consumeValue(dec *json.Decoder, depth *int) error {
+	t, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("invalid json: %w", err)
+	}
+	d, isDelim := t.(json.Delim)
+	if !isDelim {
+		return nil // scalar value: nothing further to consume
+	}
+	switch d {
+	case '{', '[':
+		// Recurse over the container until its matching close delimiter.
+		open := 1
+		for open > 0 {
+			tt, err := dec.Token()
+			if err != nil {
+				return fmt.Errorf("invalid json: %w", err)
+			}
+			if dd, ok := tt.(json.Delim); ok {
+				switch dd {
+				case '{', '[':
+					open++
+				case '}', ']':
+					open--
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // Verify walks a signed audit file and checks the hash chain end to end. It
 // returns the number of entries verified, or the 1-based line number and an
 // error at the first entry whose signature does not match — which happens if any
@@ -556,6 +653,9 @@ func Verify(path string, key []byte) (int, error) {
 			continue
 		}
 		n++
+		if err := rejectDuplicateTopLevelKeys(raw); err != nil {
+			return n, fmt.Errorf("line %d: %w", n, err)
+		}
 		var ev Event
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return n, fmt.Errorf("line %d: invalid json: %w", n, err)
@@ -617,6 +717,9 @@ func VerifyEd25519(path string, pub ed25519.PublicKey) (int, error) {
 			continue
 		}
 		n++
+		if err := rejectDuplicateTopLevelKeys(raw); err != nil {
+			return n, fmt.Errorf("line %d: %w", n, err)
+		}
 		var ev Event
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return n, fmt.Errorf("line %d: invalid json: %w", n, err)
