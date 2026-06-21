@@ -51,6 +51,19 @@ agents:
 		{host: "::1", url: "http://[::1]/secret"},
 		{host: "169.254.169.254", url: "http://169.254.169.254/latest/meta-data/"},
 		{host: "localhost", url: "http://localhost/"},
+		// N8269: encoded / short IPv4 forms net.ParseIP rejects but that resolve
+		// to loopback (these passed the old guard and reached 127.0.0.1).
+		{host: "2130706433", url: "http://2130706433/"}, // decimal
+		{host: "0x7f000001", url: "http://0x7f000001/"}, // hex
+		{host: "127.1", url: "http://127.1/"},           // short form
+		// Unspecified address — routes to locally-bound services.
+		{host: "0", url: "http://0/"},
+		{host: "0.0.0.0", url: "http://0.0.0.0/"},
+		{host: "[::]", url: "http://[::]/"},
+		// Metadata not caught by link-local, plus private and CGNAT ranges.
+		{host: "100.100.100.200", url: "http://100.100.100.200/"}, // Alibaba metadata (CGNAT)
+		{host: "10.0.0.1", url: "http://10.0.0.1/"},               // RFC1918 private
+		{host: "100.64.0.1", url: "http://100.64.0.1/"},           // CGNAT
 	}
 
 	for _, tc := range blocked {
@@ -81,11 +94,15 @@ agents:
 	logger := log.New(io.Discard, "", 0)
 	proxy := New("127.0.0.1:0", "kit", eng, auditor, logger)
 
-	req := httptest.NewRequest(http.MethodConnect, "http://127.0.0.1:443", nil)
-	req.Host = "127.0.0.1:443"
-	w := httptest.NewRecorder()
-	proxy.ServeHTTP(w, req)
-	if w.Code != http.StatusForbidden {
-		t.Errorf("CONNECT to loopback: want 403 Forbidden, got %d", w.Code)
+	// Plain loopback plus encoded forms — all must 403 on CONNECT, and the dial
+	// (when reached) goes to the validated IP, never the raw r.Host (N8269).
+	for _, host := range []string{"127.0.0.1:443", "2130706433:443", "0x7f000001:443", "127.1:443"} {
+		req := httptest.NewRequest(http.MethodConnect, "http://"+host, nil)
+		req.Host = host
+		w := httptest.NewRecorder()
+		proxy.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("CONNECT %q: want 403 Forbidden, got %d", host, w.Code)
+		}
 	}
 }
