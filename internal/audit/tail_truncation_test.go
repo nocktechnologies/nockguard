@@ -56,21 +56,25 @@ func TestEd25519TailTruncationIsDetected(t *testing.T) {
 	}
 }
 
-// TestEd25519LegacyTrailWithoutHighWaterMarkStillVerifies guards backward
-// compatibility: a trail with NO high-water-mark sidecar must verify exactly as
-// before. The live 247-entry mira.audit.jsonl predates the high-water-mark and
-// must NOT false-TAMPER — claim-guard depends on those signatures staying valid.
-func TestEd25519LegacyTrailWithoutHighWaterMarkStillVerifies(t *testing.T) {
+// TestEd25519SignedTrailWithDeletedHWMIsRejected documents the N8182 hardening:
+// a signed non-empty trail missing its .hwm sidecar is now treated as suspicious
+// (the sidecar may have been deleted alongside a tail truncation). N8154 writes
+// .hwm on every Record(), so any live signed trail will always have one unless
+// it was explicitly removed. Pre-N8154 trails (e.g. mira.audit.jsonl) acquired a
+// .hwm the first time a new entry was appended after the N8154 deploy, so they
+// are covered too. The old behaviour (pass silently on absent .hwm) was replaced
+// by TestDeletedHighWaterMarkIsDetectedOnSignedTrail.
+func TestEd25519SignedTrailWithDeletedHWMIsRejected(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(nil)
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
 	recordN(t, path, priv, 3)
 
-	// Simulate a legacy trail: strip any high-water-mark sidecar so only the
-	// bare signed JSONL remains, exactly like a pre-N8154 trail on disk.
-	_ = os.Remove(path + ".hwm")
+	if err := os.Remove(path + ".hwm"); err != nil {
+		t.Fatalf("could not remove hwm sidecar: %v", err)
+	}
 
-	if _, err := VerifyEd25519(path, pub); err != nil {
-		t.Errorf("a legacy trail without a high-water-mark must verify as before: %v", err)
+	if _, err := VerifyEd25519(path, pub); err == nil {
+		t.Error("signed trail with deleted .hwm must now be rejected — N8182 hardening")
 	}
 }
 
@@ -98,6 +102,52 @@ func TestHMACTailTruncationIsDetected(t *testing.T) {
 	if _, err := Verify(path, key); err == nil {
 		t.Error("HMAC: tail truncation must be detected via the high-water-mark")
 	}
+}
+
+// TestDeletedHighWaterMarkIsDetectedOnSignedTrail proves N8182 finding #2: when
+// an attacker deletes the .hwm sidecar alongside a tail truncation, the absence
+// of the sidecar must itself be flagged as suspicious on a signed trail that has
+// entries. An absent sidecar on an unsigned or empty trail is fine; the gap is
+// specifically a signed non-empty trail with no checkpoint.
+func TestDeletedHighWaterMarkIsDetectedOnSignedTrail(t *testing.T) {
+	t.Run("ed25519", func(t *testing.T) {
+		pub, priv, _ := ed25519.GenerateKey(nil)
+		path := filepath.Join(t.TempDir(), "audit.jsonl")
+		recordN(t, path, priv, 3)
+
+		if err := os.Remove(path + ".hwm"); err != nil {
+			t.Fatalf("could not remove hwm sidecar: %v", err)
+		}
+
+		if _, err := VerifyEd25519(path, pub); err == nil {
+			t.Error("missing .hwm on a signed non-empty trail must be detected")
+		}
+	})
+
+	t.Run("hmac", func(t *testing.T) {
+		key := []byte("test-hmac-key-32-bytes-long-okay")
+		path := filepath.Join(t.TempDir(), "audit.jsonl")
+		a, err := New(path, WithSigningKey(key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 3; i++ {
+			if err := a.Record(Event{Agent: "kit", Tool: "x", Decision: "allow"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := a.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.Remove(path + ".hwm"); err != nil {
+			t.Fatalf("could not remove hwm sidecar: %v", err)
+		}
+
+		if _, err := Verify(path, key); err == nil {
+			t.Error("missing .hwm on a signed non-empty HMAC trail must be detected")
+		}
+	})
 }
 
 // TestForgedHighWaterMarkRejected proves an attacker who truncates the trail and

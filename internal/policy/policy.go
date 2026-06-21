@@ -320,9 +320,17 @@ func (e *Engine) Evaluate(agent, tool string) Decision {
 	}
 
 	if pol.Mode == "deny" {
-		return Decision{Verdict: Deny, Reason: `mode "deny", no allow list`}
+		return withShadow(Decision{Verdict: Deny, Reason: `mode "deny", no allow list`})
 	}
-	return withShadow(Decision{Verdict: Allow, Reason: "default-allow (no allow list)"})
+	if pol.Mode == "allow" {
+		return withShadow(Decision{Verdict: Allow, Reason: "default-allow (no allow list)"})
+	}
+	// No allow list and no explicit mode: fail-closed. A named agent with no
+	// declared permissions gets nothing — the caller must either add tools to
+	// the allow list or set mode:allow. This matches the documented default-deny
+	// posture and prevents an empty/skeletal agent config from silently granting
+	// unrestricted access (N8182 policy bypass).
+	return withShadow(Decision{Verdict: Deny, Reason: "default-deny (no allow list)"})
 }
 
 // Check reports whether a (agent, tool) call is permitted. It is the boolean

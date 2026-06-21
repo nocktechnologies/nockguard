@@ -517,6 +517,15 @@ func countEntries(path string) (int, error) {
 // entry's signature does not match (the recorded entry was altered or replaced).
 func checkHighWaterMark(hwm *highWaterMark, n int, sigAtCount string, verifySig func(signed []byte, sigHex string) bool) error {
 	if hwm == nil {
+		// An absent sidecar on a signed, non-empty trail is suspicious: every
+		// Record() call since N8154 writes or updates .hwm immediately after
+		// appending the signed entry. If the sidecar is gone but the trail has
+		// entries, the most likely explanation is that an attacker deleted it
+		// alongside a tail truncation to defeat the count check. Treat this as
+		// a potential tamper rather than silently passing (N8182 finding #2).
+		if n > 0 {
+			return fmt.Errorf("signed trail has no high-water-mark sidecar (.hwm) — sidecar may have been deleted alongside a tail truncation")
+		}
 		return nil
 	}
 	if !verifySig(hwmSignedBytes(hwm.Count, hwm.LastSig), hwm.Sig) {

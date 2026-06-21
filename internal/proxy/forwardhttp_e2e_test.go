@@ -111,12 +111,16 @@ agents:
 	for _, target := range []string{allowed.URL, denied.URL} {
 		resp, err := client.Get(target)
 		if err != nil {
-			t.Fatalf("GET %s through observe-only proxy failed: %v\nproxy stderr:\n%s", target, err, stderr.String())
+			t.Fatalf("GET %s through proxy failed: %v\nproxy stderr:\n%s", target, err, stderr.String())
 		}
 		body, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("GET %s status = %d, body=%q", target, resp.StatusCode, body)
+		// N8182: loopback targets are hard-blocked by the SSRF guard regardless of
+		// policy (allowed.URL is 127.0.0.1, denied.URL is ::1 — both loopback).
+		// observe() still fires and audits the policy decision before the block,
+		// so audit entries and WOULD-BLOCK logging are unaffected.
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("GET %s: SSRF guard must block loopback (status want 403, got %d, body=%q)", target, resp.StatusCode, body)
 		}
 	}
 
