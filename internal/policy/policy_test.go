@@ -237,7 +237,7 @@ agents:
 		{"deny-beats-allow", "kit", "nockcc_nock_delete", false, `deny-rule "*delete*"`},
 		{"no-allow-match", "kit", "nockcc_spend_summary", false, "no allow-rule matched"},
 		{"mode-deny", "locked", "anything", false, `mode "deny", no allow list`},
-		{"default-allow", "permissive", "anything", true, "default-allow (no allow list)"},
+		{"default-deny", "permissive", "anything", false, "default-deny (no allow list)"},
 		{"no-policy-fail-closed", "ghost", "anything", false, "no policy for agent (fail-closed)"},
 	}
 	for _, tt := range tests {
@@ -346,6 +346,58 @@ agents:
 	}
 	if strings.Contains(denied.Reason, "would-deny") {
 		t.Fatalf("explicit deny should not be rewritten as shadow miss: %q", denied.Reason)
+	}
+}
+
+// TestEmptyAllowListDefaultsDeny proves N8182 finding #1: a named agent with an
+// empty or absent allow list and no explicit mode must DENY (fail-closed) rather
+// than allow everything. Previously the empty-allow branch fell through to
+// "default-allow", contradicting NockGuard's documented default-deny posture.
+func TestEmptyAllowListDefaultsDeny(t *testing.T) {
+	tests := []struct {
+		name   string
+		yaml   string
+		agent  string
+		reason string
+	}{
+		{
+			name: "empty allow list",
+			yaml: `
+agents:
+  restrictive:
+    allow: []
+`,
+			agent:  "restrictive",
+			reason: "default-deny",
+		},
+		{
+			name: "absent allow list no mode",
+			yaml: `
+agents:
+  bare: {}
+`,
+			agent:  "bare",
+			reason: "default-deny",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writePolicy(t, tt.yaml)
+			eng, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dec := eng.Evaluate(tt.agent, "any_tool")
+			if dec.Allowed() {
+				t.Errorf("named agent with no allow list must be DENIED, got %+v", dec)
+			}
+			if !strings.Contains(dec.Reason, tt.reason) {
+				t.Errorf("reason = %q, want to contain %q", dec.Reason, tt.reason)
+			}
+			if eng.Check(tt.agent, "any_tool") {
+				t.Error("Check must also deny (consistent with Evaluate)")
+			}
+		})
 	}
 }
 

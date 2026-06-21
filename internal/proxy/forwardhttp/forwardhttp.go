@@ -80,6 +80,10 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		host = destinationHost(r.URL.Host)
 	}
 	p.observe(host)
+	if isBlockedHost(host) {
+		http.Error(w, "blocked: SSRF guard", http.StatusForbidden)
+		return
+	}
 
 	out := r.Clone(r.Context())
 	out.RequestURI = ""
@@ -111,6 +115,10 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	host := destinationHost(r.Host)
 	p.observe(host)
+	if isBlockedHost(host) {
+		http.Error(w, "blocked: SSRF guard", http.StatusForbidden)
+		return
+	}
 
 	targetConn, err := net.DialTimeout("tcp", r.Host, 30*time.Second)
 	if err != nil {
@@ -203,6 +211,22 @@ func removeHopByHopHeaders(h http.Header) {
 	} {
 		h.Del(k)
 	}
+}
+
+// isBlockedHost returns true if the host (IP or well-known name) refers to a
+// loopback, link-local, or cloud-metadata address. These are hard-blocked by
+// the SSRF guard regardless of policy or observe mode: an agent should never be
+// able to reach the host's own services or cloud-provider metadata endpoints
+// through the egress proxy (N8182 finding #3).
+func isBlockedHost(host string) bool {
+	if strings.ToLower(host) == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
 }
 
 func ValidateConfig(listen, agent string, engine *policy.Engine) error {
