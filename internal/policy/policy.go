@@ -1,7 +1,9 @@
 package policy
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -119,7 +121,7 @@ func Load(path string) (*Engine, error) {
 	dec := yaml.NewDecoder(f)
 	dec.KnownFields(true)
 	var cfg Config
-	if err := dec.Decode(&cfg); err != nil {
+	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("policy %s: %w", path, err)
 	}
 	// Validate every glob pattern at load time so a malformed wildcard fails

@@ -434,6 +434,37 @@ agents:
 	}
 }
 
+// TestEmptyPolicyFile verifies that an empty policy file loads without error as
+// the zero/empty config. This is a regression test for N8306: PR #38 switched
+// Load() to yaml.NewDecoder.Decode() which returns io.EOF on empty input (unlike
+// yaml.Unmarshal which returned nil), causing empty files to fail instead of
+// loading as a no-op policy.
+func TestEmptyPolicyFile(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{"empty file", ""},
+		{"newline only", "\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writePolicy(t, tc.content)
+			eng, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load() on %s returned error: %v", tc.name, err)
+			}
+			// Zero config: no agents configured, every check fail-closed.
+			if eng.HasPolicyFor("any_agent") {
+				t.Error("empty policy should have no agents configured")
+			}
+			if eng.Check("any_agent", "any_tool") {
+				t.Error("empty policy should deny all tools (fail-closed)")
+			}
+		})
+	}
+}
+
 // TestUnknownFieldsRejected verifies that a misspelled control key under an
 // agent — e.g. "denny" instead of "deny" — causes Load() to return an error
 // instead of silently accepting the typo as a no-op. Without strict decoding a
