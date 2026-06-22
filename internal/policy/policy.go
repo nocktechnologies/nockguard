@@ -111,13 +111,16 @@ type Engine struct {
 }
 
 func Load(path string) (*Engine, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
+	defer f.Close()
+	dec := yaml.NewDecoder(f)
+	dec.KnownFields(true)
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, err
+	if err := dec.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("policy %s: %w", path, err)
 	}
 	// Validate every glob pattern at load time so a malformed wildcard fails
 	// LOUD here rather than silently voiding a control at evaluate time (N8180).
