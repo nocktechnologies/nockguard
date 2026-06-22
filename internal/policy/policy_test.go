@@ -433,3 +433,75 @@ agents:
 		}
 	}
 }
+
+// TestUnknownFieldsRejected verifies that a misspelled control key under an
+// agent — e.g. "denny" instead of "deny" — causes Load() to return an error
+// instead of silently accepting the typo as a no-op. Without strict decoding a
+// misspelled deny/ask/require_approval can void a guardrail with no warning
+// (N8300).
+func TestUnknownFieldsRejected(t *testing.T) {
+	cases := []struct {
+		name   string
+		yaml   string
+		badKey string
+	}{
+		{
+			name:   "misspelled deny as denny",
+			badKey: "denny",
+			yaml: `
+agents:
+  kit:
+    allow:
+      - "nockcc_*"
+    denny:
+      - "nockcc_kill_switch_set"
+`,
+		},
+		{
+			name:   "misspelled require_approvals",
+			badKey: "require_approvals",
+			yaml: `
+agents:
+  kit:
+    allow:
+      - "nockcc_*"
+    require_approvals:
+      - "nockcc_spend_*"
+`,
+		},
+		{
+			name:   "misspelled validate_inputs",
+			badKey: "validate_inputs",
+			yaml: `
+agents:
+  kit:
+    mode: allow
+    validate_inputs:
+      - "sqli"
+`,
+		},
+		{
+			name:   "unknown top-level key",
+			badKey: "agentss",
+			yaml: `
+agentss:
+  kit:
+    allow:
+      - "nockcc_*"
+`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writePolicy(t, tc.yaml)
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("Load() accepted policy with unknown field %q — must reject it", tc.badKey)
+			}
+			if !strings.Contains(err.Error(), tc.badKey) {
+				t.Errorf("error should name the unknown field %q, got: %v", tc.badKey, err)
+			}
+		})
+	}
+}
