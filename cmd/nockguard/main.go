@@ -27,8 +27,9 @@ import (
 
 // buildApprover wires the Phase 5 approval gate. For now: a deterministic test
 // seam (NOCKGUARD_APPROVAL_TEST=approve|deny) used by e2e tests, otherwise no
-// approver (nil). nil preserves the legacy require_approval behavior; the new
-// Ask verdict fails closed without an approver.
+// approver (nil). With nil, BOTH native `ask` rules and legacy
+// `require_approval` rules fail CLOSED — a covered call is denied, never
+// forwarded (N8328: require_approval used to fail open here).
 func buildApprover(logger *log.Logger) approval.Approver {
 	switch os.Getenv("NOCKGUARD_APPROVAL_TEST") {
 	case "approve":
@@ -37,7 +38,8 @@ func buildApprover(logger *log.Logger) approval.Approver {
 		return approval.NewStaticApprover(false, "test-auto-deny")
 	}
 	// Real approver: a DEDICATED Telegram bot (never the fleet's main bot). Both
-	// env vars must be set; otherwise the gate is un-enforced (logged loud).
+	// env vars must be set; otherwise NO approver is wired and every gated call
+	// fails closed (logged loud below).
 	token := os.Getenv("NOCKGUARD_APPROVAL_BOT_TOKEN")
 	chatID := os.Getenv("NOCKGUARD_APPROVAL_CHAT_ID")
 	if token != "" && chatID != "" {
@@ -45,7 +47,7 @@ func buildApprover(logger *log.Logger) approval.Approver {
 		logger.Printf("Phase 5 approval gate ON — Telegram (dedicated bot), %s timeout, fail-safe deny", timeout)
 		return approval.NewTelegramApprover(token, chatID, timeout)
 	}
-	logger.Printf("Phase 5 approval gate: no approver configured (set NOCKGUARD_APPROVAL_BOT_TOKEN + NOCKGUARD_APPROVAL_CHAT_ID); ask rules fail closed, legacy require_approval rules are un-enforced")
+	logger.Printf("Phase 5 approval gate: no approver configured (set NOCKGUARD_APPROVAL_BOT_TOKEN + NOCKGUARD_APPROVAL_CHAT_ID); ALL gated calls fail CLOSED — both `ask` rules and legacy `require_approval` rules will be DENIED until an approver is wired")
 	return nil
 }
 

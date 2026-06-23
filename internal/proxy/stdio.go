@@ -229,7 +229,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				// A tools/call whose name we cannot extract fails CLOSED — the
 				// upstream might still resolve a name the proxy could not see.
 				dec := p.engine.FailModeVerdict(p.agent, "unextractable-name")
-				if dec.Verdict == policy.Ask && p.approveAsk("", canonicalLine, dec, false) {
+				if dec.Verdict == policy.Ask && p.approveAsk("", canonicalLine, dec) {
 					if _, writeErr := fmt.Fprintf(w, "%s\n", canonicalLine); writeErr != nil {
 						return writeErr
 					}
@@ -259,10 +259,14 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				}
 				continue
 			}
-			allowWithoutApprover := false
+			// N8328: legacy require_approval is promoted to a hard `ask` and
+			// FAILS CLOSED when no approver is wired — identical to a native `ask`
+			// rule. Previously it set allowWithoutApprover=true here, which made the
+			// gate fail OPEN (a require_approval-covered call was treated as
+			// approval SUCCESS with no human in the loop). The default must be safe:
+			// no approver -> the call is blocked, not silently forwarded.
 			if dec.Verdict == policy.Allow && p.engine.RequiresApproval(p.agent, toolName) {
 				dec.Verdict = policy.Ask
-				allowWithoutApprover = true
 			}
 
 			// Phase 2: input validation on the canonical tool-call arguments
@@ -294,7 +298,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				}
 			}
 
-			if dec.Verdict == policy.Ask && !p.approveAsk(toolName, canonicalParams, dec, allowWithoutApprover) {
+			if dec.Verdict == policy.Ask && !p.approveAsk(toolName, canonicalParams, dec) {
 				if werr := p.rejectToAgent(msg.ID, -32600,
 					fmt.Sprintf("nockguard: tool %q denied by approval gate", toolName)); werr != nil {
 					return werr
@@ -346,12 +350,14 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 	return scanner.Err()
 }
 
-func (p *StdioProxy) approveAsk(tool string, params json.RawMessage, dec policy.Decision, allowWithoutApprover bool) bool {
+// approveAsk holds an `ask`-verdict call (native ask rules AND legacy
+// require_approval, which is promoted to ask) for a human verdict. It FAILS
+// CLOSED: with no approver wired (p.approver == nil) the call is denied, never
+// forwarded. N8328 removed the prior allowWithoutApprover escape hatch that made
+// legacy require_approval fail OPEN.
+func (p *StdioProxy) approveAsk(tool string, params json.RawMessage, dec policy.Decision) bool {
 	if p.approver == nil {
-		p.logger.Printf("APPROVAL-SKIPPED agent=%s tool=%s reason=no-approver-configured", p.agent, tool)
-		if allowWithoutApprover {
-			return true
-		}
+		p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=no-approver-configured (fail-closed)", p.agent, tool)
 		p.audit(tool, "approval-denied", "no-approver-configured")
 		return false
 	}
@@ -372,7 +378,7 @@ func (p *StdioProxy) handleFailModeAsk(tool string, params json.RawMessage, reas
 	if dec.Verdict != policy.Ask {
 		return false
 	}
-	return p.approveAsk(tool, params, dec, false)
+	return p.approveAsk(tool, params, dec)
 }
 
 func (p *StdioProxy) applyWithheld(tool string, writes []policy.StateWrite) {
