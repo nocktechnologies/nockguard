@@ -104,14 +104,21 @@ func TestAskGateFailsClosedWithoutApprover(t *testing.T) {
 	}
 }
 
-func TestLegacyApprovalGateAbsentByDefault(t *testing.T) {
-	// No NOCKGUARD_APPROVAL_TEST and no real approver wired -> approver is nil, so
-	// legacy require_approval is present but un-enforced and the call passes
-	// (Phase 1-5 behavior preserved for existing policy files).
+// TestLegacyRequireApprovalFailsClosedWithoutApprover is the N8328 security
+// regression. Previously legacy require_approval FAILED OPEN: with no approver
+// wired (NOCKGUARD_APPROVAL_BOT_TOKEN/_CHAT_ID absent -> nil approver) a
+// require_approval-covered call was treated as approval SUCCESS and forwarded
+// upstream, silently bypassing the gate. A require_approval rule must now behave
+// exactly like `ask` and FAIL CLOSED when no approver is configured: the
+// covered call is BLOCKED, and a sibling call with no approval rule still passes.
+func TestLegacyRequireApprovalFailsClosedWithoutApprover(t *testing.T) {
 	byID := runProxyEnv(t, legacyApprovalPolicy, approvalRequests())
 
-	if byID[1]["error"] != nil {
-		t.Errorf("with no approver wired, legacy require_approval should pass through, got error: %v", byID[1]["error"])
+	if msg := errorMessage(t, byID[1]); !strings.Contains(msg, "denied by approval gate") {
+		t.Errorf("with no approver wired, legacy require_approval must FAIL CLOSED (be blocked), got message: %q", msg)
+	}
+	if byID[2]["error"] != nil {
+		t.Errorf("call 2 (no approval rule) must still pass regardless of the gate, got error: %v", byID[2]["error"])
 	}
 }
 
