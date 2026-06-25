@@ -403,14 +403,15 @@ func runEgressProxy(args []string) int {
 	defer auditor.Close()
 
 	logger := log.New(os.Stderr, "[nockguard-egress] ", log.LstdFlags)
-	logger.Printf("starting observe-only HTTP/HTTPS egress proxy listen=%s agent=%s policy=%s", listen, agent, policyPath)
+	mode := "observe-only"
 	if enforce {
-		logger.Printf("--enforce requested, but Phase-2 enforcement is not implemented in this build; continuing observe-only")
+		mode = "enforce"
 	}
+	logger.Printf("starting HTTP/HTTPS egress proxy listen=%s agent=%s policy=%s mode=%s", listen, agent, policyPath, mode)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := forwardhttp.New(listen, agent, engine, auditor, logger).Run(ctx); err != nil {
+	if err := forwardhttp.New(listen, agent, engine, auditor, logger).WithEnforce(enforce).Run(ctx); err != nil {
 		logger.Printf("egress proxy error: %v", err)
 		return 1
 	}
@@ -1108,7 +1109,7 @@ Options:
   --listen           HTTP/HTTPS forward-proxy listen address (for: egress-proxy)
   --agent            Agent identity for policy lookup / per-agent keypair flow
   --policy           Path to policy YAML (default: ~/.nockguard/policy.yaml)
-  --enforce          Declared for Phase 2; currently logs and stays observe-only
+  --enforce          Block denied egress hosts (returns 403); default is observe-only (logs but allows)
   --force            Overwrite an existing policy (for: init)
   --key-env          Env var holding the HMAC signing key (tamper-evident verify)
   --ed25519-pub-env  Env var holding the hex Ed25519 public key (non-repudiable verify)

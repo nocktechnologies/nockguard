@@ -1,12 +1,16 @@
 package forwardhttp
 
 import (
+	"bytes"
+	"context"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
@@ -104,5 +108,58 @@ agents:
 		if w.Code != http.StatusForbidden {
 			t.Errorf("CONNECT %q: want 403 Forbidden, got %d", host, w.Code)
 		}
+	}
+}
+
+func TestEgressProxyEnforceModeBlocksDeniedHosts(t *testing.T) {
+	eng := writeTestPolicy(t, `
+agents:
+  kit:
+    allow:
+      - "allowed.test"
+`)
+	auditor, err := audit.New("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	logger := log.New(&logs, "", 0)
+	proxy := New("127.0.0.1:0", "kit", eng, auditor, logger).WithEnforce(true)
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "allowed")
+	}))
+	defer backend.Close()
+	backendAddr := strings.TrimPrefix(backend.URL, "http://")
+	dialBackend := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var dialer net.Dialer
+		return dialer.DialContext(ctx, network, backendAddr)
+	}
+	proxy.client = &http.Transport{Proxy: nil, DialContext: dialBackend}
+
+	allowedReq := httptest.NewRequest(http.MethodGet, "http://allowed.test/resource", nil)
+	allowedReq.Host = "allowed.test"
+	allowedResp := httptest.NewRecorder()
+	proxy.ServeHTTP(allowedResp, allowedReq)
+	if allowedResp.Code != http.StatusOK {
+		t.Fatalf("allowed host: status = %d, want 200; body=%q logs=%s", allowedResp.Code, allowedResp.Body.String(), logs.String())
+	}
+
+	proxy.client = &http.Transport{Proxy: nil, DialContext: func(context.Context, string, string) (net.Conn, error) {
+		t.Fatal("denied host should be blocked before dial")
+		return nil, nil
+	}}
+	deniedReq := httptest.NewRequest(http.MethodGet, "http://denied.test/resource", nil)
+	deniedReq.Host = "denied.test"
+	deniedResp := httptest.NewRecorder()
+	proxy.ServeHTTP(deniedResp, deniedReq)
+	if deniedResp.Code != http.StatusForbidden {
+		t.Fatalf("denied host: status = %d, want 403; body=%q logs=%s", deniedResp.Code, deniedResp.Body.String(), logs.String())
+	}
+	if !strings.Contains(logs.String(), "BLOCK ") {
+		t.Fatalf("denied host not BLOCK-logged in enforce mode; logs:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "WOULD-BLOCK") {
+		t.Fatalf("unexpected observe-only log in enforce mode; logs:\n%s", logs.String())
 	}
 }
