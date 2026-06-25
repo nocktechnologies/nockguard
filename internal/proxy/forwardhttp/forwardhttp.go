@@ -23,6 +23,7 @@ type Proxy struct {
 	auditor *audit.Auditor
 	logger  *log.Logger
 	client  *http.Transport
+	enforce bool
 }
 
 func New(listen, agent string, engine *policy.Engine, auditor *audit.Auditor, logger *log.Logger) *Proxy {
@@ -38,6 +39,13 @@ func New(listen, agent string, engine *policy.Engine, auditor *audit.Auditor, lo
 		// check-vs-dial divergence and the DNS-rebinding window).
 		client: &http.Transport{Proxy: nil, DialContext: guardedDial},
 	}
+}
+
+// WithEnforce enables enforcement mode: denied hosts receive 403 Forbidden
+// instead of being forwarded with an observe-only log warning.
+func (p *Proxy) WithEnforce(enforce bool) *Proxy {
+	p.enforce = enforce
+	return p
 }
 
 func (p *Proxy) Run(ctx context.Context) error {
@@ -84,7 +92,10 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if host == "" && r.URL != nil {
 		host = destinationHost(r.URL.Host)
 	}
-	p.observe(host)
+	if allowed := p.observe(host); !allowed && p.enforce {
+		http.Error(w, "forbidden by egress policy", http.StatusForbidden)
+		return
+	}
 	if isBlockedHost(host) {
 		http.Error(w, "blocked: SSRF guard", http.StatusForbidden)
 		return
@@ -119,7 +130,10 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	host := destinationHost(r.Host)
-	p.observe(host)
+	if allowed := p.observe(host); !allowed && p.enforce {
+		http.Error(w, "forbidden by egress policy", http.StatusForbidden)
+		return
+	}
 	if isBlockedHost(host) {
 		http.Error(w, "blocked: SSRF guard", http.StatusForbidden)
 		return
@@ -154,10 +168,13 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	go tunnel(targetConn, flushReaderConn{Reader: rw.Reader, Conn: clientConn})
 }
 
-func (p *Proxy) observe(host string) {
+// observe evaluates egress policy for host, records an audit event, and logs
+// the decision. Returns true if the host is allowed, false if denied.
+func (p *Proxy) observe(host string) bool {
 	dec := p.engine.Evaluate(p.agent, host)
+	allowed := dec.Verdict == policy.Allow
 	decision := "deny"
-	if dec.Verdict == policy.Allow {
+	if allowed {
 		decision = "allow"
 	}
 	if p.auditor.Enabled() {
@@ -165,11 +182,16 @@ func (p *Proxy) observe(host string) {
 			p.logger.Printf("AUDIT-ERROR agent=%s tool=egress:%s: %v", p.agent, host, err)
 		}
 	}
-	if decision == "deny" {
-		p.logger.Printf("WARN WOULD-BLOCK (observe-only) agent=%s host=%s reason=%q", p.agent, host, dec.Reason)
-		return
+	if !allowed {
+		if p.enforce {
+			p.logger.Printf("BLOCK agent=%s host=%s reason=%q", p.agent, host, dec.Reason)
+		} else {
+			p.logger.Printf("WARN WOULD-BLOCK (observe-only) agent=%s host=%s reason=%q", p.agent, host, dec.Reason)
+		}
+		return false
 	}
 	p.logger.Printf("ALLOW agent=%s host=%s reason=%q", p.agent, host, dec.Reason)
+	return true
 }
 
 func tunnel(dst io.WriteCloser, src io.ReadCloser) {
