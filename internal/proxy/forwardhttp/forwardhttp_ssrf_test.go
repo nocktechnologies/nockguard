@@ -163,3 +163,39 @@ agents:
 		t.Fatalf("unexpected observe-only log in enforce mode; logs:\n%s", logs.String())
 	}
 }
+
+func TestEgressProxyEnforceModeUsesAbsoluteURLHostForPolicy(t *testing.T) {
+	eng := writeTestPolicy(t, `
+agents:
+  kit:
+    allow:
+      - "allowed.test"
+`)
+	auditor, err := audit.New("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	logger := log.New(&logs, "", 0)
+	proxy := New("127.0.0.1:0", "kit", eng, auditor, logger).WithEnforce(true)
+	proxy.client = &http.Transport{Proxy: nil, DialContext: func(context.Context, string, string) (net.Conn, error) {
+		t.Fatal("absolute-form URL host denied by policy should be blocked before dial")
+		return nil, nil
+	}}
+
+	req := httptest.NewRequest(http.MethodGet, "http://denied.test/resource", nil)
+	req.Host = "allowed.test"
+	resp := httptest.NewRecorder()
+
+	proxy.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%q logs=%s", resp.Code, resp.Body.String(), logs.String())
+	}
+	if !strings.Contains(logs.String(), "BLOCK agent=kit host=denied.test") {
+		t.Fatalf("absolute URL host was not used for enforce/audit decision; logs:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "host=allowed.test") {
+		t.Fatalf("Host header must not drive absolute-form proxy authorization; logs:\n%s", logs.String())
+	}
+}

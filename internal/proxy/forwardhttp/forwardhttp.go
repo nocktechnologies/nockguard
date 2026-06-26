@@ -88,10 +88,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
-	host := destinationHost(r.Host)
-	if host == "" && r.URL != nil {
-		host = destinationHost(r.URL.Host)
-	}
+	authority := requestDestinationAuthority(r)
+	host := destinationHost(authority)
 	if allowed := p.observe(host); !allowed && p.enforce {
 		http.Error(w, "forbidden by egress policy", http.StatusForbidden)
 		return
@@ -106,9 +104,8 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if out.URL.Scheme == "" {
 		out.URL.Scheme = "http"
 	}
-	if out.URL.Host == "" {
-		out.URL.Host = r.Host
-	}
+	out.URL.Host = authority
+	out.Host = authority
 	removeHopByHopHeaders(out.Header)
 
 	resp, err := p.client.RoundTrip(out)
@@ -221,6 +218,13 @@ func destinationHost(authority string) string {
 		return normalizeHost(h)
 	}
 	return normalizeHost(authority)
+}
+
+func requestDestinationAuthority(r *http.Request) string {
+	if r.URL != nil && strings.TrimSpace(r.URL.Host) != "" {
+		return strings.TrimSpace(r.URL.Host)
+	}
+	return strings.TrimSpace(r.Host)
 }
 
 func normalizeHost(host string) string {
