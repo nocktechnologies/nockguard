@@ -42,3 +42,29 @@ func NewStaticApprover(approved bool, reason string) *StaticApprover {
 
 // Ask returns the fixed verdict.
 func (s *StaticApprover) Ask(Request) Verdict { return s.verdict }
+
+// Environment variable names for the Phase 5 approval gate. EnvBotToken and
+// EnvChatID carry the DEDICATED Telegram approval bot's secrets; EnvTestSeam is
+// the deterministic e2e seam (approve|deny). All three are read by the PROXY
+// process itself at startup (buildApprover) to construct the approver, which
+// runs IN the proxy — so the upstream MCP child NEVER needs them. Single source
+// of truth: main.go reads via these names, and the proxy strips the same names
+// from the child's environment (see CredEnvNames).
+const (
+	EnvBotToken = "NOCKGUARD_APPROVAL_BOT_TOKEN"
+	EnvChatID   = "NOCKGUARD_APPROVAL_CHAT_ID"
+	EnvTestSeam = "NOCKGUARD_APPROVAL_TEST"
+)
+
+// CredEnvNames returns the environment variable names carrying approval-gate
+// credentials, for the proxy to strip from the upstream child's environment.
+// These are PROXY-ONLY secrets: the approver runs in the proxy process (its own
+// os.Getenv is unaffected by sanitizing the child's cmd.Env), so the child never
+// needs them — and a compromised or malicious child that COULD read the bot
+// token/chat could drive Telegram approve/callback APIs to self-approve a
+// human-gated call, defeating the gate. Mirrors the audit signing-seed isolation
+// (policy.SigningKeyEnvNamesFor). EnvTestSeam is stripped too so a child can
+// never forge the deterministic approve/deny seam.
+func CredEnvNames() []string {
+	return []string{EnvBotToken, EnvChatID, EnvTestSeam}
+}
