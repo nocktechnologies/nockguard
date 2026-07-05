@@ -116,13 +116,20 @@ func isEnforcement(decision string) bool {
 func (p *StdioProxy) Run() error {
 	cmd := exec.Command(p.upstream[0], p.upstream[1:]...)
 	cmd.Stderr = os.Stderr
-	// Isolate the audit signing seed from the policed agent. The upstream child
-	// would otherwise inherit the proxy's full environment — including the
-	// configured Ed25519/HMAC signing variable — and could read it to forge the
-	// audit trail, defeating non-repudiation against the very party it targets.
-	// The key is already parsed into the Auditor at startup, so the child never
-	// needs it.
-	cmd.Env = sanitizedEnv(p.engine.SigningKeyEnvNamesFor(p.agent))
+	// Isolate proxy-only secrets from the policed agent. The upstream child would
+	// otherwise inherit the proxy's full environment and could read it from its own
+	// /proc/self/environ. Two secret sets are stripped:
+	//   1. The audit signing seed (Ed25519/HMAC) — a child that read it could forge
+	//      the audit trail, defeating non-repudiation against the very party it
+	//      targets. Already parsed into the Auditor at startup; the child never needs it.
+	//   2. The Phase 5 approval-gate credentials (dedicated Telegram bot token + chat
+	//      id, and the e2e test seam) — a child that read the token could drive the
+	//      Telegram approve/callback APIs to SELF-APPROVE a human-gated call, defeating
+	//      the approval gate. The approver runs IN the proxy process (buildApprover's
+	//      os.Getenv is unaffected by this child-only sanitize), so the child never needs them.
+	// The two strip sets compose; sanitizedEnv only touches the CHILD's cmd.Env.
+	strip := append(p.engine.SigningKeyEnvNamesFor(p.agent), approval.CredEnvNames()...)
+	cmd.Env = sanitizedEnv(strip)
 
 	upstreamIn, err := cmd.StdinPipe()
 	if err != nil {

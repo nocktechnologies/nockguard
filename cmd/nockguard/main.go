@@ -31,7 +31,7 @@ import (
 // `require_approval` rules fail CLOSED — a covered call is denied, never
 // forwarded (N8328: require_approval used to fail open here).
 func buildApprover(logger *log.Logger) approval.Approver {
-	switch os.Getenv("NOCKGUARD_APPROVAL_TEST") {
+	switch os.Getenv(approval.EnvTestSeam) {
 	case "approve":
 		return approval.NewStaticApprover(true, "test-auto-approve")
 	case "deny":
@@ -39,9 +39,11 @@ func buildApprover(logger *log.Logger) approval.Approver {
 	}
 	// Real approver: a DEDICATED Telegram bot (never the fleet's main bot). Both
 	// env vars must be set; otherwise NO approver is wired and every gated call
-	// fails closed (logged loud below).
-	token := os.Getenv("NOCKGUARD_APPROVAL_BOT_TOKEN")
-	chatID := os.Getenv("NOCKGUARD_APPROVAL_CHAT_ID")
+	// fails closed (logged loud below). These creds are read HERE, in the proxy
+	// process; the proxy strips the same names from the upstream child so the
+	// policed agent can never read the token and self-approve (see approval.CredEnvNames).
+	token := os.Getenv(approval.EnvBotToken)
+	chatID := os.Getenv(approval.EnvChatID)
 	if token != "" && chatID != "" {
 		timeout := 2 * time.Minute
 		logger.Printf("Phase 5 approval gate ON — Telegram (dedicated bot), %s timeout, fail-safe deny", timeout)
