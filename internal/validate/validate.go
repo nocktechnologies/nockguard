@@ -54,6 +54,22 @@ var builtin = map[string][]rule{
 	},
 }
 
+// LooksLikeSecret reports whether s contains a value matching any built-in
+// CategorySecrets detector (API keys, tokens, SSNs, credit cards, etc.). It
+// lets other packages redact secret-shaped strings using the SAME high-signal
+// patterns as validation, so "what counts as a secret" stays defined in one
+// place. Unlike a Validator it needs no configuration — the secret detectors
+// are always-on for callers that must never forward a credential (e.g. the
+// human approval prompt, N8613).
+func LooksLikeSecret(s string) bool {
+	for _, r := range builtin[CategorySecrets] {
+		if r.re.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
 // Validator checks tool-call argument text against enabled categories and any
 // custom regex patterns from policy.
 type Validator struct {

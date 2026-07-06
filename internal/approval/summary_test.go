@@ -71,6 +71,64 @@ func TestSummarizeParams_NonObjectShowsSizeNotContent(t *testing.T) {
 	}
 }
 
+func TestSummarizeParams_RedactsSecretShapedValuesUnderNeutralKeys(t *testing.T) {
+	// The N8613 gap: a credential-shaped value under a NEUTRAL key (short
+	// enough to dodge the >40-char cap, key name not "sensitive") was forwarded
+	// to Telegram verbatim. Every one of these must be redacted.
+	cases := []struct {
+		name, key, secret string
+	}{
+		{"openai-key-under-id", "id", "sk-abcdefghijklmnop0123456789"},     // ~29 chars, < maxValueLen
+		{"openai-key-under-value", "value", "sk-abcdefghijklmnop01234567"}, // ~27 chars
+		{"aws-key-under-body", "body", "AKIAIOSFODNN7EXAMPLE"},             // 20 chars
+		{"github-token-under-id", "id", "ghp_0123456789abcdef0123456789abcdef0123"},
+		{"ssn-under-value", "value", "123-45-6789"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Guard the premise: the value must be short enough that ONLY the
+			// new secret-shape check (not the length cap) can catch it.
+			if len(tc.secret) > maxValueLen {
+				t.Fatalf("test value %q is >maxValueLen (%d); not exercising the neutral-key gap", tc.secret, maxValueLen)
+			}
+			raw := json.RawMessage(`{"` + tc.key + `":"` + tc.secret + `"}`)
+			out := summarizeParams(raw)
+			if strings.Contains(out, tc.secret) {
+				t.Errorf("LEAKED secret-shaped value under neutral key %q: %q", tc.key, out)
+			}
+			if !strings.Contains(out, "redacted") {
+				t.Errorf("secret-shaped value under key %q not redacted: %q", tc.key, out)
+			}
+		})
+	}
+}
+
+func TestSummarizeParams_ShowsHarmlessShortScalarsUnderNeutralKeys(t *testing.T) {
+	// POSITIVE CONTROL: the fix must not over-redact. Harmless short scalars
+	// under neutral keys must still be shown so the human can make the call.
+	out := summarizeParams(json.RawMessage(`{"id":"invoice-42","status":"pending","region":"us-east-1","count":7}`))
+	for _, want := range []string{`id: "invoice-42"`, `status: "pending"`, `region: "us-east-1"`, "count: 7"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("harmless scalar over-redacted, missing %q in: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "redacted") {
+		t.Errorf("harmless scalars should not trigger any redaction: %q", out)
+	}
+}
+
+func TestSummarizeParams_RedactsSecretShapedBareNumber(t *testing.T) {
+	// POSITIVE CONTROL for the number branch: a genuine spend amount shows,
+	// but a bare credit-card-shaped numeric literal is redacted.
+	out := summarizeParams(json.RawMessage(`{"amount":5000,"card":4111111111111111}`))
+	if !strings.Contains(out, "amount: 5000") {
+		t.Errorf("legitimate numeric amount over-redacted: %q", out)
+	}
+	if strings.Contains(out, "4111111111111111") {
+		t.Errorf("LEAKED card-shaped bare number: %q", out)
+	}
+}
+
 func TestSummarizeParams_EmptyOrAbsent(t *testing.T) {
 	if got := summarizeParams(nil); got != "" {
 		t.Errorf("nil params should yield empty summary, got %q", got)
