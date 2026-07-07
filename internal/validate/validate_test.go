@@ -246,3 +246,36 @@ func TestEmptyParamsClean(t *testing.T) {
 		t.Errorf("nil params should be clean, got %q", hit)
 	}
 }
+
+// TestNumericSecretParams guards N8654: a secret sent as a NUMERIC literal (e.g.
+// a 16-digit card number under a neutral key) must be caught exactly as its
+// string form is, while a harmless number still passes. The raw JSON literals
+// exercise the json.Number path — the digits must survive with no float
+// rounding / scientific-notation loss.
+func TestNumericSecretParams(t *testing.T) {
+	v := mustNew(t, []string{CategorySecrets}, nil)
+
+	// Card number as a bare JSON integer under a neutral key — no quotes.
+	badLiterals := []json.RawMessage{
+		json.RawMessage(`{"arguments":{"card":4111111111111111}}`),
+		json.RawMessage(`{"arguments":{"id":4111111111111111}}`),
+	}
+	for _, p := range badLiterals {
+		if hit := v.CheckParams(p); hit == "" {
+			t.Errorf("expected numeric secret block for %s", p)
+		}
+	}
+
+	// A test SSN sent as a numeric-looking value still gets caught in string
+	// form; a harmless number must pass clean.
+	harmless := []json.RawMessage{
+		json.RawMessage(`{"arguments":{"quantity":42}}`),
+		json.RawMessage(`{"arguments":{"total":1234.56}}`),
+		json.RawMessage(`{"arguments":{"year":2026}}`),
+	}
+	for _, p := range harmless {
+		if hit := v.CheckParams(p); hit != "" {
+			t.Errorf("harmless number %s flagged as %q", p, hit)
+		}
+	}
+}
