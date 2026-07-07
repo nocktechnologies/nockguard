@@ -7,9 +7,11 @@
 package validate
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 )
 
 // Category names for the built-in rule sets.
@@ -104,8 +106,14 @@ func (v *Validator) CheckParams(params json.RawMessage) string {
 	if !v.Enabled() || len(params) == 0 {
 		return ""
 	}
+	// Decode with UseNumber so JSON numbers arrive as json.Number (their exact
+	// source text) instead of float64 — a 16-digit card number would otherwise
+	// lose precision / switch to scientific notation and slip past the secret
+	// detectors. See the numeric branch in walk (N8654).
+	dec := json.NewDecoder(bytes.NewReader(params))
+	dec.UseNumber()
 	var decoded any
-	if err := json.Unmarshal(params, &decoded); err != nil {
+	if err := dec.Decode(&decoded); err != nil {
 		// Unparseable params: scan the raw bytes as a fail-safe.
 		return v.scan(string(params))
 	}
@@ -116,6 +124,16 @@ func (v *Validator) walk(node any) string {
 	switch n := node.(type) {
 	case string:
 		return v.scan(n)
+	case json.Number:
+		// A secret sent as a NUMERIC literal — e.g. {"card": 4111111111111111}
+		// — must be caught exactly as its string form is. json.Number.String()
+		// preserves the original digits with no float rounding (N8654).
+		return v.scan(n.String())
+	case float64:
+		// Fallback: if a number ever reaches walk as float64 (e.g. a caller
+		// that decoded without UseNumber), format it without scientific
+		// notation and with full precision so digits aren't lost.
+		return v.scan(strconv.FormatFloat(n, 'f', -1, 64))
 	case []any:
 		for _, item := range n {
 			if hit := v.walk(item); hit != "" {
