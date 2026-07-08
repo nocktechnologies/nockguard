@@ -42,8 +42,17 @@
   .toggle.on { color:var(--block); border-color:rgba(255,77,77,.5); background:rgba(255,77,77,.08); }
   .toggle.snd.on { color:var(--accent); border-color:rgba(88,166,255,.5); background:rgba(88,166,255,.08); }
 
+  .filters { flex-basis:100%; display:flex; gap:9px; align-items:center; margin-top:2px; }
+  .finput { background:var(--panel); border:1px solid var(--line); color:var(--text);
+            border-radius:8px; padding:8px 12px; font:inherit; font-size:12px; }
+  .finput::placeholder { color:var(--dim); }
+  .finput:focus { outline:none; border-color:var(--accent); }
+  #f-text { flex:1; max-width:360px; }
+  .fcount { color:var(--dim); font-size:11px; letter-spacing:.5px; margin-left:2px; }
+
   #feed { flex:1; overflow:hidden; padding:10px 14px; display:flex; flex-direction:column; gap:6px; }
   body.threats #feed .row.allow { display:none; }
+  #feed .row.fout { display:none; }
   .row {
     display:grid; grid-template-columns:80px 120px 1fr auto; align-items:center; gap:14px;
     background:var(--panel); border:1px solid var(--line); border-left:4px solid var(--hide);
@@ -102,6 +111,19 @@
       <button class="toggle" id="t-threats" title="show only non-allowed">THREATS ONLY</button>
       <button class="toggle snd" id="t-sound" title="beep when something is blocked">🔊 SOUND</button>
     </div>
+    <div class="filters">
+      <input id="f-text" class="finput" type="search" placeholder="filter by agent or tool…" autocomplete="off" spellcheck="false" />
+      <select id="f-decision" class="finput" title="filter by decision">
+        <option value="">all decisions</option>
+        <option value="allow">allow</option>
+        <option value="deny">deny</option>
+        <option value="block">block</option>
+        <option value="ratelimit">ratelimit</option>
+        <option value="hide">hide</option>
+      </select>
+      <button class="toggle" id="f-clear" title="clear filters">✕ CLEAR</button>
+      <span class="fcount" id="f-count"></span>
+    </div>
   </header>
   <div id="feed"><div class="empty" id="empty">waiting for the first decision…</div></div>
   <footer>
@@ -132,6 +154,37 @@
     if (soundOn && !audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
     if (soundOn && audioCtx) audioCtx.resume(); // unlock on the click gesture
   });
+
+  // --- filters: substring match on agent/tool + exact decision ---
+  const fText = document.getElementById('f-text');
+  const fDecision = document.getElementById('f-decision');
+  const fClear = document.getElementById('f-clear');
+  const fCount = document.getElementById('f-count');
+  let fq = '', fdec = '';
+  function rowMatches(row) {
+    if (fdec && (row.dataset.decision || '') !== fdec) return false;
+    if (fq && ((row.dataset.agent || '') + ' ' + (row.dataset.tool || '')).indexOf(fq) === -1) return false;
+    return true;
+  }
+  function applyFilters() {
+    fq = fText.value.trim().toLowerCase();
+    fdec = fDecision.value;
+    const active = !!(fq || fdec);
+    fClear.classList.toggle('on', active);
+    let shown = 0, tot = 0;
+    for (const row of feed.children) {
+      if (!row.classList.contains('row')) continue;
+      tot++;
+      const out = !rowMatches(row);
+      row.classList.toggle('fout', out);
+      if (!out) shown++;
+    }
+    fCount.textContent = active ? (shown + ' / ' + tot + ' shown') : '';
+  }
+  fText.addEventListener('input', applyFilters);
+  fDecision.addEventListener('change', applyFilters);
+  fClear.addEventListener('click', () => { fText.value = ''; fDecision.value = ''; applyFilters(); });
+
   function beep() {
     if (!soundOn || !audioCtx) return;
     const o = audioCtx.createOscillator(), g = audioCtx.createGain();
@@ -173,6 +226,9 @@
     const dec = KNOWN[ev.decision] ? ev.decision : 'hide';
     const row = document.createElement('div');
     row.className = 'row ' + dec;
+    row.dataset.agent = (ev.agent || '').toLowerCase();
+    row.dataset.tool = (ev.tool || '').toLowerCase();
+    row.dataset.decision = dec;
     row.innerHTML =
       '<span class="ts">' + esc(hhmmss(ev.ts)) + '</span>' +
       '<span class="agent">' + esc(ev.agent || '—') + '</span>' +
@@ -180,7 +236,9 @@
         (ev.reason ? '<div class="reason">' + esc(ev.reason) + '</div>' : '') + '</span>' +
       '<span class="badge">' + esc(ev.decision || '?') + '</span>';
     feed.prepend(row);
+    if ((fq || fdec) && !rowMatches(row)) row.classList.add('fout');
     while (feed.childElementCount > MAX_ROWS) feed.lastElementChild.remove();
+    if (fq || fdec) applyFilters(); // refresh the "shown / total" count
     bump(dec);
     if (dec === 'block') { hitFlash(); beep(); }
   }
