@@ -11,7 +11,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
+	"strings"
 )
 
 // Category names for the built-in rule sets.
@@ -56,6 +58,27 @@ var builtin = map[string][]rule{
 	},
 }
 
+// Categories returns the supported built-in validation category names, sorted.
+// It is the single source of truth for "which validate_input values are valid"
+// so policy load and validator construction reject the same set and error
+// messages can list it.
+func Categories() []string {
+	cats := make([]string, 0, len(builtin))
+	for c := range builtin {
+		cats = append(cats, c)
+	}
+	sort.Strings(cats)
+	return cats
+}
+
+// KnownCategory reports whether c is a supported built-in validation category.
+// Callers (e.g. policy.Load) use it to reject a typo like "secret"/"sql" before
+// it silently produces a validator with zero rules.
+func KnownCategory(c string) bool {
+	_, ok := builtin[c]
+	return ok
+}
+
 // LooksLikeSecret reports whether s contains a value matching any built-in
 // CategorySecrets detector (API keys, tokens, SSNs, credit cards, etc.). It
 // lets other packages redact secret-shaped strings using the SAME high-signal
@@ -79,12 +102,19 @@ type Validator struct {
 }
 
 // New builds a Validator for the given built-in categories plus custom regex
-// patterns. Unknown categories are ignored; an invalid custom pattern returns
-// an error so misconfiguration fails loud at load time.
+// patterns. An unknown category (e.g. the typo "secret" for "secrets") returns
+// an error rather than being silently ignored — otherwise the validator would
+// start with zero built-in rules and Phase 2 filtering would be OFF while the
+// operator believed it was on (fail-open, N8695). An invalid custom pattern
+// likewise returns an error so misconfiguration fails loud at load time.
 func New(categories, customPatterns []string) (*Validator, error) {
 	v := &Validator{}
 	for _, c := range categories {
-		v.rules = append(v.rules, builtin[c]...)
+		rules, ok := builtin[c]
+		if !ok {
+			return nil, fmt.Errorf("unknown validation category %q (supported: %s)", c, strings.Join(Categories(), ", "))
+		}
+		v.rules = append(v.rules, rules...)
 	}
 	for i, p := range customPatterns {
 		re, err := regexp.Compile(p)

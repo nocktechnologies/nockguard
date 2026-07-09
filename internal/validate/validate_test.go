@@ -2,6 +2,7 @@ package validate
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -277,5 +278,62 @@ func TestNumericSecretParams(t *testing.T) {
 		if hit := v.CheckParams(p); hit != "" {
 			t.Errorf("harmless number %s flagged as %q", p, hit)
 		}
+	}
+}
+
+// N8695 regression — an unknown validate_input category (a typo like "secret"
+// for "secrets", or "sql" for "sqli") was silently ignored, so New returned a
+// validator with zero built-in rules and Phase 2 filtering was OFF while the
+// operator believed it on. New must now fail LOUD.
+func TestUnknownCategoryRejected(t *testing.T) {
+	for _, bad := range []string{"secret", "sql", "path-traversal", "SQLi", ""} {
+		v, err := New([]string{bad}, nil)
+		if err == nil {
+			t.Errorf("New(%q) must reject an unknown category, got nil error (validator would silently have no rules)", bad)
+		}
+		if v != nil {
+			t.Errorf("New(%q) must return a nil validator on error, got %+v", bad, v)
+		}
+	}
+	// The error should name the offending category and list the valid set so the
+	// operator can fix the typo.
+	_, err := New([]string{"secret"}, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown category")
+	}
+	for _, want := range []string{"secret", CategorySQLi, CategoryPathTraversal, CategorySecrets} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err.Error(), want)
+		}
+	}
+}
+
+// The supported categories must still build a working validator, and mixing a
+// known category with custom patterns must be unaffected by the new guard.
+func TestKnownCategoriesStillBuild(t *testing.T) {
+	v, err := New([]string{CategorySQLi, CategoryPathTraversal, CategorySecrets}, []string{`foo\d+`})
+	if err != nil {
+		t.Fatalf("New with all known categories must succeed: %v", err)
+	}
+	if !v.Enabled() {
+		t.Fatal("validator built from known categories must be enabled")
+	}
+}
+
+// KnownCategory / Categories are the shared source of truth used by policy.Load
+// to reject typos; guard their contract.
+func TestKnownCategoryAndCategories(t *testing.T) {
+	for _, c := range []string{CategorySQLi, CategoryPathTraversal, CategorySecrets} {
+		if !KnownCategory(c) {
+			t.Errorf("KnownCategory(%q) must be true", c)
+		}
+	}
+	for _, c := range []string{"secret", "sql", ""} {
+		if KnownCategory(c) {
+			t.Errorf("KnownCategory(%q) must be false", c)
+		}
+	}
+	if got := len(Categories()); got != 3 {
+		t.Errorf("Categories() must return the 3 built-in categories, got %d: %v", got, Categories())
 	}
 }
