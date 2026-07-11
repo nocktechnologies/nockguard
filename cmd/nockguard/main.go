@@ -21,6 +21,7 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/policy"
 	"github.com/nocktechnologies/nockguard/internal/proxy"
 	"github.com/nocktechnologies/nockguard/internal/proxy/forwardhttp"
+	"github.com/nocktechnologies/nockguard/internal/proxy/mcphttp"
 	"github.com/nocktechnologies/nockguard/internal/trust"
 	"gopkg.in/yaml.v3"
 )
@@ -102,6 +103,10 @@ func runCLI(args []string) int {
 
 	if args[0] == "egress-proxy" {
 		return runEgressProxy(args[1:])
+	}
+
+	if args[0] == "mcp-http" {
+		return runMCPHTTP(args[1:])
 	}
 
 	if args[0] != "proxy" {
@@ -1090,12 +1095,98 @@ func runInit(args []string) int {
 	return 0
 }
 
+// runMCPHTTP implements the `mcp-http` subcommand: an MCP stdio↔HTTP bridge
+// that audits per tools/call in observe mode without blocking. See
+// docs/http-mcp-interception.md for design rationale and the full cutover plan.
+func runMCPHTTP(args []string) int {
+	var (
+		upstreamURL string
+		agent       string
+		policyPath  string
+		authEnv     string
+	)
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--upstream":
+			if i+1 < len(args) {
+				i++
+				upstreamURL = args[i]
+			}
+		case "--agent":
+			if i+1 < len(args) {
+				i++
+				agent = args[i]
+			}
+		case "--policy":
+			if i+1 < len(args) {
+				i++
+				policyPath = args[i]
+			}
+		case "--auth-env":
+			if i+1 < len(args) {
+				i++
+				authEnv = args[i]
+			}
+		}
+	}
+	if upstreamURL == "" {
+		fmt.Fprintln(os.Stderr, "error: --upstream is required (the HTTP MCP upstream URL, e.g. https://cc.nocktechnologies.io/mcp)")
+		return 1
+	}
+	if agent == "" {
+		fmt.Fprintln(os.Stderr, "error: --agent is required")
+		return 1
+	}
+	if policyPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+			return 1
+		}
+		policyPath = home + "/.nockguard/policy.yaml"
+	}
+
+	engine, err := policy.Load(policyPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error loading policy %s: %v\n", policyPath, err)
+		return 1
+	}
+
+	auditor, err := engine.AuditorFor(agent)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error opening audit trail: %v\n", err)
+		return 1
+	}
+	defer auditor.Close()
+
+	authHeader := ""
+	if authEnv != "" {
+		authHeader = os.Getenv(authEnv)
+		if authHeader == "" {
+			fmt.Fprintf(os.Stderr, "warning: --auth-env %s is set but the variable is empty — upstream requests will have no Authorization header\n", authEnv)
+		}
+	}
+
+	logger := log.New(os.Stderr, "[nockguard-mcp-http] ", log.LstdFlags)
+	logger.Printf("starting MCP HTTP proxy upstream=%s agent=%s policy=%s observe-only=true", upstreamURL, agent, policyPath)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := mcphttp.New(upstreamURL, agent, authHeader, auditor, logger).Run(ctx); err != nil {
+		logger.Printf("mcp-http proxy error: %v", err)
+		return 1
+	}
+	return 0
+}
+
 func printUsage() {
 	fmt.Fprintln(os.Stderr, `nockguard — MCP firewall for AI agent fleets
 
 Usage:
   nockguard init [--policy <path>] [--force]
   nockguard proxy --upstream <command> --agent <name> [--policy <path>]
+  nockguard mcp-http --upstream <url> --agent <name> [--policy <path>] [--auth-env <ENV>]
   nockguard egress-proxy --listen <addr> --agent <name> --policy <path> [--audit <path>] [--enforce]
   nockguard verify (--all | --agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
   nockguard policy propose --agent <name> [--audit <path>] [--audit-dir <dir>]
@@ -1107,7 +1198,8 @@ Usage:
   nockguard version
 
 Options:
-  --upstream         MCP server command to proxy (required)
+  --upstream         MCP server command to proxy (for: proxy) or HTTP MCP upstream URL (for: mcp-http)
+  --auth-env         Env var whose value is sent as the Authorization header to the HTTP upstream (for: mcp-http)
   --listen           HTTP/HTTPS forward-proxy listen address (for: egress-proxy)
   --agent            Agent identity for policy lookup / per-agent keypair flow
   --policy           Path to policy YAML (default: ~/.nockguard/policy.yaml)
@@ -1136,6 +1228,7 @@ Evidence packs:
 Examples:
   nockguard init                                        # scaffold a default-deny starter policy
   nockguard proxy --upstream "npx mcp-server-nockcc" --agent kit --policy policy.yaml
+  nockguard mcp-http --upstream https://cc.nocktechnologies.io/mcp --agent mira --auth-env NOCKCC_MCP_AUTH
   nockguard egress-proxy --listen 127.0.0.1:8899 --agent kit --policy egress.yaml
   nockguard keygen --agent kit                          # generate per-agent keypair
   nockguard verify --agent kit                          # prove kit's trail is intact + non-repudiable (exit 0 = clean, 2 = tampered)
