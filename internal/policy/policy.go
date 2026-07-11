@@ -145,6 +145,17 @@ func Load(path string) (*Engine, error) {
 				}
 			}
 		}
+		// Reject unknown validate_input categories at load time. A typo such as
+		// "secret" (for "secrets") or "sql" (for "sqli") is not in the built-in
+		// set, so validate.New would otherwise start with zero built-in rules and
+		// silently leave Phase 2 secret/SQLi/path-traversal filtering OFF while
+		// the operator believed it active — fail-open in a security control
+		// (N8695). Fail LOUD here, matching the glob validation above.
+		for _, c := range pol.ValidateInput {
+			if !validate.KnownCategory(c) {
+				return nil, fmt.Errorf("agent %q validate_input category %q is not supported (valid: %s)", agent, c, strings.Join(validate.Categories(), ", "))
+			}
+		}
 	}
 	return &Engine{config: cfg}, nil
 }
