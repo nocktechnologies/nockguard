@@ -407,6 +407,17 @@ func guardedDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	return dialer.DialContext(ctx, network, net.JoinHostPort(safe.String(), port))
 }
 
+// GuardedDial is the exported SSRF-guarded dialer. It resolves the address host
+// and connects only to a VALIDATED public IP (never a loopback, link-local,
+// private, CGNAT, or cloud-metadata address), closing the check-vs-dial and
+// DNS-rebinding gaps. Other proxy transports that forward to an operator-fixed
+// upstream (e.g. the HTTP-MCP reverse proxy) reuse it as their Transport
+// DialContext so they inherit the same egress guard as the egress forward-proxy
+// rather than reimplementing it.
+func GuardedDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	return guardedDial(ctx, network, addr)
+}
+
 func ValidateConfig(listen, agent string, engine *policy.Engine) error {
 	if listen == "" {
 		return fmt.Errorf("--listen is required")

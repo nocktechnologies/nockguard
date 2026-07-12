@@ -21,6 +21,7 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/policy"
 	"github.com/nocktechnologies/nockguard/internal/proxy"
 	"github.com/nocktechnologies/nockguard/internal/proxy/forwardhttp"
+	"github.com/nocktechnologies/nockguard/internal/proxy/httpmcp"
 	"github.com/nocktechnologies/nockguard/internal/trust"
 	"gopkg.in/yaml.v3"
 )
@@ -114,6 +115,8 @@ func runCLI(args []string) int {
 		upstreamCmd string
 		agent       string
 		policyPath  string
+		httpMode    bool
+		listen      string
 	)
 
 	for i := 1; i < len(args); i++ {
@@ -133,6 +136,13 @@ func runCLI(args []string) int {
 				i++
 				policyPath = args[i]
 			}
+		case "--http":
+			httpMode = true
+		case "--listen":
+			if i+1 < len(args) {
+				i++
+				listen = args[i]
+			}
 		}
 	}
 
@@ -143,6 +153,13 @@ func runCLI(args []string) int {
 	if agent == "" {
 		fmt.Fprintln(os.Stderr, "error: --agent is required")
 		return 1
+	}
+
+	// --http switches from the stdio transport (--upstream is a command) to the
+	// observe-only MCP-over-HTTP reverse proxy (--upstream is the real endpoint
+	// URL). This is the path the flagship claude.ai-connector seat uses.
+	if httpMode {
+		return runHTTPMCPProxy(upstreamCmd, agent, listen, policyPath)
 	}
 	if policyPath == "" {
 		home, err := os.UserHomeDir()
@@ -415,6 +432,53 @@ func runEgressProxy(args []string) int {
 	defer stop()
 	if err := forwardhttp.New(listen, agent, engine, auditor, logger).WithEnforce(enforce).Run(ctx); err != nil {
 		logger.Printf("egress proxy error: %v", err)
+		return 1
+	}
+	return 0
+}
+
+// runHTTPMCPProxy runs the observe-only, MCP-aware HTTP reverse proxy (N8761).
+// It terminates the MCP Streamable-HTTP transport on --listen, audits each
+// tools/call for --agent, and forwards to the real endpoint at --upstream. It is
+// observe-only: it NEVER blocks a call, only records what enforcement would do.
+// This is the path the flagship seat (claude.ai remote connector → NockCC MCP)
+// uses, which the stdio proxy cannot sit in front of.
+func runHTTPMCPProxy(upstreamURL, agent, listen, policyPath string) int {
+	if policyPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+			return 1
+		}
+		policyPath = home + "/.nockguard/policy.yaml"
+	}
+	engine, err := policy.Load(policyPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error loading policy %s: %v\n", policyPath, err)
+		return 1
+	}
+	if err := httpmcp.ValidateConfig(listen, upstreamURL, agent, engine); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	if !engine.HasPolicyFor(agent) {
+		fmt.Fprintf(os.Stderr, "warning: no policy for agent %q and no \"default\" — every tool will audit as would-DENY (observe-only, still forwarded). Add an agent or \"default\" policy in %s.\n", agent, policyPath)
+	}
+
+	auditor, err := engine.AuditorFor(agent)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error opening audit trail: %v\n", err)
+		return 1
+	}
+	defer auditor.Close()
+
+	logger := log.New(os.Stderr, "[nockguard-httpmcp] ", log.LstdFlags)
+	logger.Printf("starting observe-only HTTP-MCP proxy listen=%s upstream=%s agent=%s policy=%s mode=observe-only (never blocks)", listen, upstreamURL, agent, policyPath)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := httpmcp.New(listen, upstreamURL, agent, engine, auditor, logger).Run(ctx); err != nil {
+		logger.Printf("http-mcp proxy error: %v", err)
 		return 1
 	}
 	return 0
@@ -1096,6 +1160,7 @@ func printUsage() {
 Usage:
   nockguard init [--policy <path>] [--force]
   nockguard proxy --upstream <command> --agent <name> [--policy <path>]
+  nockguard proxy --http --upstream <url> --listen <addr> --agent <name> [--policy <path>]
   nockguard egress-proxy --listen <addr> --agent <name> --policy <path> [--audit <path>] [--enforce]
   nockguard verify (--all | --agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
   nockguard policy propose --agent <name> [--audit <path>] [--audit-dir <dir>]
@@ -1107,8 +1172,9 @@ Usage:
   nockguard version
 
 Options:
-  --upstream         MCP server command to proxy (required)
-  --listen           HTTP/HTTPS forward-proxy listen address (for: egress-proxy)
+  --upstream         MCP server command to proxy (stdio); the real MCP-over-HTTP endpoint URL with --http
+  --http             Observe-only MCP-over-HTTP reverse proxy: terminate the Streamable-HTTP transport, audit tools/call, forward upstream. Never blocks.
+  --listen           Listen address (for: proxy --http, egress-proxy)
   --agent            Agent identity for policy lookup / per-agent keypair flow
   --policy           Path to policy YAML (default: ~/.nockguard/policy.yaml)
   --enforce          Block denied egress hosts (returns 403); default is observe-only (logs but allows)
@@ -1136,6 +1202,7 @@ Evidence packs:
 Examples:
   nockguard init                                        # scaffold a default-deny starter policy
   nockguard proxy --upstream "npx mcp-server-nockcc" --agent kit --policy policy.yaml
+  nockguard proxy --http --upstream https://cc.nocktechnologies.io/mcp --listen 127.0.0.1:8930 --agent mira --policy policy.yaml   # observe the flagship claude.ai-connector seat
   nockguard egress-proxy --listen 127.0.0.1:8899 --agent kit --policy egress.yaml
   nockguard keygen --agent kit                          # generate per-agent keypair
   nockguard verify --agent kit                          # prove kit's trail is intact + non-repudiable (exit 0 = clean, 2 = tampered)
