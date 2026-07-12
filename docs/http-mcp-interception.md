@@ -74,7 +74,7 @@ The `nockguard mcp-http` subcommand (see `cmd/nockguard/main.go` and
 ## Cutover Plan (Mira executes, not the builder)
 
 1. Generate a per-agent keypair if not present:
-   ```
+   ```bash
    eval $(nockguard keygen --agent mira)
    export NOCKGUARD_AGENT_MIRA_ED25519_KEY="<seed>"
    ```

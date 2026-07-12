@@ -234,6 +234,40 @@ func TestMCPHTTPProxy_SessionID(t *testing.T) {
 	}
 }
 
+// TestMCPHTTPProxy_SSELargePayload verifies that an SSE data: line exceeding
+// bufio's default 64 KB token limit (here ~256 KB) arrives intact.
+//
+// Without the sc.Buffer(...) call in writeSSEResponse, sc.Scan() returns false
+// after the first token, sc.Err() == bufio.ErrTooLong, and the response is
+// silently dropped. This test must fail without that fix.
+func TestMCPHTTPProxy_SSELargePayload(t *testing.T) {
+	// Build a JSON payload with a text field ~256 KB — well over the 64 KB default.
+	const payloadSize = 256 * 1024
+	bigText := strings.Repeat("x", payloadSize)
+	jsonPayload := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"` + bigText + `"}]}}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message\n")
+		_, _ = io.WriteString(w, "data: "+jsonPayload+"\n")
+		_, _ = io.WriteString(w, "\n")
+	}))
+	defer srv.Close()
+
+	p := newTestProxy(t, srv.URL, nil)
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nockcc_content_list"}}` + "\n")
+	var out bytes.Buffer
+	if err := p.run(context.Background(), in, &out); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, bigText) {
+		// Report how much we got to diagnose truncation vs. complete drop.
+		t.Errorf("large SSE payload not forwarded intact: got %d bytes, want payload containing %d-char text field", len(got), payloadSize)
+	}
+}
+
 func newTestProxy(t *testing.T, upstreamURL string, auditor *audit.Auditor) *Proxy {
 	t.Helper()
 	if auditor == nil {

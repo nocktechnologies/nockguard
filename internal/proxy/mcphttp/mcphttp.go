@@ -32,6 +32,16 @@ import (
 // falls back to direct forwarding. Set to any non-empty value to engage.
 const EnvTripwire = "NOCKGUARD_TRIPWIRE"
 
+// scannerBufInit / scannerBufMax set a generous scanner buffer shared by both
+// the stdin reader and the SSE response reader. MCP tool results (e.g. a long
+// nock_list or identity doc) routinely exceed bufio's default 64 KB token limit;
+// without this, sc.Scan() stops early with bufio.ErrTooLong and the response is
+// silently dropped rather than forwarded.
+const (
+	scannerBufInit = 1 * 1024 * 1024  // 1 MB initial buffer
+	scannerBufMax  = 10 * 1024 * 1024 // 10 MB max token size
+)
+
 // Proxy bridges stdio MCP (client-facing) to HTTP MCP (upstream). Observe-only:
 // every tools/call is audited and forwarded; the proxy never blocks a call.
 // Tripwire: when NOCKGUARD_TRIPWIRE is set, auditing is skipped but calls still
@@ -82,7 +92,7 @@ func (p *Proxy) run(ctx context.Context, in io.Reader, out io.Writer) error {
 	}
 
 	scanner := bufio.NewScanner(in)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	scanner.Buffer(make([]byte, 0, scannerBufInit), scannerBufMax)
 	for scanner.Scan() {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -178,6 +188,7 @@ func (p *Proxy) writeResponse(resp *http.Response, out io.Writer) error {
 // JSON-RPC line to out. SSE format: "data: <json>\n\n" per event.
 func (p *Proxy) writeSSEResponse(r io.Reader, out io.Writer) error {
 	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, scannerBufInit), scannerBufMax)
 	for sc.Scan() {
 		line := sc.Text()
 		if !strings.HasPrefix(line, "data: ") {
