@@ -22,9 +22,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
+
+// maxWindow bounds how many recent decisions the wall works with: the history
+// replayed to each browser and the window the pulse aggregates over. It keeps a
+// large audit trail from flooding the page or re-scanning unboundedly.
+const maxWindow = 500
 
 //go:embed index.html
 var indexFS embed.FS
@@ -132,7 +139,6 @@ func replayHistory(path string, w io.Writer) {
 		return
 	}
 	defer f.Close()
-	const maxReplay = 500
 	var lines [][]byte
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -141,7 +147,7 @@ func replayHistory(path string, w io.Writer) {
 		if json.Unmarshal(sc.Bytes(), &ev) == nil && ev.Decision != "" {
 			b, _ := json.Marshal(ev)
 			lines = append(lines, b)
-			if len(lines) > maxReplay {
+			if len(lines) > maxWindow {
 				lines = lines[1:]
 			}
 		}
@@ -152,6 +158,125 @@ func replayHistory(path string, w io.Writer) {
 	for _, ln := range lines {
 		fmt.Fprintf(w, "data: %s\n\n", ln)
 	}
+}
+
+// pulse is a filter-aware, at-a-glance aggregate of the audit window: how many
+// tool calls the firewall approved, blocked, or held, plus the busiest agents.
+// It mirrors what the Live Wall's pulse header shows so the same numbers are
+// available to scripts and headless monitors (GET /pulse), not just the browser.
+type pulse struct {
+	Approved  int          `json:"approved"` // allow
+	Blocked   int          `json:"blocked"`  // deny | block | hide
+	Pending   int          `json:"pending"`  // ratelimit (held / throttled)
+	Total     int          `json:"total"`
+	TopAgents []agentCount `json:"topAgents"`
+}
+
+type agentCount struct {
+	Agent string `json:"agent"`
+	Count int    `json:"count"`
+}
+
+// bucket folds a NockGuard decision into one of the pulse's three at-a-glance
+// buckets. Anything that isn't a clean allow or a rate-limit hold is treated as
+// blocked, so unknown/future enforcement outcomes surface rather than vanish.
+func bucket(decision string) string {
+	switch decision {
+	case "allow":
+		return "approved"
+	case "ratelimit":
+		return "pending"
+	default: // deny | block | hide and any unknown enforcement outcome
+		return "blocked"
+	}
+}
+
+// computePulse aggregates events into a pulse, honouring the same filters the
+// wall exposes (#46): a case-insensitive substring over "agent tool" and an
+// exact decision match. It is O(events-in-window) — a single pass, no re-scan.
+func computePulse(evs []event, q, decision string) pulse {
+	q = strings.ToLower(strings.TrimSpace(q))
+	byAgent := map[string]int{}
+	var p pulse
+	for _, ev := range evs {
+		if decision != "" && ev.Decision != decision {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(ev.Agent+" "+ev.Tool), q) {
+			continue
+		}
+		p.Total++
+		switch bucket(ev.Decision) {
+		case "approved":
+			p.Approved++
+		case "pending":
+			p.Pending++
+		default:
+			p.Blocked++
+		}
+		if ev.Agent != "" {
+			byAgent[ev.Agent]++
+		}
+	}
+	p.TopAgents = topAgents(byAgent, 3)
+	return p
+}
+
+// topAgents returns the n busiest agents, most events first and ties broken by
+// name so the ordering (and therefore the tests) is deterministic.
+func topAgents(byAgent map[string]int, n int) []agentCount {
+	out := make([]agentCount, 0, len(byAgent))
+	for a, c := range byAgent {
+		out = append(out, agentCount{Agent: a, Count: c})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Agent < out[j].Agent
+	})
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out
+}
+
+// loadEvents reads up to the most recent maxWindow decisions from the audit
+// JSONL, oldest first — the same bounded window the wall replays to browsers.
+func loadEvents(path string) []event {
+	if path == "" {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var evs []event
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		var ev event
+		if json.Unmarshal(sc.Bytes(), &ev) == nil && ev.Decision != "" {
+			evs = append(evs, ev)
+			if len(evs) > maxWindow {
+				evs = evs[1:]
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		log.Printf("error reading audit log for pulse: %v", err)
+	}
+	return evs
+}
+
+// handlePulse serves the current pulse over the persisted audit window as JSON,
+// honouring optional ?q= and ?decision= filters. This is the same aggregation
+// the browser renders live, exposed for scripting and headless monitoring.
+func (b *broker) handlePulse(w http.ResponseWriter, r *http.Request) {
+	p := computePulse(loadEvents(b.auditPath), r.URL.Query().Get("q"), r.URL.Query().Get("decision"))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(p)
 }
 
 // tail follows path like `tail -f`, emitting each newly appended JSON line. On
@@ -260,6 +385,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/events", b.handleSSE)
+	mux.HandleFunc("/pulse", b.handlePulse)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)

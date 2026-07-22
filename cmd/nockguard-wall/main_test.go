@@ -26,6 +26,57 @@ func TestBrokerUnregisterDoesNotDependOnBackgroundRunLoop(t *testing.T) {
 	}
 }
 
+func TestComputePulse(t *testing.T) {
+	evs := []event{
+		{Agent: "kit", Tool: "Read", Decision: "allow"},
+		{Agent: "kit", Tool: "Bash: rm -rf /", Decision: "block", Reason: "destructive"},
+		{Agent: "ash", Tool: "WebFetch", Decision: "ratelimit"},
+		{Agent: "ash", Tool: "Read", Decision: "allow"},
+		{Agent: "ash", Tool: "mcp__x", Decision: "deny"},
+		{Agent: "bob", Tool: "Read", Decision: "allow"},
+		{Agent: "bob", Tool: "Edit", Decision: "hide"},
+		{Agent: "vale", Tool: "Read", Decision: "hide"},
+	}
+
+	// No filters: every event counted, bucketed by decision.
+	p := computePulse(evs, "", "")
+	if p.Total != 8 {
+		t.Fatalf("total: got %d want 8", p.Total)
+	}
+	if p.Approved != 3 || p.Pending != 1 || p.Blocked != 4 {
+		t.Fatalf("buckets: approved=%d pending=%d blocked=%d want 3/1/4", p.Approved, p.Pending, p.Blocked)
+	}
+	// Top agents by volume; the tie at 2 (bob, kit) breaks by name, and the cap
+	// of 3 drops vale.
+	if len(p.TopAgents) != 3 {
+		t.Fatalf("top agents: got %d want 3", len(p.TopAgents))
+	}
+	if p.TopAgents[0] != (agentCount{"ash", 3}) ||
+		p.TopAgents[1] != (agentCount{"bob", 2}) ||
+		p.TopAgents[2] != (agentCount{"kit", 2}) {
+		t.Fatalf("top agents order: got %+v want ash/3, bob/2, kit/2", p.TopAgents)
+	}
+
+	// Decision filter respected: only allow events survive.
+	if pa := computePulse(evs, "", "allow"); pa.Total != 3 || pa.Approved != 3 || pa.Blocked != 0 {
+		t.Fatalf("decision filter: got %+v want total 3, approved 3, blocked 0", pa)
+	}
+
+	// Text filter respected: case-insensitive substring over "agent tool".
+	if pk := computePulse(evs, "KIT", ""); pk.Total != 2 || pk.Approved != 1 || pk.Blocked != 1 {
+		t.Fatalf("agent text filter: got %+v want total 2, approved 1, blocked 1", pk)
+	}
+	if pf := computePulse(evs, "webfetch", ""); pf.Total != 1 || pf.Pending != 1 {
+		t.Fatalf("tool text filter: got %+v want total 1, pending 1", pf)
+	}
+
+	// Combined filters intersect.
+	pc := computePulse(evs, "ash", "allow")
+	if pc.Total != 1 || len(pc.TopAgents) != 1 || pc.TopAgents[0].Agent != "ash" {
+		t.Fatalf("combined filter: got %+v want total 1, top agent ash", pc)
+	}
+}
+
 func TestReplayHistoryLogsScannerErrors(t *testing.T) {
 	f, err := os.CreateTemp(t.TempDir(), "audit-*.jsonl")
 	if err != nil {

@@ -50,6 +50,27 @@
   #f-text { flex:1; max-width:360px; }
   .fcount { color:var(--dim); font-size:11px; letter-spacing:.5px; margin-left:2px; }
 
+  /* pulse header: at-a-glance aggregate of what's currently on the wall */
+  .pulse { display:flex; align-items:center; gap:24px; flex-wrap:wrap;
+           padding:12px 22px; border-bottom:1px solid var(--line);
+           background:linear-gradient(180deg, rgba(255,255,255,.02), transparent); }
+  .pgroup { display:flex; gap:10px; }
+  .ptile { min-width:98px; padding:8px 16px; border:1px solid var(--line);
+           border-left-width:4px; border-radius:10px; background:var(--panel); }
+  .ptile .pn { font-size:24px; font-weight:700; line-height:1.05; display:block; }
+  .ptile .pl { font-size:10px; letter-spacing:1.5px; text-transform:uppercase; color:var(--dim); }
+  .ptile.approved { border-left-color:var(--allow); } .ptile.approved .pn{ color:var(--allow); }
+  .ptile.blocked  { border-left-color:var(--block); } .ptile.blocked .pn{ color:var(--block); }
+  .ptile.pending  { border-left-color:var(--ratelimit); } .ptile.pending .pn{ color:var(--ratelimit); }
+  .ptop { display:flex; align-items:center; gap:12px; min-width:0; }
+  .ptop-label { font-size:10px; letter-spacing:1.5px; text-transform:uppercase; color:var(--dim); }
+  .ptop-list { display:flex; gap:9px; flex-wrap:wrap; }
+  .pagent { background:var(--panel); border:1px solid var(--line); border-radius:20px;
+            padding:5px 12px; font-size:12px; }
+  .pagent .pa-name { color:var(--accent); font-weight:600; }
+  .pagent .pa-count { color:var(--dim); margin-left:6px; }
+  .dimquiet { color:var(--dim); }
+
   #feed { flex:1; overflow:hidden; padding:10px 14px; display:flex; flex-direction:column; gap:6px; }
   body.threats #feed .row.allow { display:none; }
   #feed .row.fout { display:none; }
@@ -125,6 +146,17 @@
       <span class="fcount" id="f-count"></span>
     </div>
   </header>
+  <div id="pulse" class="pulse" title="live aggregate of what's on the wall — respects the active filters">
+    <div class="pgroup">
+      <div class="ptile approved"><span class="pn" id="p-approved">0</span><span class="pl">approved</span></div>
+      <div class="ptile blocked"><span class="pn" id="p-blocked">0</span><span class="pl">blocked</span></div>
+      <div class="ptile pending"><span class="pn" id="p-pending">0</span><span class="pl">pending</span></div>
+    </div>
+    <div class="ptop">
+      <span class="ptop-label">top agents</span>
+      <span class="ptop-list" id="p-agents"><span class="dimquiet">—</span></span>
+    </div>
+  </div>
   <div id="feed"><div class="empty" id="empty">waiting for the first decision…</div></div>
   <footer>
     <span id="conn">connecting…</span>
@@ -180,10 +212,46 @@
       if (!out) shown++;
     }
     fCount.textContent = active ? (shown + ' / ' + tot + ' shown') : '';
+    renderPulse();
   }
   fText.addEventListener('input', applyFilters);
   fDecision.addEventListener('change', applyFilters);
   fClear.addEventListener('click', () => { fText.value = ''; fDecision.value = ''; applyFilters(); });
+
+  // --- pulse header: a filter-aware, at-a-glance aggregate over the events on
+  // the wall right now. Recomputed from the retained rows (bounded by MAX_ROWS)
+  // so it always reflects exactly what the operator is looking at, respecting
+  // the active filters. O(rows), mirrors the server-side /pulse aggregation. ---
+  const pApproved = document.getElementById('p-approved');
+  const pBlocked = document.getElementById('p-blocked');
+  const pPending = document.getElementById('p-pending');
+  const pAgents = document.getElementById('p-agents');
+  function pulseBucket(decision) {
+    if (decision === 'allow') return 'approved';
+    if (decision === 'ratelimit') return 'pending';
+    return 'blocked'; // deny | block | hide
+  }
+  function renderPulse() {
+    let approved = 0, blocked = 0, pending = 0;
+    const byAgent = new Map();
+    for (const row of feed.children) {
+      if (!row.classList.contains('row') || !rowMatches(row)) continue;
+      const b = pulseBucket(row.dataset.decision || 'hide');
+      if (b === 'approved') approved++; else if (b === 'pending') pending++; else blocked++;
+      const a = row.dataset.agentName || '';
+      if (a) byAgent.set(a, (byAgent.get(a) || 0) + 1);
+    }
+    pApproved.textContent = approved;
+    pBlocked.textContent = blocked;
+    pPending.textContent = pending;
+    const top = [...byAgent.entries()]
+      .sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1))
+      .slice(0, 3);
+    pAgents.innerHTML = top.length
+      ? top.map(([a, c]) => '<span class="pagent"><span class="pa-name">' + esc(a) +
+          '</span><span class="pa-count">' + c + '</span></span>').join('')
+      : '<span class="dimquiet">—</span>';
+  }
 
   function beep() {
     if (!soundOn || !audioCtx) return;
@@ -227,6 +295,7 @@
     const row = document.createElement('div');
     row.className = 'row ' + dec;
     row.dataset.agent = (ev.agent || '').toLowerCase();
+    row.dataset.agentName = ev.agent || '';
     row.dataset.tool = (ev.tool || '').toLowerCase();
     row.dataset.decision = dec;
     row.innerHTML =
@@ -239,6 +308,7 @@
     if ((fq || fdec) && !rowMatches(row)) row.classList.add('fout');
     while (feed.childElementCount > MAX_ROWS) feed.lastElementChild.remove();
     if (fq || fdec) applyFilters(); // refresh the "shown / total" count
+    else renderPulse();             // (applyFilters already refreshes the pulse)
     bump(dec);
     if (dec === 'block') { hitFlash(); beep(); }
   }
