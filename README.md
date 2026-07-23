@@ -136,6 +136,22 @@ nockguard verify --all          # every per-agent trail in one shot — prove th
 
 `--all` scans the audit dir for every `<agent>.audit.jsonl`, verifies each with that agent's own public key, and prints a per-agent summary (exit 0 = all intact, 2 = any tampered, 1 = any it could not verify). That single command replays the whole hash chain and the per-entry signatures: it proves the trail was not edited, reordered, truncated, or signed by anyone but the holder of the agent's private key. `verify` is the first-class form of `audit verify` (below), which documents HMAC vs Ed25519 signing, per-agent keys, and the compliance evidence packs.
 
+## Prove the firewall BLOCKS — `selftest`
+
+`verify` proves the audit **trail** is intact. But a firewall can keep a flawless trail while silently forwarding every call — an intact record of an open door. `selftest` closes that gap: it proves the live **enforcement** path actually blocks.
+
+```bash
+nockguard selftest --policy policy.yaml    # exit 0 = enforcement PROVEN, 2 = a GAP, 1 = inconclusive
+nockguard selftest --policy policy.yaml --json
+```
+
+It loads the active policy (a firewall whose own config will not load, or that governs no agents, is inconclusive — non-zero) and then runs two proof-of-block checks by driving **benign canary probes through the same proxy gate real agent traffic takes** — not a mock:
+
+- **policy-deny** — a canary tool (`nockguard-selftest-probe`) the policy DENIES must be blocked at the gate. PASS = denied.
+- **input-validation** — a tool argument carrying a **synthetic** secret-shaped string (no real credential) must be flagged by input validation. PASS = flagged.
+
+Every check runs a **positive control** first: it proves the probe *would* be forwarded *without* the deny rule / validation, so a block is real — not a missing tool, an unwired probe, or a setup error. If the positive control fails, the check is `SKIP`, never `PASS`. A block that coincides with a genuine policy `Deny` decision is distinguished from an inconclusive error path. Exit is `0` only when at least one check PASSED and none FAILED — a firewall that proved nothing (all SKIP, or no active policy) does not pass. This is proof-of-block, deliberately distinct from `audit verify`'s proof-of-trail.
+
 ## Audit Trail (Phase 4)
 
 NockGuard can write a structured, append-only record of every policy decision — turning the firewall from a gate into an accountable trail of what each agent attempted and what the policy did about it. Enable it with a top-level `audit` block:

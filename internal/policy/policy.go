@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -118,11 +119,26 @@ func Load(path string) (*Engine, error) {
 		return nil, err
 	}
 	defer f.Close()
-	dec := yaml.NewDecoder(f)
+	return loadFrom(f, path)
+}
+
+// LoadBytes parses and validates a policy from raw YAML bytes using the SAME
+// decoder and validation as Load. The `selftest` command uses it to build the
+// canary probe policies through the real loader — no temp file — so a self-test
+// PASS reflects the exact load path the firewall runs.
+func LoadBytes(data []byte) (*Engine, error) {
+	return loadFrom(bytes.NewReader(data), "<bytes>")
+}
+
+// loadFrom decodes and validates a policy from r. name is used only in error
+// messages. Load and LoadBytes both delegate here so the on-disk and in-memory
+// paths share identical glob/category validation.
+func loadFrom(r io.Reader, name string) (*Engine, error) {
+	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
 	var cfg Config
 	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("policy %s: %w", path, err)
+		return nil, fmt.Errorf("policy %s: %w", name, err)
 	}
 	// Validate every glob pattern at load time so a malformed wildcard fails
 	// LOUD here rather than silently voiding a control at evaluate time (N8180).
@@ -195,6 +211,13 @@ func (e *Engine) SigningKeyEnvNames() []string {
 		names = append(names, n)
 	}
 	return names
+}
+
+// AgentCount reports how many agents the loaded policy governs. Zero means
+// nothing is enforced; the `selftest` command treats that as inconclusive rather
+// than passing, and also surfaces the count in its report.
+func (e *Engine) AgentCount() int {
+	return len(e.config.Agents)
 }
 
 // HasPolicyFor reports whether an explicit policy governs the given agent —

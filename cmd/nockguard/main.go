@@ -85,6 +85,13 @@ func runCLI(args []string) int {
 		return runAudit(args)
 	}
 
+	// `selftest` is proof-of-BLOCK — it proves policy actually DENIES a denied
+	// tool and input-validation catches a secret. Deliberately NOT `verify`,
+	// which proves audit-TRAIL integrity; the two answer different questions.
+	if args[0] == "selftest" {
+		return runSelftest(args[1:])
+	}
+
 	if args[0] == "keygen" {
 		return runKeygen(args[1:])
 	}
@@ -1189,6 +1196,7 @@ Usage:
   nockguard mcp-http --upstream <url> --agent <name> [--policy <path>] [--auth-env <ENV>]
   nockguard egress-proxy --listen <addr> --agent <name> --policy <path> [--audit <path>] [--enforce]
   nockguard verify (--all | --agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
+  nockguard selftest [--policy <path>] [--json]
   nockguard policy propose --agent <name> [--audit <path>] [--audit-dir <dir>]
   nockguard policy shadow-report --agent <name> [--audit <path>] [--audit-dir <dir>]
   nockguard trust show --agent <name>
@@ -1232,6 +1240,7 @@ Examples:
   nockguard egress-proxy --listen 127.0.0.1:8899 --agent kit --policy egress.yaml
   nockguard keygen --agent kit                          # generate per-agent keypair
   nockguard verify --agent kit                          # prove kit's trail is intact + non-repudiable (exit 0 = clean, 2 = tampered)
+  nockguard selftest --policy policy.yaml               # prove the firewall BLOCKS a denied tool + catches a secret (exit 0 = proven, 2 = gap)
   nockguard verify --all                                # prove EVERY per-agent trail in ~/.nockguard/logs in one command
   nockguard policy propose --agent kit                   # derive a shadow allowlist from kit's observed allowed tools
   nockguard policy shadow-report --agent kit             # count shadow would-deny misses by tool
