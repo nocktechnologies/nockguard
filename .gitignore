@@ -1,1 +1,4 @@
-nockguard
+# Root-anchored so it ignores the built `nockguard` binary at the repo root
+# without also swallowing the cmd/nockguard/ source directory (the bare pattern
+# `nockguard` matched that dir, silently ignoring new source files under it).
+/nockguard
