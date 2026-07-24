@@ -512,7 +512,31 @@ func (e *Engine) AuditorAt(path string) (*audit.Auditor, error) {
 	return e.auditorAt(path)
 }
 
+// expandTilde expands a leading ~ or ~/ in p to the user's home directory. A
+// path without a leading tilde is returned unchanged, so it is safe to call on
+// any path (idempotent for absolute/relative paths). This keeps audit paths in
+// a committed policy portable across machines — a policy can say
+// `path: ~/.nockguard/logs/x.jsonl` instead of baking in a machine-specific
+// /Users/<name> or /home/<name> that only resolves on the author's box.
+func expandTilde(p string) (string, error) {
+	if p != "~" && !strings.HasPrefix(p, "~/") {
+		return p, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	if p == "~" {
+		return home, nil
+	}
+	return filepath.Join(home, p[2:]), nil
+}
+
 func (e *Engine) auditorAt(path string) (*audit.Auditor, error) {
+	path, err := expandTilde(path)
+	if err != nil {
+		return nil, err
+	}
 	var opts []audit.Option
 	// Ed25519 (non-repudiable) takes precedence over HMAC when both are configured.
 	if e.config.Audit != nil && e.config.Audit.SignEd25519KeyEnv != "" {
@@ -616,6 +640,8 @@ func (e *Engine) AuditorFor(agent string) (*audit.Auditor, error) {
 			return nil, err
 		}
 		path = filepath.Join(home, DefaultAuditPath)
+	} else if path, err = expandTilde(path); err != nil {
+		return nil, err
 	}
 	return audit.New(AgentAuditPath(path, agent), audit.WithEd25519Key(priv))
 }
