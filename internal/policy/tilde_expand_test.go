@@ -19,8 +19,8 @@ func TestExpandTilde(t *testing.T) {
 	}{
 		{"~", home},
 		{"~/.nockguard/logs/x.jsonl", filepath.Join(home, ".nockguard/logs/x.jsonl")},
-		{"/abs/path/audit.jsonl", "/abs/path/audit.jsonl"}, // absolute untouched
-		{"relative/audit.jsonl", "relative/audit.jsonl"},   // relative untouched
+		{"/abs/path/audit.jsonl", "/abs/path/audit.jsonl"},     // absolute untouched
+		{"relative/audit.jsonl", "relative/audit.jsonl"},       // relative untouched
 		{"~notation/without/slash", "~notation/without/slash"}, // only ~ and ~/ expand
 		{"", ""},
 	}
