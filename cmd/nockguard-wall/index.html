@@ -62,6 +62,16 @@
   .ptile.approved { border-left-color:var(--allow); } .ptile.approved .pn{ color:var(--allow); }
   .ptile.blocked  { border-left-color:var(--block); } .ptile.blocked .pn{ color:var(--block); }
   .ptile.pending  { border-left-color:var(--ratelimit); } .ptile.pending .pn{ color:var(--ratelimit); }
+  .ptile.critical { border-left-color:var(--block); } .ptile.critical .pn{ color:var(--block); }
+  .ptile.high     { border-left-color:var(--deny); }  .ptile.high .pn{ color:var(--deny); }
+
+  /* "threats caught" hero + dedicated critical/high pane */
+  .hero { display:flex; flex-direction:column; align-items:flex-start; justify-content:center;
+          padding:4px 22px 4px 0; margin-right:6px; border-right:1px solid var(--line); }
+  .hero .hn { font-size:38px; font-weight:800; line-height:1; color:var(--block);
+              text-shadow:0 0 20px rgba(255,77,77,.35); }
+  .hero .hl { font-size:10px; letter-spacing:1.5px; text-transform:uppercase; color:var(--dim); margin-top:4px; }
+  .pgroup.sev .ptile { min-width:80px; }
   .ptop { display:flex; align-items:center; gap:12px; min-width:0; }
   .ptop-label { font-size:10px; letter-spacing:1.5px; text-transform:uppercase; color:var(--dim); }
   .ptop-list { display:flex; gap:9px; flex-wrap:wrap; }
@@ -84,8 +94,17 @@
   .row .agent { color:var(--accent); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .row .tool { color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .row .reason { color:var(--dim); font-size:12px; grid-column:3; margin-top:2px; }
+  .row .verdict { display:flex; align-items:center; gap:8px; justify-self:end; }
   .row .badge { font-size:11px; font-weight:700; letter-spacing:1px; text-transform:uppercase;
                 padding:3px 9px; border-radius:5px; }
+  /* severity chip: only critical/high get one, so a routine deny stays flat */
+  .row .sev { font-size:10px; font-weight:700; letter-spacing:1px; text-transform:uppercase;
+              padding:2px 7px; border-radius:5px; }
+  .row[data-severity="critical"] .sev { background:rgba(255,77,77,.2); color:var(--block); }
+  .row[data-severity="high"] .sev { background:rgba(240,136,62,.18); color:var(--deny); }
+  .row[data-severity="critical"] { border-color:rgba(255,77,77,.55);
+                box-shadow:inset 0 0 0 1px rgba(255,77,77,.22); }
+  body.crit #feed .row:not([data-severity="critical"]):not([data-severity="high"]) { display:none; }
   .allow      { border-left-color:var(--allow); }
   .allow      .badge{ background:rgba(63,185,80,.15); color:var(--allow); }
   .deny       { border-left-color:var(--deny); }  .deny .badge{ background:rgba(240,136,62,.15); color:var(--deny); }
@@ -128,8 +147,9 @@
       <div class="pill blocked"><span class="n" id="c-block">0</span><span class="l">blocked</span></div>
       <div class="pill limited"><span class="n" id="c-rate">0</span><span class="l">limited</span></div>
       <div class="pill denied"><span class="n" id="c-deny">0</span><span class="l">denied/hidden</span></div>
-      <div class="pill caught"><span class="n" id="c-caught">0%</span><span class="l">caught</span></div>
+      <div class="pill caught"><span class="n" id="c-caught">0%</span><span class="l">catch rate</span></div>
       <button class="toggle" id="t-threats" title="show only non-allowed">THREATS ONLY</button>
+      <button class="toggle" id="t-crit" title="show only critical/high threats">CRIT/HIGH</button>
       <button class="toggle snd" id="t-sound" title="beep when something is blocked">🔊 SOUND</button>
     </div>
     <div class="filters">
@@ -147,6 +167,14 @@
     </div>
   </header>
   <div id="pulse" class="pulse" title="live aggregate of what's on the wall — respects the active filters">
+    <div class="hero" title="non-allow catches (critical + high + low) in view">
+      <span class="hn" id="p-threats">0</span>
+      <span class="hl">threats caught</span>
+    </div>
+    <div class="pgroup sev" title="threats broken out by severity — a secret-exfil block is not a routine deny">
+      <div class="ptile critical"><span class="pn" id="p-critical">0</span><span class="pl">critical</span></div>
+      <div class="ptile high"><span class="pn" id="p-high">0</span><span class="pl">high</span></div>
+    </div>
     <div class="pgroup">
       <div class="ptile approved"><span class="pn" id="p-approved">0</span><span class="pl">approved</span></div>
       <div class="ptile blocked"><span class="pn" id="p-blocked">0</span><span class="pl">blocked</span></div>
@@ -174,10 +202,15 @@
   // --- toggles ---
   let soundOn = false;
   const tThreats = document.getElementById('t-threats');
+  const tCrit = document.getElementById('t-crit');
   const tSound = document.getElementById('t-sound');
   tThreats.addEventListener('click', () => {
     document.body.classList.toggle('threats');
     tThreats.classList.toggle('on', document.body.classList.contains('threats'));
+  });
+  tCrit.addEventListener('click', () => {
+    document.body.classList.toggle('crit');
+    tCrit.classList.toggle('on', document.body.classList.contains('crit'));
   });
   let audioCtx = null;
   tSound.addEventListener('click', () => {
@@ -225,6 +258,9 @@
   const pApproved = document.getElementById('p-approved');
   const pBlocked = document.getElementById('p-blocked');
   const pPending = document.getElementById('p-pending');
+  const pThreats = document.getElementById('p-threats');
+  const pCritical = document.getElementById('p-critical');
+  const pHigh = document.getElementById('p-high');
   const pAgents = document.getElementById('p-agents');
   function pulseBucket(decision) {
     if (decision === 'allow') return 'approved';
@@ -232,18 +268,27 @@
     return 'blocked'; // deny | block | hide
   }
   function renderPulse() {
-    let approved = 0, blocked = 0, pending = 0;
+    let approved = 0, blocked = 0, pending = 0, threats = 0, critical = 0, high = 0;
     const byAgent = new Map();
     for (const row of feed.children) {
       if (!row.classList.contains('row') || !rowMatches(row)) continue;
       const b = pulseBucket(row.dataset.decision || 'hide');
       if (b === 'approved') approved++; else if (b === 'pending') pending++; else blocked++;
+      // Severity is classified server-side (forward.Severity); the wall only reads
+      // the tag — it never re-derives "how bad is this?" in the browser.
+      const sev = row.dataset.severity || 'none';
+      if (sev === 'critical') { critical++; threats++; }
+      else if (sev === 'high') { high++; threats++; }
+      else if (sev === 'low') { threats++; }
       const a = row.dataset.agentName || '';
       if (a) byAgent.set(a, (byAgent.get(a) || 0) + 1);
     }
     pApproved.textContent = approved;
     pBlocked.textContent = blocked;
     pPending.textContent = pending;
+    pThreats.textContent = threats;
+    pCritical.textContent = critical;
+    pHigh.textContent = high;
     const top = [...byAgent.entries()]
       .sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1))
       .slice(0, 3);
@@ -289,28 +334,38 @@
   }
   function esc(s){ const d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }
 
+  // Severity is DERIVED server-side (forward.Severity) and arrives on the event;
+  // the wall trusts that tag rather than re-classifying reasons in the browser.
+  const SEV = { critical:1, high:1, low:1, none:1 };
   function render(ev) {
     if (empty) { empty.remove(); empty = null; }
     const dec = KNOWN[ev.decision] ? ev.decision : 'hide';
+    const sev = SEV[ev.severity] ? ev.severity : 'none';
     const row = document.createElement('div');
     row.className = 'row ' + dec;
     row.dataset.agent = (ev.agent || '').toLowerCase();
     row.dataset.agentName = ev.agent || '';
     row.dataset.tool = (ev.tool || '').toLowerCase();
     row.dataset.decision = dec;
+    row.dataset.severity = sev;
+    const sevChip = (sev === 'critical' || sev === 'high')
+      ? '<span class="sev">' + sev + '</span>' : '';
     row.innerHTML =
       '<span class="ts">' + esc(hhmmss(ev.ts)) + '</span>' +
       '<span class="agent">' + esc(ev.agent || '—') + '</span>' +
       '<span class="tool">' + esc(ev.tool || '') +
         (ev.reason ? '<div class="reason">' + esc(ev.reason) + '</div>' : '') + '</span>' +
-      '<span class="badge">' + esc(ev.decision || '?') + '</span>';
+      '<span class="verdict">' + sevChip +
+        '<span class="badge">' + esc(ev.decision || '?') + '</span></span>';
     feed.prepend(row);
     if ((fq || fdec) && !rowMatches(row)) row.classList.add('fout');
     while (feed.childElementCount > MAX_ROWS) feed.lastElementChild.remove();
     if (fq || fdec) applyFilters(); // refresh the "shown / total" count
     else renderPulse();             // (applyFilters already refreshes the pulse)
     bump(dec);
-    if (dec === 'block') { hitFlash(); beep(); }
+    // The alarm fires on the loudest signals: any block, and any critical catch
+    // (e.g. a secret-exfil deny) — a routine allowlist deny stays quiet.
+    if (dec === 'block' || sev === 'critical') { hitFlash(); beep(); }
   }
 
   function connect() {

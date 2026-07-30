@@ -134,6 +134,7 @@ func (f *Forwarder) post(ev Event) {
 			"tool":     ev.Tool,
 			"decision": ev.Decision,
 			"reason":   ev.Reason,
+			"threat":   Severity(ev.Decision, ev.Reason),
 		},
 	}
 	body, err := json.Marshal(payload)
@@ -171,6 +172,11 @@ func (f *Forwarder) logError(stage string, ev Event, err error) {
 // severityFor maps a decision to an ops-log severity. A blocked call (an
 // injection or secret-exfil attempt caught by input validation) is the loudest
 // signal; shadow would-deny is dry-run evidence, not a live block.
+//
+// This vocabulary (warn / info / high) is an EXTERNAL NockCC ops-log API
+// contract, and is deliberately reason-blind: the ops-log level is a function of
+// the decision alone. It is NOT the same axis as the threat tier below — see
+// Severity — so the two intentionally do not share a mapping.
 func severityFor(decision string) string {
 	if decision == "block" {
 		return "high"
@@ -179,6 +185,82 @@ func severityFor(decision string) string {
 		return "info"
 	}
 	return "warn"
+}
+
+// Threat severity tiers for the Live Wall. These are DISTINCT from the ops-log
+// severity vocabulary that severityFor emits: a tier answers "how alarming is
+// this caught call?" so the wall can make a secret-exfil block read louder than
+// a routine allowlist deny, instead of every non-allow reading flat as blocked.
+const (
+	ThreatCritical = "critical" // a block/deny whose reason smells of secret-exfil or destruction
+	ThreatHigh     = "high"     // other blocks/denies of consequence, and unknown enforcement
+	ThreatLow      = "low"      // routine allowlist denies, rate-limit holds, hidden tools
+	ThreatNone     = "none"     // allows and dry-run shadow would-denies — not a live catch
+)
+
+// Severity classifies a (decision, reason) pair into a threat tier. It is a PURE
+// function (no I/O, no state) so the forwarder and the Live Wall share one source
+// of truth for "how bad is this?" rather than re-deriving it in two places.
+//
+// Unlike severityFor, the tier reads the reason: a `block` on an aws-access-key
+// or an `rm -rf` deny surfaces as critical, while a plain "no allow-rule matched"
+// deny stays low. Matching is over the reason strings NockGuard actually records
+// — the built-in validate rule names (internal/validate) and the policy deny
+// reasons (internal/policy) — plus the wall's own demo phrasing.
+func Severity(decision, reason string) string {
+	switch decision {
+	case "allow", "would-deny", "":
+		return ThreatNone
+	}
+	r := strings.ToLower(reason)
+	if (decision == "block" || decision == "deny") && (secretExfil(r) || destructive(r)) {
+		return ThreatCritical
+	}
+	if decision == "deny" && routineAllowlistDeny(r) {
+		return ThreatLow
+	}
+	if decision == "ratelimit" || decision == "hide" {
+		return ThreatLow
+	}
+	// Other blocks/denies of consequence — and any unknown enforcement outcome,
+	// which we surface as high rather than swallow (cf. the wall's bucket()).
+	return ThreatHigh
+}
+
+// secretExfil reports whether a reason indicates credential/secret exposure. It
+// covers the built-in CategorySecrets rule names (…-key, …-token, …-pat,
+// generic-bearer, ssn, credit-card), the sensitive-path detectors, and the
+// friendlier "secret-exfil: …" phrasing the wall's demo emits.
+func secretExfil(r string) bool {
+	return containsAny(r,
+		"secret", "exfil", "credential", "password", "passwd", "shadow",
+		"token", "bearer", "-key", "api-key", "api_key", "apikey", "-pat",
+		"ssn", "credit-card", "dotenv", ".env", ".aws", ".ssh",
+		"private key", "sensitive", "connection-string")
+}
+
+// destructive reports whether a reason indicates an irreversible/destructive
+// action — file wipes, database drops, and the like.
+func destructive(r string) bool {
+	return containsAny(r,
+		"rm -rf", "destructive", "drop table", "stacked-drop", "truncate",
+		"delete from", "mkfs", "wipe", "shred", "dd if=", "> /dev/")
+}
+
+// routineAllowlistDeny reports whether a deny reason is a routine "not on the
+// allowlist" outcome rather than an explicit blocklist/deny-rule of consequence.
+func routineAllowlistDeny(r string) bool {
+	return containsAny(r,
+		"allow-rule", "allow list", "allowlist", "default-deny", "not in agent")
+}
+
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func summaryFor(ev Event) string {

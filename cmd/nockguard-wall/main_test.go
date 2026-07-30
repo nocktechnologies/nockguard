@@ -46,6 +46,13 @@ func TestComputePulse(t *testing.T) {
 	if p.Approved != 3 || p.Pending != 1 || p.Blocked != 4 {
 		t.Fatalf("buckets: approved=%d pending=%d blocked=%d want 3/1/4", p.Approved, p.Pending, p.Blocked)
 	}
+	// Threat tiers, derived from (decision, reason): the "rm -rf" block is
+	// critical, the reasonless deny is high, and the ratelimit + two hides are
+	// low; the three allows are none (not counted as caught).
+	if p.Threats != 5 || p.Critical != 1 || p.High != 1 || p.Low != 3 {
+		t.Fatalf("threats: threats=%d crit=%d high=%d low=%d want 5/1/1/3",
+			p.Threats, p.Critical, p.High, p.Low)
+	}
 	// Top agents by volume; the tie at 2 (bob, kit) breaks by name, and the cap
 	// of 3 drops vale.
 	if len(p.TopAgents) != 3 {
@@ -58,8 +65,8 @@ func TestComputePulse(t *testing.T) {
 	}
 
 	// Decision filter respected: only allow events survive.
-	if pa := computePulse(evs, "", "allow"); pa.Total != 3 || pa.Approved != 3 || pa.Blocked != 0 {
-		t.Fatalf("decision filter: got %+v want total 3, approved 3, blocked 0", pa)
+	if pa := computePulse(evs, "", "allow"); pa.Total != 3 || pa.Approved != 3 || pa.Blocked != 0 || pa.Threats != 0 {
+		t.Fatalf("decision filter: got %+v want total 3, approved 3, blocked 0, threats 0", pa)
 	}
 
 	// Text filter respected: case-insensitive substring over "agent tool".

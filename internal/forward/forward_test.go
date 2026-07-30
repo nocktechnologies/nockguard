@@ -132,6 +132,81 @@ func TestSeverityMapping(t *testing.T) {
 	}
 }
 
+func TestSeverityThreatTiers(t *testing.T) {
+	cases := []struct {
+		decision, reason, want string
+	}{
+		// none: allows and dry-run shadow are not live catches.
+		{"allow", "", ThreatNone},
+		{"allow", "allow-rule \"Read\"", ThreatNone},
+		{"would-deny", "would-deny shadow (no shadow-rule matched)", ThreatNone},
+		{"", "", ThreatNone},
+
+		// critical: secret-exfil — real validate rule names + demo phrasing.
+		{"block", "aws-access-key", ThreatCritical},
+		{"block", "openai-key", ThreatCritical},
+		{"block", "github-token", ThreatCritical},
+		{"block", "generic-bearer", ThreatCritical},
+		{"block", "credit-card", ThreatCritical},
+		{"block", "sensitive-unix-path", ThreatCritical},
+		{"block", "secret-exfil: credential path", ThreatCritical},
+		{"block", "secret-exfil: dotenv read", ThreatCritical},
+
+		// critical: destructive — a drop/rm, whether blocked or denied.
+		{"block", "destructive: rm -rf root", ThreatCritical},
+		{"block", "sql-stacked-drop", ThreatCritical},
+		{"deny", "destructive: rm -rf /", ThreatCritical},
+
+		// high: blocks/denies of consequence that aren't secret/destructive.
+		{"block", "sql-tautology", ThreatHigh},
+		{"block", "injection: pipe-to-shell in args", ThreatHigh},
+		{"block", "dotdot-slash", ThreatHigh},
+		{"deny", "blocklist", ThreatHigh},
+		{"deny", "deny-rule \"nockcc_kill_switch_set\"", ThreatHigh},
+		{"deny", "", ThreatHigh}, // reasonless deny: surface rather than downgrade
+
+		// low: routine allowlist denies, rate-limit holds, hidden tools.
+		{"deny", "no allow-rule matched", ThreatLow},
+		{"deny", "default-deny (no allow list)", ThreatLow},
+		{"deny", "tool not in agent allowlist", ThreatLow},
+		{"ratelimit", "rate limit: 60/min exceeded", ThreatLow},
+		{"ratelimit", "session spend cap reached", ThreatLow},
+		{"hide", "tool hidden from this agent", ThreatLow},
+
+		// unknown enforcement outcomes surface as high, never silently none.
+		{"quarantine", "some novel verdict", ThreatHigh},
+	}
+	for _, c := range cases {
+		if got := Severity(c.decision, c.reason); got != c.want {
+			t.Errorf("Severity(%q, %q) = %q, want %q", c.decision, c.reason, got, c.want)
+		}
+	}
+}
+
+func TestForwardsThreatTierInDataBlob(t *testing.T) {
+	cap := &capture{}
+	srv := httptest.NewServer(cap.handler())
+	defer srv.Close()
+
+	f := New(Config{BaseURL: srv.URL, APIKey: "k"})
+	f.Start()
+	f.Enqueue(Event{Agent: "kit", Tool: "Read", Decision: "block", Reason: "aws-access-key"})
+	f.Stop()
+
+	reqs := cap.all()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(reqs))
+	}
+	blob, _ := reqs[0].body["data_blob"].(map[string]any)
+	if blob["threat"] != ThreatCritical {
+		t.Errorf("data_blob threat = %v, want %q", blob["threat"], ThreatCritical)
+	}
+	// The ops-log severity vocabulary is unchanged and independent of the tier.
+	if reqs[0].body["severity"] != "high" {
+		t.Errorf("ops-log severity = %v, want high (block)", reqs[0].body["severity"])
+	}
+}
+
 func TestStopDrainsAllPending(t *testing.T) {
 	cap := &capture{}
 	srv := httptest.NewServer(cap.handler())
