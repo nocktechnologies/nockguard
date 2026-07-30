@@ -140,6 +140,7 @@ func TestSeverityThreatTiers(t *testing.T) {
 		{"allow", "", ThreatNone},
 		{"allow", "allow-rule \"Read\"", ThreatNone},
 		{"would-deny", "would-deny shadow (no shadow-rule matched)", ThreatNone},
+		{"observe", "mcp-http-intercept", ThreatNone}, // observe-mode MCP audits are not live catches
 		{"", "", ThreatNone},
 
 		// critical: secret-exfil — real validate rule names + demo phrasing.

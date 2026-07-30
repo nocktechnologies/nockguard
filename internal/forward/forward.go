@@ -195,7 +195,7 @@ const (
 	ThreatCritical = "critical" // a block/deny whose reason smells of secret-exfil or destruction
 	ThreatHigh     = "high"     // other blocks/denies of consequence, and unknown enforcement
 	ThreatLow      = "low"      // routine allowlist denies, rate-limit holds, hidden tools
-	ThreatNone     = "none"     // allows and dry-run shadow would-denies — not a live catch
+	ThreatNone     = "none"     // allows, dry-run shadow would-denies, observe-mode audits — not a live catch
 )
 
 // Severity classifies a (decision, reason) pair into a threat tier. It is a PURE
@@ -209,7 +209,10 @@ const (
 // reasons (internal/policy) — plus the wall's own demo phrasing.
 func Severity(decision, reason string) string {
 	switch decision {
-	case "allow", "would-deny", "":
+	// "observe" is the mcp-http bridge's per-call audit decision (observe-mode
+	// dogfood): nothing was blocked, so it is NOT a live catch — without this it
+	// falls through to ThreatHigh and floods the wall with routine MCP traffic.
+	case "allow", "would-deny", "observe", "":
 		return ThreatNone
 	}
 	r := strings.ToLower(reason)
