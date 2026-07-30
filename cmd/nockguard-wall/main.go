@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nocktechnologies/nockguard/internal/forward"
 )
 
 // maxWindow bounds how many recent decisions the wall works with: the history
@@ -38,12 +40,25 @@ var indexFS embed.FS
 
 // event mirrors internal/audit.Event — one recorded policy decision. NockGuard
 // deliberately never records raw tool-call arguments, so neither does the wall.
+//
+// Severity is NOT part of the audit schema: it is DERIVED on ingest from
+// (Decision, Reason) via forward.Severity, tagging each event with a threat tier
+// (critical/high/low/none) so the browser can render a secret-exfil block louder
+// than a routine allowlist deny without re-deriving the classification in JS.
 type event struct {
 	Ts       string `json:"ts"`
 	Agent    string `json:"agent"`
 	Tool     string `json:"tool"`
 	Decision string `json:"decision"` // allow | deny | block | ratelimit | hide
 	Reason   string `json:"reason,omitempty"`
+	Severity string `json:"severity,omitempty"` // derived threat tier, not from audit
+}
+
+// classify tags an event with its derived threat tier. Called at every ingest
+// point so both the SSE stream and the /pulse aggregate carry the severity.
+func classify(ev event) event {
+	ev.Severity = forward.Severity(ev.Decision, ev.Reason)
+	return ev
 }
 
 // broker is a minimal SSE hub: it fans recorded events out to every connected
@@ -145,7 +160,7 @@ func replayHistory(path string, w io.Writer) {
 	for sc.Scan() {
 		var ev event
 		if json.Unmarshal(sc.Bytes(), &ev) == nil && ev.Decision != "" {
-			b, _ := json.Marshal(ev)
+			b, _ := json.Marshal(classify(ev))
 			lines = append(lines, b)
 			if len(lines) > maxWindow {
 				lines = lines[1:]
@@ -165,10 +180,17 @@ func replayHistory(path string, w io.Writer) {
 // It mirrors what the Live Wall's pulse header shows so the same numbers are
 // available to scripts and headless monitors (GET /pulse), not just the browser.
 type pulse struct {
-	Approved  int          `json:"approved"` // allow
-	Blocked   int          `json:"blocked"`  // deny | block | hide
-	Pending   int          `json:"pending"`  // ratelimit (held / throttled)
-	Total     int          `json:"total"`
+	Approved int `json:"approved"` // allow
+	Blocked  int `json:"blocked"`  // deny | block | hide
+	Pending  int `json:"pending"`  // ratelimit (held / throttled)
+	Total    int `json:"total"`
+	// Threat breakdown by severity (forward.Severity). Threats is every non-allow
+	// catch (critical+high+low); Critical/High are broken out so the wall's hero
+	// counter and critical/high pane don't have to re-classify in the browser.
+	Threats   int          `json:"threats"`
+	Critical  int          `json:"critical"`
+	High      int          `json:"high"`
+	Low       int          `json:"low"`
 	TopAgents []agentCount `json:"topAgents"`
 }
 
@@ -214,6 +236,17 @@ func computePulse(evs []event, q, decision string) pulse {
 		default:
 			p.Blocked++
 		}
+		switch forward.Severity(ev.Decision, ev.Reason) {
+		case forward.ThreatCritical:
+			p.Critical++
+			p.Threats++
+		case forward.ThreatHigh:
+			p.High++
+			p.Threats++
+		case forward.ThreatLow:
+			p.Low++
+			p.Threats++
+		}
 		if ev.Agent != "" {
 			byAgent[ev.Agent]++
 		}
@@ -258,7 +291,7 @@ func loadEvents(path string) []event {
 	for sc.Scan() {
 		var ev event
 		if json.Unmarshal(sc.Bytes(), &ev) == nil && ev.Decision != "" {
-			evs = append(evs, ev)
+			evs = append(evs, classify(ev))
 			if len(evs) > maxWindow {
 				evs = evs[1:]
 			}
@@ -307,7 +340,7 @@ func tail(ctx context.Context, path string, b *broker) {
 					for sc.Scan() {
 						var ev event
 						if json.Unmarshal(sc.Bytes(), &ev) == nil && ev.Decision != "" {
-							b.emit(ev)
+							b.emit(classify(ev))
 						}
 					}
 					if err := sc.Err(); err != nil {
@@ -356,7 +389,7 @@ func demo(ctx context.Context, b *broker) {
 				s := bads[r.Intn(len(bads))]
 				ev.Tool, ev.Decision, ev.Reason = s.tool, s.decision, s.reason
 			}
-			b.emit(ev)
+			b.emit(classify(ev))
 			t.Reset(time.Duration(350+r.Intn(900)) * time.Millisecond)
 		}
 	}
