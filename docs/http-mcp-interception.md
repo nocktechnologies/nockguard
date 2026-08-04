@@ -25,7 +25,7 @@ server. The proxy forwards every MCP JSON-RPC call to the real remote upstream
 
 ## Transport Choice
 
-### Candidate 1a — stdio MCP server (CHOSEN)
+### Candidate 1a — stdio MCP server (stdio-wrappable seats only)
 
 Claude Code launches `nockguard mcp-http --upstream <url> --agent mira` over
 stdio via the existing `.mcp.json` command mechanism. The proxy speaks the MCP
@@ -33,16 +33,23 @@ stdio protocol (newline-delimited JSON-RPC) to Claude Code and bridges each
 request to the HTTP upstream via POST. Auth headers/session (`Mcp-Session-Id`)
 are preserved transparently.
 
-**Why chosen:** Lowest cutover risk. The `.mcp.json` `command:` entry is the
-proven mechanism for stdio MCP servers. No account-level connector URL changes
-needed. Uses NockGuard's existing per-agent Ed25519 signing Auditor unchanged.
+**Applicability:** Lowest cutover risk *where it applies* — the `.mcp.json`
+`command:` entry is the proven mechanism for stdio MCP servers and needs no
+account-level connector URL changes. But it applies **only to genuinely
+stdio-wrappable seats**, NOT Mira's flagship seat: the managed remote-HTTP
+connector has no local `.mcp.json` command entry to load a stdio server into, so
+this path cannot intercept it. Uses NockGuard's existing per-agent Ed25519
+signing Auditor unchanged.
 
-### Candidate 1b — local HTTP listener (FALLBACK)
+### Candidate 1b — local HTTP listener (chosen for the flagship seat)
 
-The managed connector URL could be re-pointed to `http://localhost:PORT/mcp` if
-the account-managed connector allows localhost URLs. Not chosen for Phase 1
-because the URL re-pointing path has higher uncertainty (account UI / managed
-connector config) compared to the deterministic `.mcp.json` swap.
+The managed connector URL is re-pointed to `http://localhost:PORT/mcp` (or
+`https://` if the connector requires TLS). This is the **flagship-seat path** —
+see the Phase-0 design at
+[`docs/design/n8761-phase0-http-listener-forward-proxy.md`](design/n8761-phase0-http-listener-forward-proxy.md),
+which promotes this candidate from fallback to chosen because it is the only
+transport a managed remote-HTTP connector can actually target (and it scales to
+every remote-HTTP seat, not just the one stdio-wrappable one).
 
 ### Candidate 2 — NCC server-side middleware (REJECTED)
 
@@ -80,6 +87,11 @@ The `nockguard mcp-http` subcommand (see `cmd/nockguard/main.go` and
    every startup when the tripwire is engaged.
 
 ## Cutover Plan (Mira executes, not the builder)
+
+> Applies only to genuinely stdio-wrappable seats, **not Mira's flagship seat**.
+> The flagship cutover re-points the managed remote-HTTP connector to the local
+> HTTP forward-proxy — see
+> [`docs/design/n8761-phase0-http-listener-forward-proxy.md`](design/n8761-phase0-http-listener-forward-proxy.md).
 
 1. Generate a per-agent keypair if not present:
    ```bash
