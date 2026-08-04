@@ -1,5 +1,13 @@
 # HTTP MCP Interception — Phase-0 Design Note (N8761)
 
+> **Superseded for the flagship seat** by
+> [`docs/design/n8761-phase0-http-listener-forward-proxy.md`](design/n8761-phase0-http-listener-forward-proxy.md).
+> The stdio-bridge transport chosen below (Candidate 1a) is inapplicable to
+> Mira's managed remote-HTTP connector, which has no local `.mcp.json` command
+> entry to load a stdio server into. The HTTP listener (Candidate 1b, filed here
+> as a fallback) is promoted to the chosen path in that note. `nockguard mcp-http`
+> as built remains valid for genuinely stdio-wrappable seats.
+
 ## Context
 
 Mira's flagship seat reaches NockCC via the **claude.ai remote-HTTP connector**
