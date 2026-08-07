@@ -218,182 +218,203 @@ func (p *StdioProxy) Run() error {
 	return nil
 }
 
+// mcpDecision is the transport-independent verdict for one inbound JSON-RPC
+// message run through the enforcement gate. Both the stdio proxy and the HTTP
+// listener consume it: the stdio proxy frames the fields as newline lines on
+// stdio; the listener frames them as an upstream POST or a JSON-RPC HTTP error.
+// Producing an mcpDecision (via decide) performs the gate's side effects —
+// audit append, ops-log forward, approval prompt, logging — exactly once; it
+// writes no transport bytes itself.
+type mcpDecision struct {
+	// forward, when non-nil, is the canonical bytes to send upstream (a cleared
+	// tools/call, or non-gated traffic like initialize/tools/list). Mutually
+	// exclusive with reject.
+	forward []byte
+
+	// reject is true when the message was denied/blocked/rate-limited/etc. When
+	// rejectID is non-nil it names the JSON-RPC request id to answer with an
+	// error; a nil rejectID marks a denied NOTIFICATION (no response channel in
+	// JSON-RPC — the stdio proxy drops it silently, the listener acks 202).
+	reject     bool
+	rejectID   json.RawMessage
+	rejectCode int
+	rejectMsg  string
+
+	// toolsListID is non-nil for a tools/list REQUEST, so the caller can track
+	// the id and filter the paired response. tool is the extracted tool name for
+	// a tools/call (informational; empty otherwise).
+	toolsListID json.RawMessage
+	tool        string
+}
+
 func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 	for scanner.Scan() {
-		line := scanner.Bytes()
-
-		// Canonicalize the TOP-LEVEL message before doing anything else. Unmarshal
-		// into a map so any duplicate top-level keys (method, id, params, ...)
-		// collapse to Go's last-wins value, then re-marshal: the bytes the proxy
-		// gates and the bytes the upstream receives are now identical, so a
-		// first-key-wins upstream cannot read a different "method" (e.g. a second
-		// "method":"tools/list" hiding a "method":"tools/call"). A line that is not
-		// a single JSON object (batch array, malformed) fails here → fail CLOSED.
-		var topLevel map[string]json.RawMessage
-		if err := json.Unmarshal(line, &topLevel); err != nil {
-			p.logger.Printf("REJECT agent=%s reason=undecodable-or-batch", p.agent)
-			errResp := jsonrpc.ErrorResponse(json.RawMessage("null"), -32700,
-				"nockguard: rejected — only single well-formed JSON-RPC objects are accepted (batch arrays are not gated)")
-			if writeErr := p.writeAgentLine(p.agentWriter(), errResp); writeErr != nil {
+		d := p.decide(scanner.Bytes())
+		if d.toolsListID != nil {
+			// tools/list (always a request) — track the id so the response can be
+			// filtered by upstreamToAgent.
+			pending.Store(string(d.toolsListID), true)
+		}
+		if d.reject {
+			// A denied REQUEST returns a JSON-RPC error; a denied NOTIFICATION
+			// (rejectID nil) is dropped — rejectToAgent no-ops on a nil id.
+			if werr := p.rejectToAgent(d.rejectID, d.rejectCode, d.rejectMsg); werr != nil {
+				return werr
+			}
+		}
+		if d.forward != nil {
+			if _, writeErr := fmt.Fprintf(w, "%s\n", d.forward); writeErr != nil {
 				return writeErr
 			}
-			continue
-		}
-		canonicalLine, err := json.Marshal(topLevel)
-		if err != nil {
-			p.handleFailModeAsk("", nil, "canonical-marshal-failed")
-			p.logger.Printf("REJECT agent=%s reason=canonical-marshal-failed", p.agent)
-			errResp := jsonrpc.ErrorResponse(json.RawMessage("null"), -32603,
-				"nockguard: rejected — message could not be canonicalized")
-			if writeErr := p.writeAgentLine(p.agentWriter(), errResp); writeErr != nil {
-				return writeErr
-			}
-			continue
-		}
-		msg, err := jsonrpc.Decode(canonicalLine)
-		if err != nil {
-			// canonicalLine is a valid JSON object, so Decode into the Message
-			// struct should not fail; if it somehow does, fail CLOSED.
-			p.logger.Printf("REJECT agent=%s reason=undecodable-after-canonicalize", p.agent)
-			errResp := jsonrpc.ErrorResponse(json.RawMessage("null"), -32700,
-				"nockguard: rejected — message is not a well-formed JSON-RPC object")
-			if writeErr := p.writeAgentLine(p.agentWriter(), errResp); writeErr != nil {
-				return writeErr
-			}
-			continue
-		}
-
-		// Gate tools/call by METHOD, regardless of id: a notification-form call
-		// (no id) must NOT slip past the gates. params are ALSO canonicalized so
-		// what we gate is exactly what we forward — closing duplicate-key and
-		// other parser-differential bypasses at both the top level and in params.
-		if msg.Method == "tools/call" {
-			toolName, canonicalParams, ok := canonicalToolCall(msg.Params)
-			if !ok || toolName == "" {
-				// A tools/call whose name we cannot extract fails CLOSED — the
-				// upstream might still resolve a name the proxy could not see.
-				dec := p.engine.FailModeVerdict(p.agent, "unextractable-name")
-				if dec.Verdict == policy.Ask && p.approveAsk("", canonicalLine, dec) {
-					if _, writeErr := fmt.Fprintf(w, "%s\n", canonicalLine); writeErr != nil {
-						return writeErr
-					}
-				} else {
-					p.logger.Printf("DENY agent=%s reason=unextractable-name", p.agent)
-					p.audit("", "deny", "unextractable-name")
-					if werr := p.rejectToAgent(msg.ID, -32600,
-						"nockguard: tools/call rejected — tool name could not be extracted"); werr != nil {
-						return werr
-					}
-				}
-				continue
-			}
-
-			// Evaluate once: the verdict gates the call, and the basis (which rule
-			// matched) is recorded in the audit trail so a denial is explainable
-			// rather than an opaque "policy". The matched rule is kept OUT of the
-			// agent-facing error on purpose — revealing it would let a hostile
-			// agent map the policy surface — so it lands only in the log + audit.
-			dec := p.engine.Evaluate(p.agent, toolName)
-			if dec.Verdict == policy.Deny {
-				p.logger.Printf("DENY agent=%s tool=%s reason=%q", p.agent, toolName, dec.Reason)
-				p.audit(toolName, "deny", dec.Reason)
-				if werr := p.rejectToAgent(msg.ID, -32600,
-					fmt.Sprintf("nockguard: tool %q denied by policy", toolName)); werr != nil {
-					return werr
-				}
-				continue
-			}
-			// N8328: legacy require_approval is promoted to a hard `ask` and
-			// FAILS CLOSED when no approver is wired — identical to a native `ask`
-			// rule. Previously it set allowWithoutApprover=true here, which made the
-			// gate fail OPEN (a require_approval-covered call was treated as
-			// approval SUCCESS with no human in the loop). The default must be safe:
-			// no approver -> the call is blocked, not silently forwarded.
-			if dec.Verdict == policy.Allow && p.engine.RequiresApproval(p.agent, toolName) {
-				dec.Verdict = policy.Ask
-			}
-
-			// Phase 2: input validation on the canonical tool-call arguments
-			// (the bytes that will actually be forwarded).
-			if p.validator.Enabled() {
-				if hit := p.validator.CheckParams(canonicalParams); hit != "" {
-					p.logger.Printf("BLOCK agent=%s tool=%s rule=%s", p.agent, toolName, hit)
-					p.audit(toolName, "block", hit)
-					if werr := p.rejectToAgent(msg.ID, -32600,
-						fmt.Sprintf("nockguard: tool %q arguments blocked by input validation (%s)", toolName, hit)); werr != nil {
-						return werr
-					}
-					continue
-				}
-			}
-
-			// Phase 3: rate limiting + spend caps. Checked only for calls that
-			// have cleared policy and validation (i.e. would reach upstream), so
-			// denied/blocked calls never consume budget.
-			if p.limiter.Enabled() {
-				if reason, ok := p.limiter.Allow(); !ok {
-					p.logger.Printf("RATELIMIT agent=%s tool=%s reason=%s", p.agent, toolName, reason)
-					p.audit(toolName, "ratelimit", reason)
-					if werr := p.rejectToAgent(msg.ID, -32600,
-						fmt.Sprintf("nockguard: tool %q blocked: %s exceeded", toolName, limitLabel(reason))); werr != nil {
-						return werr
-					}
-					continue
-				}
-			}
-
-			if dec.Verdict == policy.Ask && !p.approveAsk(toolName, canonicalParams, dec) {
-				if werr := p.rejectToAgent(msg.ID, -32600,
-					fmt.Sprintf("nockguard: tool %q denied by approval gate", toolName)); werr != nil {
-					return werr
-				}
-				continue
-			}
-
-			// Cleared every gate — forward CANONICAL bytes, never the raw line.
-			// Swap the canonical params back into the (already top-level-canonical)
-			// message map and re-marshal, so the upstream sees exactly the name we
-			// gated, once, with every other top-level field preserved verbatim.
-			topLevel["params"] = canonicalParams
-			out, mErr := json.Marshal(topLevel)
-			if mErr != nil {
-				p.handleFailModeAsk(toolName, canonicalParams, "canonical-marshal-failed")
-				p.logger.Printf("DENY agent=%s tool=%s reason=canonical-marshal-failed", p.agent, toolName)
-				p.audit(toolName, "deny", "canonical-marshal-failed")
-				if werr := p.rejectToAgent(msg.ID, -32603,
-					"nockguard: tools/call rejected — could not canonicalize message"); werr != nil {
-					return werr
-				}
-				continue
-			}
-			p.logger.Printf("ALLOW agent=%s tool=%s", p.agent, toolName)
-			if dec.ShadowWouldDeny {
-				p.audit(toolName, "would-deny", dec.Reason)
-			}
-			p.audit(toolName, "allow", dec.Reason)
-			if _, writeErr := fmt.Fprintf(w, "%s\n", out); writeErr != nil {
-				return writeErr
-			}
-			continue
-		}
-
-		// tools/list (always a request) — track the id so the response can be
-		// filtered, then forward below.
-		if msg.IsRequest() && msg.Method == "tools/list" {
-			pending.Store(string(msg.ID), true)
-		}
-
-		// Non-tools/call traffic (initialize, tools/list, responses, other
-		// notifications) is not gated, but we forward the CANONICAL top-level
-		// bytes (not the raw line) so duplicate-key collapsing reaches upstream —
-		// a shadow "method" can't differ between the proxy's view and upstream's.
-		if _, writeErr := fmt.Fprintf(w, "%s\n", canonicalLine); writeErr != nil {
-			return writeErr
 		}
 	}
 	return scanner.Err()
+}
+
+// decide drives one inbound JSON-RPC line through the enforcement gate and
+// returns a transport-independent mcpDecision. It is the single source of
+// enforcement shared by the stdio proxy (agentToUpstream) and the HTTP listener
+// (HTTPListener.ServeHTTP) — the ordering deny → require_approval → validate →
+// rate-limit → approval and every audit/log side effect live here once, so the
+// two transports can never drift.
+func (p *StdioProxy) decide(line []byte) mcpDecision {
+	// Canonicalize the TOP-LEVEL message before doing anything else. Unmarshal
+	// into a map so any duplicate top-level keys (method, id, params, ...)
+	// collapse to Go's last-wins value, then re-marshal: the bytes the proxy
+	// gates and the bytes the upstream receives are now identical, so a
+	// first-key-wins upstream cannot read a different "method" (e.g. a second
+	// "method":"tools/list" hiding a "method":"tools/call"). A line that is not
+	// a single JSON object (batch array, malformed) fails here → fail CLOSED.
+	var topLevel map[string]json.RawMessage
+	if err := json.Unmarshal(line, &topLevel); err != nil {
+		p.logger.Printf("REJECT agent=%s reason=undecodable-or-batch", p.agent)
+		return mcpDecision{reject: true, rejectID: json.RawMessage("null"), rejectCode: -32700,
+			rejectMsg: "nockguard: rejected — only single well-formed JSON-RPC objects are accepted (batch arrays are not gated)"}
+	}
+	canonicalLine, err := json.Marshal(topLevel)
+	if err != nil {
+		p.handleFailModeAsk("", nil, "canonical-marshal-failed")
+		p.logger.Printf("REJECT agent=%s reason=canonical-marshal-failed", p.agent)
+		return mcpDecision{reject: true, rejectID: json.RawMessage("null"), rejectCode: -32603,
+			rejectMsg: "nockguard: rejected — message could not be canonicalized"}
+	}
+	msg, err := jsonrpc.Decode(canonicalLine)
+	if err != nil {
+		// canonicalLine is a valid JSON object, so Decode into the Message
+		// struct should not fail; if it somehow does, fail CLOSED.
+		p.logger.Printf("REJECT agent=%s reason=undecodable-after-canonicalize", p.agent)
+		return mcpDecision{reject: true, rejectID: json.RawMessage("null"), rejectCode: -32700,
+			rejectMsg: "nockguard: rejected — message is not a well-formed JSON-RPC object"}
+	}
+
+	// Gate tools/call by METHOD, regardless of id: a notification-form call
+	// (no id) must NOT slip past the gates. params are ALSO canonicalized so
+	// what we gate is exactly what we forward — closing duplicate-key and
+	// other parser-differential bypasses at both the top level and in params.
+	if msg.Method == "tools/call" {
+		return p.decideToolCall(msg, topLevel, canonicalLine)
+	}
+
+	// Non-tools/call traffic (initialize, tools/list, responses, other
+	// notifications) is not gated, but we forward the CANONICAL top-level bytes
+	// (not the raw line) so duplicate-key collapsing reaches upstream — a shadow
+	// "method" can't differ between the proxy's view and upstream's.
+	d := mcpDecision{forward: canonicalLine}
+	if msg.IsRequest() && msg.Method == "tools/list" {
+		d.toolsListID = msg.ID
+	}
+	return d
+}
+
+// decideToolCall runs the enforcement gate for a tools/call message. topLevel is
+// the already-top-level-canonicalized message map and canonicalLine its
+// re-marshaled bytes (used verbatim on the fail-closed unextractable-name path).
+func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]json.RawMessage, canonicalLine []byte) mcpDecision {
+	toolName, canonicalParams, ok := canonicalToolCall(msg.Params)
+	if !ok || toolName == "" {
+		// A tools/call whose name we cannot extract fails CLOSED — the
+		// upstream might still resolve a name the proxy could not see.
+		dec := p.engine.FailModeVerdict(p.agent, "unextractable-name")
+		if dec.Verdict == policy.Ask && p.approveAsk("", canonicalLine, dec) {
+			return mcpDecision{forward: canonicalLine}
+		}
+		p.logger.Printf("DENY agent=%s reason=unextractable-name", p.agent)
+		p.audit("", "deny", "unextractable-name")
+		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600,
+			rejectMsg: "nockguard: tools/call rejected — tool name could not be extracted"}
+	}
+
+	// Evaluate once: the verdict gates the call, and the basis (which rule
+	// matched) is recorded in the audit trail so a denial is explainable
+	// rather than an opaque "policy". The matched rule is kept OUT of the
+	// agent-facing error on purpose — revealing it would let a hostile
+	// agent map the policy surface — so it lands only in the log + audit.
+	dec := p.engine.Evaluate(p.agent, toolName)
+	if dec.Verdict == policy.Deny {
+		p.logger.Printf("DENY agent=%s tool=%s reason=%q", p.agent, toolName, dec.Reason)
+		p.audit(toolName, "deny", dec.Reason)
+		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
+			rejectMsg: fmt.Sprintf("nockguard: tool %q denied by policy", toolName)}
+	}
+	// N8328: legacy require_approval is promoted to a hard `ask` and
+	// FAILS CLOSED when no approver is wired — identical to a native `ask`
+	// rule. Previously it set allowWithoutApprover=true here, which made the
+	// gate fail OPEN (a require_approval-covered call was treated as
+	// approval SUCCESS with no human in the loop). The default must be safe:
+	// no approver -> the call is blocked, not silently forwarded.
+	if dec.Verdict == policy.Allow && p.engine.RequiresApproval(p.agent, toolName) {
+		dec.Verdict = policy.Ask
+	}
+
+	// Phase 2: input validation on the canonical tool-call arguments
+	// (the bytes that will actually be forwarded).
+	if p.validator.Enabled() {
+		if hit := p.validator.CheckParams(canonicalParams); hit != "" {
+			p.logger.Printf("BLOCK agent=%s tool=%s rule=%s", p.agent, toolName, hit)
+			p.audit(toolName, "block", hit)
+			return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
+				rejectMsg: fmt.Sprintf("nockguard: tool %q arguments blocked by input validation (%s)", toolName, hit)}
+		}
+	}
+
+	// Phase 3: rate limiting + spend caps. Checked only for calls that
+	// have cleared policy and validation (i.e. would reach upstream), so
+	// denied/blocked calls never consume budget.
+	if p.limiter.Enabled() {
+		if reason, ok := p.limiter.Allow(); !ok {
+			p.logger.Printf("RATELIMIT agent=%s tool=%s reason=%s", p.agent, toolName, reason)
+			p.audit(toolName, "ratelimit", reason)
+			return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
+				rejectMsg: fmt.Sprintf("nockguard: tool %q blocked: %s exceeded", toolName, limitLabel(reason))}
+		}
+	}
+
+	if dec.Verdict == policy.Ask && !p.approveAsk(toolName, canonicalParams, dec) {
+		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
+			rejectMsg: fmt.Sprintf("nockguard: tool %q denied by approval gate", toolName)}
+	}
+
+	// Cleared every gate — forward CANONICAL bytes, never the raw line.
+	// Swap the canonical params back into the (already top-level-canonical)
+	// message map and re-marshal, so the upstream sees exactly the name we
+	// gated, once, with every other top-level field preserved verbatim.
+	topLevel["params"] = canonicalParams
+	out, mErr := json.Marshal(topLevel)
+	if mErr != nil {
+		p.handleFailModeAsk(toolName, canonicalParams, "canonical-marshal-failed")
+		p.logger.Printf("DENY agent=%s tool=%s reason=canonical-marshal-failed", p.agent, toolName)
+		p.audit(toolName, "deny", "canonical-marshal-failed")
+		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32603, tool: toolName,
+			rejectMsg: "nockguard: tools/call rejected — could not canonicalize message"}
+	}
+	p.logger.Printf("ALLOW agent=%s tool=%s", p.agent, toolName)
+	if dec.ShadowWouldDeny {
+		p.audit(toolName, "would-deny", dec.Reason)
+	}
+	p.audit(toolName, "allow", dec.Reason)
+	return mcpDecision{forward: out, tool: toolName}
 }
 
 // approveAsk holds an `ask`-verdict call (native ask rules AND legacy
