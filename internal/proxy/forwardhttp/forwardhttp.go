@@ -231,6 +231,13 @@ func normalizeHost(host string) string {
 	return strings.ToLower(strings.Trim(host, "[]"))
 }
 
+// RemoveHopByHopHeaders strips the RFC 7230 hop-by-hop headers from h. It is the
+// exported entry point other proxies (e.g. the MCP HTTP listener) reuse so a
+// single list governs which headers must not be relayed across a proxy hop.
+func RemoveHopByHopHeaders(h http.Header) {
+	removeHopByHopHeaders(h)
+}
+
 func removeHopByHopHeaders(h http.Header) {
 	for _, k := range []string{
 		"Connection",
