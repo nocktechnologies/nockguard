@@ -13,6 +13,7 @@ import (
 	"bufio"
 	"context"
 	"embed"
+	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -213,18 +214,35 @@ func bucket(decision string) string {
 	}
 }
 
+// matches reports whether an event survives the wall's two filters: an exact
+// decision match and a case-insensitive substring over "agent tool". q must
+// already be lower-cased and trimmed (normalizeQuery). This is the SINGLE
+// predicate shared by the pulse aggregate (/pulse) and the raw export
+// (/export) so their filter semantics can never drift — a mismatch between
+// what the wall counts and what it exports would be a lie in an audit product.
+func matches(ev event, q, decision string) bool {
+	if decision != "" && ev.Decision != decision {
+		return false
+	}
+	if q != "" && !strings.Contains(strings.ToLower(ev.Agent+" "+ev.Tool), q) {
+		return false
+	}
+	return true
+}
+
+// normalizeQuery lower-cases and trims a raw ?q= filter so matches can compare
+// against it directly. Every caller normalizes once, up front.
+func normalizeQuery(q string) string { return strings.ToLower(strings.TrimSpace(q)) }
+
 // computePulse aggregates events into a pulse, honouring the same filters the
 // wall exposes (#46): a case-insensitive substring over "agent tool" and an
 // exact decision match. It is O(events-in-window) — a single pass, no re-scan.
 func computePulse(evs []event, q, decision string) pulse {
-	q = strings.ToLower(strings.TrimSpace(q))
+	q = normalizeQuery(q)
 	byAgent := map[string]int{}
 	var p pulse
 	for _, ev := range evs {
-		if decision != "" && ev.Decision != decision {
-			continue
-		}
-		if q != "" && !strings.Contains(strings.ToLower(ev.Agent+" "+ev.Tool), q) {
+		if !matches(ev, q, decision) {
 			continue
 		}
 		p.Total++
@@ -310,6 +328,67 @@ func (b *broker) handlePulse(w http.ResponseWriter, r *http.Request) {
 	p := computePulse(loadEvents(b.auditPath), r.URL.Query().Get("q"), r.URL.Query().Get("decision"))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(p)
+}
+
+// filterEvents returns the subset of the audit window that survives the wall's
+// ?q=/?decision= filters, in window order (oldest first). It shares the exact
+// matches predicate the pulse aggregate uses, so the export can never disagree
+// with the counts the wall shows for the same filter.
+func filterEvents(evs []event, q, decision string) []event {
+	q = normalizeQuery(q)
+	out := make([]event, 0, len(evs))
+	for _, ev := range evs {
+		if matches(ev, q, decision) {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// csvSafe neutralises spreadsheet formula injection: a field that begins with
+// =, +, -, or @ is treated as a formula by Excel/Sheets, so a reason or tool
+// name like "=cmd|'/c calc'!A1" could execute on open. Prefixing a single
+// quote forces the cell to render as literal text. NockGuard is a security
+// product; its own export must not become an injection vector.
+func csvSafe(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@':
+		return "'" + s
+	}
+	return s
+}
+
+// handleExport serves the current (filtered) audit window as a downloadable
+// file so a decision snapshot can land in a compliance report or incident
+// write-up. It honours the SAME ?q=/?decision= filters as /pulse and the
+// browser, defaults to CSV, and serves JSON on ?format=json. It exposes only
+// what /events and /pulse already serve over the same loopback bind — the
+// audit trail never records raw tool-call arguments — so it widens nothing.
+func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
+	evs := filterEvents(loadEvents(b.auditPath), r.URL.Query().Get("q"), r.URL.Query().Get("decision"))
+	if r.URL.Query().Get("format") == "json" {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Disposition", `attachment; filename="nockguard-wall.json"`)
+		_ = json.NewEncoder(w).Encode(evs)
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="nockguard-wall.csv"`)
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"ts", "agent", "tool", "decision", "severity", "reason"})
+	for _, ev := range evs {
+		_ = cw.Write([]string{
+			csvSafe(ev.Ts), csvSafe(ev.Agent), csvSafe(ev.Tool),
+			csvSafe(ev.Decision), csvSafe(ev.Severity), csvSafe(ev.Reason),
+		})
+	}
+	cw.Flush()
+	if err := cw.Error(); err != nil {
+		log.Printf("error writing export CSV: %v", err)
+	}
 }
 
 // tail follows path like `tail -f`, emitting each newly appended JSON line. On
@@ -419,6 +498,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/events", b.handleSSE)
 	mux.HandleFunc("/pulse", b.handlePulse)
+	mux.HandleFunc("/export", b.handleExport)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
