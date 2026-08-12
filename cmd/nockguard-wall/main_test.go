@@ -156,6 +156,17 @@ func TestCSVSafe(t *testing.T) {
 		"-1":                "'-1",
 		"@SUM(A1)":          "'@SUM(A1)",
 		"Bash: rm -rf /":    "Bash: rm -rf /", // leading 'B', not a formula lead
+		// OWASP also lists tab/CR/LF as formula-injection leads (a spreadsheet
+		// swallows them to reach the operator behind).
+		"\t=1+1": "'\t=1+1",
+		"\r=1+1": "'\r=1+1",
+		"\n=1+1": "'\n=1+1",
+		// Full-width Unicode operators normalise back to ASCII on import; these
+		// are multi-byte, so the byte-0 check the original used would miss them.
+		"＝1+1":   "'＝1+1",
+		"＋1":     "'＋1",
+		"－1":     "'－1",
+		"＠SUM()": "'＠SUM()",
 	}
 	for in, want := range cases {
 		if got := csvSafe(in); got != want {

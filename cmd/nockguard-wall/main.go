@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nocktechnologies/nockguard/internal/forward"
 )
@@ -345,17 +346,25 @@ func filterEvents(evs []event, q, decision string) []event {
 	return out
 }
 
-// csvSafe neutralises spreadsheet formula injection: a field that begins with
-// =, +, -, or @ is treated as a formula by Excel/Sheets, so a reason or tool
-// name like "=cmd|'/c calc'!A1" could execute on open. Prefixing a single
+// csvSafe neutralises spreadsheet formula injection: a field whose first rune
+// is a formula lead is treated as a formula by Excel/Sheets, so a reason or
+// tool name like "=cmd|'/c calc'!A1" could execute on open. Prefixing a single
 // quote forces the cell to render as literal text. NockGuard is a security
 // product; its own export must not become an injection vector.
+//
+// The dangerous leads, per OWASP CSV injection, are more than the ASCII
+// operators: a spreadsheet also swallows a leading tab/CR/LF to reach the
+// operator behind it, and normalises the full-width Unicode operators
+// ＝＋－＠ back to their ASCII form. Those runes are multi-byte, so we decode
+// the first rune rather than inspecting the first byte.
 func csvSafe(s string) string {
 	if s == "" {
 		return s
 	}
-	switch s[0] {
-	case '=', '+', '-', '@':
+	r, _ := utf8.DecodeRuneInString(s)
+	switch r {
+	case '=', '+', '-', '@', '\t', '\r', '\n',
+		'＝', '＋', '－', '＠':
 		return "'" + s
 	}
 	return s
