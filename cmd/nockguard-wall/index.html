@@ -163,6 +163,7 @@
         <option value="hide">hide</option>
       </select>
       <button class="toggle" id="f-clear" title="clear filters">✕ CLEAR</button>
+      <a class="toggle" id="f-export" title="download the current audit window (respects the active filters) as CSV" href="/export" download>⬇ EXPORT</a>
       <span class="fcount" id="f-count"></span>
     </div>
   </header>
@@ -225,7 +226,19 @@
   const fDecision = document.getElementById('f-decision');
   const fClear = document.getElementById('f-clear');
   const fCount = document.getElementById('f-count');
+  const fExport = document.getElementById('f-export');
   let fq = '', fdec = '';
+  // Build the /export URL from the SAME inputs that drive the row filter, so the
+  // downloaded file matches the filter the operator is looking at. The server
+  // re-applies the identical matches() predicate over the persisted window.
+  function syncExport() {
+    const p = new URLSearchParams();
+    const q = fText.value.trim();
+    if (q) p.set('q', q);
+    if (fDecision.value) p.set('decision', fDecision.value);
+    const qs = p.toString();
+    fExport.href = '/export' + (qs ? '?' + qs : '');
+  }
   function rowMatches(row) {
     if (fdec && (row.dataset.decision || '') !== fdec) return false;
     if (fq && ((row.dataset.agent || '') + ' ' + (row.dataset.tool || '')).indexOf(fq) === -1) return false;
@@ -245,6 +258,7 @@
       if (!out) shown++;
     }
     fCount.textContent = active ? (shown + ' / ' + tot + ' shown') : '';
+    syncExport();
     renderPulse();
   }
   fText.addEventListener('input', applyFilters);
