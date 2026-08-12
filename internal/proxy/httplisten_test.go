@@ -467,11 +467,16 @@ func TestHTTPListener_MCPProtocolHeadersPassthrough(t *testing.T) {
 // client-facing JSON-RPC error is a fixed message — it must NOT leak the raw
 // transport error, which carries the upstream URL and internal host/port.
 func TestHTTPListener_UpstreamErrorNotEchoed(t *testing.T) {
-	// Allow policy so the call reaches the forward path, pointed at a refused
-	// port so client.Do returns a *url.Error naming the upstream address.
-	const unreachable = "http://127.0.0.1:1/mcp"
+	// Allow policy so the call reaches the forward path. A CLOSED httptest server
+	// gives a deterministic connection refusal on its ephemeral port without
+	// depending on a magic port number (which another process could bind or a
+	// network policy could stall until the transport timeout).
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadAddr := strings.TrimPrefix(dead.URL, "http://") // capture before Close, for the leak check
+	dead.Close()
+
 	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
-	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", unreachable, gate, log.New(io.Discard, "", 0)))
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", dead.URL+"/mcp", gate, log.New(io.Discard, "", 0)))
 	defer lsrv.Close()
 
 	status, body, _ := post(t, lsrv.URL, toolCall("1", "nockcc_nock_list"))
@@ -481,7 +486,8 @@ func TestHTTPListener_UpstreamErrorNotEchoed(t *testing.T) {
 	if !strings.Contains(body, "upstream unreachable") {
 		t.Errorf("body should carry the fixed message: %s", body)
 	}
-	if strings.Contains(body, "127.0.0.1:1") || strings.Contains(body, "dial") {
+	// The fixed message must not leak the upstream address or transport detail.
+	if strings.Contains(body, deadAddr) || strings.Contains(body, "dial") || strings.Contains(body, "connect") {
 		t.Errorf("client-facing error leaked the raw upstream detail: %s", body)
 	}
 }
