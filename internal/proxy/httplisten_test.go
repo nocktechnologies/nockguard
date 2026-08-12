@@ -428,6 +428,64 @@ func TestHTTPListener_AuthAndSessionPassthrough(t *testing.T) {
 	}
 }
 
+// TestHTTPListener_MCPProtocolHeadersPassthrough: the Streamable-HTTP protocol
+// headers the connector owns — MCP-Protocol-Version (mandatory on every POST)
+// and Last-Event-ID (SSE resumption) — are forwarded upstream unchanged.
+func TestHTTPListener_MCPProtocolHeadersPassthrough(t *testing.T) {
+	var gotVersion, gotLastEvent string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotVersion = r.Header.Get("MCP-Protocol-Version")
+		gotLastEvent = r.Header.Get("Last-Event-ID")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer upstream.Close()
+
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	defer lsrv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, lsrv.URL, strings.NewReader(toolCall("1", "nockcc_nock_list")))
+	req.Header.Set("MCP-Protocol-Version", "2026-07-28")
+	req.Header.Set("Last-Event-ID", "42")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	if gotVersion != "2026-07-28" {
+		t.Errorf("upstream MCP-Protocol-Version = %q, want the connector's version forwarded", gotVersion)
+	}
+	if gotLastEvent != "42" {
+		t.Errorf("upstream Last-Event-ID = %q, want the connector's resumption id forwarded", gotLastEvent)
+	}
+}
+
+// TestHTTPListener_UpstreamErrorNotEchoed: when the upstream is unreachable, the
+// client-facing JSON-RPC error is a fixed message — it must NOT leak the raw
+// transport error, which carries the upstream URL and internal host/port.
+func TestHTTPListener_UpstreamErrorNotEchoed(t *testing.T) {
+	// Allow policy so the call reaches the forward path, pointed at a refused
+	// port so client.Do returns a *url.Error naming the upstream address.
+	const unreachable = "http://127.0.0.1:1/mcp"
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", unreachable, gate, log.New(io.Discard, "", 0)))
+	defer lsrv.Close()
+
+	status, body, _ := post(t, lsrv.URL, toolCall("1", "nockcc_nock_list"))
+	if status != http.StatusOK {
+		t.Errorf("status = %d, want 200 (JSON-RPC error body)", status)
+	}
+	if !strings.Contains(body, "upstream unreachable") {
+		t.Errorf("body should carry the fixed message: %s", body)
+	}
+	if strings.Contains(body, "127.0.0.1:1") || strings.Contains(body, "dial") {
+		t.Errorf("client-facing error leaked the raw upstream detail: %s", body)
+	}
+}
+
 // TestRequireLoopback guards the bind: only explicit loopback hosts are allowed,
 // because the loopback listener receives a live bearer token.
 func TestRequireLoopback(t *testing.T) {

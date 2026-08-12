@@ -54,17 +54,22 @@ type HTTPListener struct {
 // allowed calls to the upstream MCP endpoint (e.g.
 // https://cc.nocktechnologies.io/mcp).
 func NewHTTPListener(listen, upstream string, gate *StdioProxy, logger *log.Logger) *HTTPListener {
+	// Clone DefaultTransport rather than build a bare one, so we inherit its
+	// DialContext timeout, TLSHandshakeTimeout, and HTTP(S)_PROXY/NO_PROXY
+	// handling. A zero-value Transport has none of those: a TCP connect or TLS
+	// handshake to an unreachable upstream would hang unbounded because
+	// ResponseHeaderTimeout only starts after the request is written.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Bound only the time-to-first-response-header. We deliberately do NOT set
+	// Client.Timeout (it also bounds body reads and would sever a long-lived SSE
+	// stream mid-flight); the streamed body stays uncapped.
+	transport.ResponseHeaderTimeout = 60 * time.Second
 	return &HTTPListener{
 		gate:     gate,
 		listen:   listen,
 		upstream: upstream,
 		logger:   logger,
-		client: &http.Client{
-			// No Client.Timeout: it also bounds body reads and would sever a
-			// long-lived SSE stream mid-flight. Bound only the time-to-first-header
-			// on the transport, leaving the streamed body uncapped.
-			Transport: &http.Transport{ResponseHeaderTimeout: 60 * time.Second},
-		},
+		client:   &http.Client{Transport: transport},
 	}
 }
 
@@ -198,11 +203,28 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 	if sid := r.Header.Get("Mcp-Session-Id"); sid != "" {
 		req.Header.Set("Mcp-Session-Id", sid)
 	}
+	// Streamable-HTTP protocol headers the spec requires the client to carry and
+	// the server to honour: MCP-Protocol-Version pins the negotiated version on
+	// every POST (a dropped header makes the upstream fall back or reject), and
+	// Last-Event-ID is how the connector resumes an interrupted SSE stream. We
+	// relay only the specific headers the connector owns rather than blanket-
+	// copying its request headers, because this proxy re-emits a CANONICAL body:
+	// forwarding the client's Content-Length/Content-Type would then describe the
+	// wrong bytes. Content-Type/Accept stay proxy-managed above.
+	if pv := r.Header.Get("MCP-Protocol-Version"); pv != "" {
+		req.Header.Set("MCP-Protocol-Version", pv)
+	}
+	if leid := r.Header.Get("Last-Event-ID"); leid != "" {
+		req.Header.Set("Last-Event-ID", leid)
+	}
 
 	resp, err := l.client.Do(req)
 	if err != nil {
+		// Log the full transport/DNS detail but do NOT echo it to the client: a
+		// *url.Error carries the upstream URL and internal host/port, and Go
+		// redacts only a userinfo password, so a fixed message is returned instead.
 		l.logger.Printf("UPSTREAM-ERROR agent=%s: %v", l.gate.agent, err)
-		l.writeJSONRPCError(w, json.RawMessage("null"), -32603, "nockguard: upstream unreachable: "+err.Error())
+		l.writeJSONRPCError(w, json.RawMessage("null"), -32603, "nockguard: upstream unreachable")
 		return
 	}
 	defer resp.Body.Close()
