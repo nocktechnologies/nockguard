@@ -200,6 +200,40 @@ func TestPolicyShadowReportCommandCountsWouldDeny(t *testing.T) {
 	}
 }
 
+func TestMCPListenUsageIncludesUpstream(t *testing.T) {
+	code, _, stderr := runCommandForTest(t, "--help")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "nockguard mcp-listen --listen 127.0.0.1:<port> --upstream <url> --agent <name> --policy <path> [--audit <path>]") {
+		t.Fatalf("usage should document mcp-listen with --upstream, got:\n%s", stderr)
+	}
+}
+
+func TestMCPListenCommandRejectsNonLoopbackListen(t *testing.T) {
+	dir := t.TempDir()
+	policyPath := filepath.Join(dir, "policy.yaml")
+	if err := os.WriteFile(policyPath, []byte("agents:\n  ash:\n    mode: allow\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	auditPath := filepath.Join(dir, "ash.audit.jsonl")
+
+	code, stdout, stderr := runCommandForTest(t,
+		"mcp-listen",
+		"--listen", "0.0.0.0:0",
+		"--upstream", "http://127.0.0.1:9/mcp",
+		"--agent", "ash",
+		"--policy", policyPath,
+		"--audit", auditPath,
+	)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "must be a loopback address") {
+		t.Fatalf("stderr should report loopback-only bind rejection, got:\n%s", stderr)
+	}
+}
+
 func runCommandForTest(t *testing.T, args ...string) (int, string, string) {
 	t.Helper()
 	oldStdout := os.Stdout
