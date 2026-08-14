@@ -484,7 +484,8 @@ func runMCPListen(args []string) int {
 		fmt.Fprintln(os.Stderr, "error: --upstream is required (the HTTP MCP upstream URL, e.g. https://cc.nocktechnologies.io/mcp)")
 		return 1
 	}
-	if u, err := url.Parse(upstream); err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+	parsedUpstream, err := url.Parse(upstream)
+	if err != nil || parsedUpstream.Host == "" || (parsedUpstream.Scheme != "http" && parsedUpstream.Scheme != "https") {
 		fmt.Fprintf(os.Stderr, "error: --upstream must be an absolute HTTP MCP URL: %q\n", upstream)
 		return 1
 	}
@@ -536,7 +537,11 @@ func runMCPListen(args []string) int {
 		fmt.Fprintf(os.Stderr, "error opening audit trail: %v\n", err)
 		return 1
 	}
-	defer auditor.Close()
+	defer func() {
+		if cerr := auditor.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "[nockguard-mcp-listen] error closing audit trail: %v\n", cerr)
+		}
+	}()
 
 	forwarder, err := engine.Forwarder()
 	if err != nil {
@@ -547,7 +552,7 @@ func runMCPListen(args []string) int {
 	defer forwarder.Stop()
 
 	logger := log.New(os.Stderr, "[nockguard-mcp-listen] ", log.LstdFlags)
-	logger.Printf("starting MCP enforcement listener listen=%s upstream=%s agent=%s policy=%s", listen, upstream, agent, policyPath)
+	logger.Printf("starting MCP enforcement listener listen=%s upstream=%s agent=%s policy=%s", listen, parsedUpstream.Redacted(), agent, policyPath)
 
 	gate := proxy.NewStdioProxy(nil, agent, engine, validator, limiter, auditor, forwarder, logger).
 		WithTrust(trustAccumulator).
@@ -1324,7 +1329,7 @@ Usage:
   nockguard init [--policy <path>] [--force]
   nockguard proxy --upstream <command> --agent <name> [--policy <path>]
   nockguard mcp-http --upstream <url> --agent <name> [--policy <path>] [--auth-env <ENV>]
-  nockguard mcp-listen --listen 127.0.0.1:<port> --upstream <url> --agent <name> --policy <path> [--audit <path>]
+  nockguard mcp-listen --listen 127.0.0.1:<port> --upstream <url> --agent <name> [--policy <path>] [--audit <path>]
   nockguard egress-proxy --listen <addr> --agent <name> --policy <path> [--audit <path>] [--enforce]
   nockguard verify (--all | --agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
   nockguard selftest [--policy <path>] [--json]
