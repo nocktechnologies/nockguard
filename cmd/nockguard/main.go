@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -110,6 +111,10 @@ func runCLI(args []string) int {
 
 	if args[0] == "egress-proxy" {
 		return runEgressProxy(args[1:])
+	}
+
+	if args[0] == "mcp-listen" {
+		return runMCPListen(args[1:])
 	}
 
 	if args[0] == "mcp-http" {
@@ -427,6 +432,136 @@ func runEgressProxy(args []string) int {
 	defer stop()
 	if err := forwardhttp.New(listen, agent, engine, auditor, logger).WithEnforce(enforce).Run(ctx); err != nil {
 		logger.Printf("egress proxy error: %v", err)
+		return 1
+	}
+	return 0
+}
+
+func runMCPListen(args []string) int {
+	var (
+		listen     string
+		upstream   string
+		agent      string
+		policyPath string
+		auditPath  string
+	)
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--listen":
+			if i+1 < len(args) {
+				i++
+				listen = args[i]
+			}
+		case "--upstream":
+			if i+1 < len(args) {
+				i++
+				upstream = args[i]
+			}
+		case "--agent":
+			if i+1 < len(args) {
+				i++
+				agent = args[i]
+			}
+		case "--policy":
+			if i+1 < len(args) {
+				i++
+				policyPath = args[i]
+			}
+		case "--audit":
+			if i+1 < len(args) {
+				i++
+				auditPath = args[i]
+			}
+		}
+	}
+
+	if listen == "" {
+		fmt.Fprintln(os.Stderr, "error: --listen is required")
+		return 1
+	}
+	if upstream == "" {
+		fmt.Fprintln(os.Stderr, "error: --upstream is required (the HTTP MCP upstream URL, e.g. https://cc.nocktechnologies.io/mcp)")
+		return 1
+	}
+	parsedUpstream, err := url.Parse(upstream)
+	if err != nil || parsedUpstream.Host == "" || (parsedUpstream.Scheme != "http" && parsedUpstream.Scheme != "https") {
+		fmt.Fprintf(os.Stderr, "error: --upstream must be an absolute HTTP MCP URL: %q\n", upstream)
+		return 1
+	}
+	if agent == "" {
+		fmt.Fprintln(os.Stderr, "error: --agent is required")
+		return 1
+	}
+	if policyPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+			return 1
+		}
+		policyPath = home + "/.nockguard/policy.yaml"
+	}
+
+	engine, err := policy.Load(policyPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error loading policy %s: %v\n", policyPath, err)
+		return 1
+	}
+	if !engine.HasPolicyFor(agent) {
+		fmt.Fprintf(os.Stderr, "warning: no policy for agent %q and no \"default\" — ALL tools will be DENIED (fail-closed). Add an agent or \"default\" policy in %s.\n", agent, policyPath)
+	}
+
+	validator, err := engine.ValidatorFor(agent)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error building input validator for agent %s: %v\n", agent, err)
+		return 1
+	}
+	limiter, err := engine.LimiterFor(agent)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error building rate limiter for agent %s: %v\n", agent, err)
+		return 1
+	}
+	trustAccumulator, err := engine.TrustFor(agent)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error building trust accumulator for agent %s: %v\n", agent, err)
+		return 1
+	}
+
+	var auditor *audit.Auditor
+	if auditPath != "" {
+		auditor, err = engine.AuditorAt(auditPath)
+	} else {
+		auditor, err = engine.AuditorFor(agent)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error opening audit trail: %v\n", err)
+		return 1
+	}
+	defer func() {
+		if cerr := auditor.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "[nockguard-mcp-listen] error closing audit trail: %v\n", cerr)
+		}
+	}()
+
+	forwarder, err := engine.Forwarder()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error configuring ops-log forwarder: %v\n", err)
+		return 1
+	}
+	forwarder.Start()
+	defer forwarder.Stop()
+
+	logger := log.New(os.Stderr, "[nockguard-mcp-listen] ", log.LstdFlags)
+	logger.Printf("starting MCP enforcement listener listen=%s upstream=%s agent=%s policy=%s", listen, parsedUpstream.Redacted(), agent, policyPath)
+
+	gate := proxy.NewStdioProxy(nil, agent, engine, validator, limiter, auditor, forwarder, logger).
+		WithTrust(trustAccumulator).
+		WithApprover(buildApprover(logger))
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := proxy.NewHTTPListener(listen, upstream, gate, logger).Run(ctx); err != nil {
+		logger.Printf("mcp-listen error: %v", err)
 		return 1
 	}
 	return 0
@@ -1194,6 +1329,7 @@ Usage:
   nockguard init [--policy <path>] [--force]
   nockguard proxy --upstream <command> --agent <name> [--policy <path>]
   nockguard mcp-http --upstream <url> --agent <name> [--policy <path>] [--auth-env <ENV>]
+  nockguard mcp-listen --listen 127.0.0.1:<port> --upstream <url> --agent <name> [--policy <path>] [--audit <path>]
   nockguard egress-proxy --listen <addr> --agent <name> --policy <path> [--audit <path>] [--enforce]
   nockguard verify (--all | --agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
   nockguard selftest [--policy <path>] [--json]
@@ -1206,9 +1342,9 @@ Usage:
   nockguard version
 
 Options:
-  --upstream         MCP server command to proxy (for: proxy) or HTTP MCP upstream URL (for: mcp-http)
+  --upstream         MCP server command to proxy (for: proxy) or HTTP MCP upstream URL (for: mcp-http, mcp-listen)
   --auth-env         Env var whose value is sent as the Authorization header to the HTTP upstream (for: mcp-http)
-  --listen           HTTP/HTTPS forward-proxy listen address (for: egress-proxy)
+  --listen           Listen address (for: mcp-listen use explicit loopback only; for: egress-proxy)
   --agent            Agent identity for policy lookup / per-agent keypair flow
   --policy           Path to policy YAML (default: ~/.nockguard/policy.yaml)
   --enforce          Block denied egress hosts (returns 403); default is observe-only (logs but allows)
@@ -1237,6 +1373,7 @@ Examples:
   nockguard init                                        # scaffold a default-deny starter policy
   nockguard proxy --upstream "npx mcp-server-nockcc" --agent kit --policy policy.yaml
   nockguard mcp-http --upstream https://cc.nocktechnologies.io/mcp --agent mira --auth-env NOCKCC_MCP_AUTH
+  nockguard mcp-listen --listen 127.0.0.1:8790 --upstream https://cc.nocktechnologies.io/mcp --agent mira --policy policy.yaml
   nockguard egress-proxy --listen 127.0.0.1:8899 --agent kit --policy egress.yaml
   nockguard keygen --agent kit                          # generate per-agent keypair
   nockguard verify --agent kit                          # prove kit's trail is intact + non-repudiable (exit 0 = clean, 2 = tampered)
