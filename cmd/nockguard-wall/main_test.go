@@ -202,12 +202,14 @@ func TestHandleExportCSV(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	b := newBroker()
 	b.auditPath = f.Name()
 
-	req := httptest.NewRequest(http.MethodGet, "/export?decision=block", nil)
+	req := httptest.NewRequest(http.MethodGet, "/export?decision=block", nil).WithContext(t.Context())
 	rec := httptest.NewRecorder()
 	b.handleExport(rec, req)
 
@@ -249,13 +251,17 @@ func TestHandleExportJSON(t *testing.T) {
 		{Ts: "t2", Agent: "ash", Tool: "Edit", Decision: "block", Reason: "x"},
 	} {
 		b, _ := json.Marshal(ev)
-		f.Write(append(b, '\n'))
+		if _, err := f.Write(append(b, '\n')); err != nil {
+			t.Fatal(err)
+		}
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	b := newBroker()
 	b.auditPath = f.Name()
-	req := httptest.NewRequest(http.MethodGet, "/export?format=json&decision=allow", nil)
+	req := httptest.NewRequest(http.MethodGet, "/export?format=json&decision=allow", nil).WithContext(t.Context())
 	rec := httptest.NewRecorder()
 	b.handleExport(rec, req)
 
@@ -296,6 +302,25 @@ func writeSignedTrail(t *testing.T, path string, priv ed25519.PrivateKey, evs []
 	}
 }
 
+// writeHMACTrail records the given events into an HMAC-signed trail through the
+// REAL auditor (WithSigningKey), so the .hwm sidecar and chain are produced
+// exactly as in production — the symmetric counterpart to writeSignedTrail.
+func writeHMACTrail(t *testing.T, path string, key []byte, evs []audit.Event) {
+	t.Helper()
+	a, err := audit.New(path, audit.WithSigningKey(key))
+	if err != nil {
+		t.Fatalf("audit.New: %v", err)
+	}
+	for _, ev := range evs {
+		if err := a.Record(ev); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
 func sampleTrailEvents() []audit.Event {
 	return []audit.Event{
 		{Agent: "kit", Tool: "Read", Decision: "allow"},
@@ -306,7 +331,7 @@ func sampleTrailEvents() []audit.Event {
 
 func doVerify(t *testing.T, b *broker) verifyReport {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/verify", nil)
+	req := httptest.NewRequest(http.MethodGet, "/verify", nil).WithContext(t.Context())
 	w := httptest.NewRecorder()
 	b.handleVerify(w, req)
 	res := w.Result()
@@ -376,6 +401,71 @@ func TestVerifyEndpoint(t *testing.T) {
 	}
 	if rep.Detail == nil || *rep.Detail == "" {
 		t.Fatal("tampered trail: expected a non-empty detail")
+	}
+}
+
+// TestVerifyEndpointHMAC exercises the modeHMAC branch of the verifier — the
+// default: case that calls audit.Verify — which the Ed25519 tests never reach.
+// The trusted HMAC key is sourced SERVER-SIDE by env-var name (--verify-key-env),
+// exactly as the wall resolves it in production. A clean HMAC trail verifies
+// intact; tampering the middle entry breaks the chain at entry 2.
+func TestVerifyEndpointHMAC(t *testing.T) {
+	key := []byte("test-hmac-audit-key-not-a-real-secret")
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeHMACTrail(t, path, key, sampleTrailEvents())
+
+	t.Setenv("NOCKGUARD_TEST_AUDIT_HMAC", string(key))
+	// pubEnv MUST be "": Ed25519 takes precedence in newVerifier, so a populated
+	// pub env would silently route to modeEd25519 and this would not test HMAC.
+	v, err := newVerifier("", "NOCKGUARD_TEST_AUDIT_HMAC")
+	if err != nil {
+		t.Fatalf("newVerifier: %v", err)
+	}
+	if v.mode != modeHMAC {
+		t.Fatalf("verifier mode = %d, want modeHMAC (%d)", v.mode, modeHMAC)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = v
+
+	// Clean trail: chain intact, all three entries verified, no break.
+	rep := doVerify(t, b)
+	if rep.ChainIntact == nil || !*rep.ChainIntact {
+		t.Fatalf("clean HMAC trail: chain_intact = %v, want true", rep.ChainIntact)
+	}
+	if rep.EntriesVerified != 3 {
+		t.Fatalf("clean HMAC trail: entries_verified = %d, want 3", rep.EntriesVerified)
+	}
+	if rep.BreakAt != nil {
+		t.Fatalf("clean HMAC trail: break_at = %v, want nil", *rep.BreakAt)
+	}
+
+	// Tamper the MIDDLE entry so the break lands inside the scan loop (entry 2),
+	// not the post-scan .hwm path — a deterministic, mid-chain break.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(string(data), `"decision":"block"`, `"decision":"allow"`, 1)
+	if tampered == string(data) {
+		t.Fatal("tamper replacement did not change the trail")
+	}
+	if err := os.WriteFile(path, []byte(tampered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rep = doVerify(t, b)
+	if rep.ChainIntact == nil || *rep.ChainIntact {
+		t.Fatalf("tampered HMAC trail: chain_intact = %v, want false", rep.ChainIntact)
+	}
+	if rep.BreakAt == nil || *rep.BreakAt != 2 {
+		t.Fatalf("tampered HMAC trail: break_at = %v, want 2", rep.BreakAt)
+	}
+	if rep.EntriesVerified != 1 {
+		t.Fatalf("tampered HMAC trail: entries_verified = %d, want 1 (the entry before the break)", rep.EntriesVerified)
+	}
+	if rep.Detail == nil || *rep.Detail == "" {
+		t.Fatal("tampered HMAC trail: expected a non-empty detail")
 	}
 }
 
