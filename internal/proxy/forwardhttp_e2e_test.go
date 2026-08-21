@@ -38,6 +38,21 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
+func waitForBufferContains(t *testing.T, b *syncBuffer, needle string) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s := b.String()
+		if strings.Contains(s, needle) {
+			return s
+		}
+		if time.Now().After(deadline) {
+			return s
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestEgressProxyObserveOnlyAuditsAndDoesNotBlock(t *testing.T) {
 	binary := buildBinary(t)
 	dir := t.TempDir()
@@ -140,8 +155,9 @@ agents:
 			t.Fatalf("audit record %d = %v, want agent kit tool %q decision %q with signature", i, lines[i], w.tool, w.decision)
 		}
 	}
-	if !strings.Contains(stderr.String(), "WOULD-BLOCK (observe-only)") {
-		t.Fatalf("deny was not WARN-logged as observe-only; stderr:\n%s", stderr.String())
+	stderrText := waitForBufferContains(t, stderr, "WOULD-BLOCK (observe-only)")
+	if !strings.Contains(stderrText, "WOULD-BLOCK (observe-only)") {
+		t.Fatalf("deny was not WARN-logged as observe-only; stderr:\n%s", stderrText)
 	}
 
 	verify := func() (string, int) {
