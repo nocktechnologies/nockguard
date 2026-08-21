@@ -2,15 +2,20 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nocktechnologies/nockguard/internal/audit"
 )
 
 func TestBrokerUnregisterDoesNotDependOnBackgroundRunLoop(t *testing.T) {
@@ -106,7 +111,9 @@ func TestReplayHistoryLogsScannerErrors(t *testing.T) {
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(previousWriter) })
 
-	replayHistory(f.Name(), &bytes.Buffer{})
+	b := newBroker()
+	b.auditPath = f.Name()
+	b.replayHistory(&bytes.Buffer{})
 
 	if !strings.Contains(logs.String(), "error replaying history") {
 		t.Fatalf("expected scanner error log, got %q", logs.String())
@@ -266,4 +273,190 @@ func TestHandleExportJSON(t *testing.T) {
 	if out[0].Severity == "" {
 		t.Fatalf("expected derived severity on exported event, got empty")
 	}
+}
+
+// --- audit-chain verification (N9868) ---------------------------------------
+
+// writeSignedTrail records the given events into an Ed25519-signed trail through
+// the REAL auditor, so the .hwm sidecar and chain are produced exactly as in
+// production. Tests then tamper the file in place to synthesize a chain break.
+func writeSignedTrail(t *testing.T, path string, priv ed25519.PrivateKey, evs []audit.Event) {
+	t.Helper()
+	a, err := audit.New(path, audit.WithEd25519Key(priv))
+	if err != nil {
+		t.Fatalf("audit.New: %v", err)
+	}
+	for _, ev := range evs {
+		if err := a.Record(ev); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func sampleTrailEvents() []audit.Event {
+	return []audit.Event{
+		{Agent: "kit", Tool: "Read", Decision: "allow"},
+		{Agent: "ash", Tool: "Bash", Decision: "block", Reason: "secret-exfil"},
+		{Agent: "vale", Tool: "WebFetch", Decision: "ratelimit", Reason: "rate"},
+	}
+}
+
+func doVerify(t *testing.T, b *broker) verifyReport {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/verify", nil)
+	w := httptest.NewRecorder()
+	b.handleVerify(w, req)
+	res := w.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("/verify status = %d, want 200", res.StatusCode)
+	}
+	var rep verifyReport
+	if err := json.NewDecoder(res.Body).Decode(&rep); err != nil {
+		t.Fatalf("decode /verify: %v", err)
+	}
+	return rep
+}
+
+// TestVerifyEndpoint proves /verify reports a clean chain as intact and flags a
+// tampered chain with the break index, sourcing the trusted key SERVER-SIDE by
+// env-var name (decision b) — never a request parameter.
+func TestVerifyEndpoint(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+
+	t.Setenv("NOCKGUARD_TEST_AUDIT_PUB", hex.EncodeToString(pub))
+	v, err := newVerifier("NOCKGUARD_TEST_AUDIT_PUB", "")
+	if err != nil {
+		t.Fatalf("newVerifier: %v", err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = v
+
+	// Clean trail: chain intact, all three entries verified, no break.
+	rep := doVerify(t, b)
+	if rep.ChainIntact == nil || !*rep.ChainIntact {
+		t.Fatalf("clean trail: chain_intact = %v, want true", rep.ChainIntact)
+	}
+	if rep.EntriesVerified != 3 {
+		t.Fatalf("clean trail: entries_verified = %d, want 3", rep.EntriesVerified)
+	}
+	if rep.BreakAt != nil {
+		t.Fatalf("clean trail: break_at = %v, want nil", *rep.BreakAt)
+	}
+
+	// Tamper the MIDDLE entry — flip the recorded block to allow. A mid-line edit
+	// yields a deterministic break at entry 2.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(string(data), `"decision":"block"`, `"decision":"allow"`, 1)
+	if tampered == string(data) {
+		t.Fatal("tamper replacement did not change the trail")
+	}
+	if err := os.WriteFile(path, []byte(tampered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rep = doVerify(t, b)
+	if rep.ChainIntact == nil || *rep.ChainIntact {
+		t.Fatalf("tampered trail: chain_intact = %v, want false", rep.ChainIntact)
+	}
+	if rep.BreakAt == nil || *rep.BreakAt != 2 {
+		t.Fatalf("tampered trail: break_at = %v, want 2", rep.BreakAt)
+	}
+	if rep.EntriesVerified != 1 {
+		t.Fatalf("tampered trail: entries_verified = %d, want 1 (the entry before the break)", rep.EntriesVerified)
+	}
+	if rep.Detail == nil || *rep.Detail == "" {
+		t.Fatal("tampered trail: expected a non-empty detail")
+	}
+}
+
+// TestReplayHistoryEnrichesVerifyState proves per-event enrichment: replay tags
+// entries before the break "ok", the broken entry "broken", and everything after
+// it "unknown".
+func TestReplayHistoryEnrichesVerifyState(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(string(data), `"decision":"block"`, `"decision":"allow"`, 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("NOCKGUARD_TEST_AUDIT_PUB2", hex.EncodeToString(pub))
+	v, err := newVerifier("NOCKGUARD_TEST_AUDIT_PUB2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = v
+
+	var buf bytes.Buffer
+	b.replayHistory(&buf)
+
+	states := replayedVerifyStates(t, &buf)
+	want := []string{"ok", "broken", "unknown"}
+	if len(states) != len(want) {
+		t.Fatalf("enriched %d events, want %d (%v)", len(states), len(want), states)
+	}
+	for i := range want {
+		if states[i] != want[i] {
+			t.Fatalf("event %d verifyState = %q, want %q (all: %v)", i, states[i], want[i], states)
+		}
+	}
+}
+
+// TestVerifyDisabledIsUnknown proves that with no key configured the wall reports
+// chain_intact:null (not false) so the tamper banner never falsely fires, and
+// live events fall back to "unknown".
+func TestVerifyDisabledIsUnknown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeSignedTrail(t, path, ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)), sampleTrailEvents())
+
+	// Point at an env var that is not set → verifier disabled.
+	v, err := newVerifier("NOCKGUARD_TEST_UNSET_ENV", "")
+	if err != nil {
+		t.Fatalf("newVerifier: %v", err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = v
+
+	rep := doVerify(t, b)
+	if rep.ChainIntact != nil {
+		t.Fatalf("disabled verifier: chain_intact = %v, want null", *rep.ChainIntact)
+	}
+	if got := b.tailState(); got != "unknown" {
+		t.Fatalf("tailState = %q, want unknown", got)
+	}
+}
+
+func replayedVerifyStates(t *testing.T, buf *bytes.Buffer) []string {
+	t.Helper()
+	var out []string
+	for _, ln := range strings.Split(buf.String(), "\n") {
+		ln = strings.TrimSpace(ln)
+		if !strings.HasPrefix(ln, "data: ") {
+			continue
+		}
+		var ev event
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(ln, "data: ")), &ev); err != nil {
+			t.Fatalf("unmarshal replayed event: %v", err)
+		}
+		out = append(out, ev.VerifyState)
+	}
+	return out
 }
