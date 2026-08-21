@@ -110,19 +110,16 @@ func (b *broker) refreshSnapshot() verifyReport {
 	return rep
 }
 
-// tailState is the per-event badge for a LIVE (tailed) event. A new entry appends
-// onto the tip: if the cached chain is intact it inherits "ok"; if a break was
-// detected upstream, or no key is configured, the tip is untrusted → "unknown".
-// Live events are never marked "broken" here — a broken historical entry carries
-// that in replay, and the loud live signal is the /verify-driven banner.
+// tailState is the per-event badge for a LIVE (tailed) event. A live-tailed entry
+// has NOT been individually server-verified at tail time, so it is always pending
+// re-verify → "unknown". "ok" means server-verified and is assigned only by the
+// replay/snapshot path (lineState) once a /verify cycle confirms the entry chains
+// clean; "broken" likewise comes from that path when an entry's signature fails.
+// A live tip must never inherit "ok" from an intact cached snapshot — a freshly
+// appended, not-yet-verified entry would then wear the verified badge for up to a
+// poll interval, a false positive. The loud live tamper signal is the
+// /verify-driven banner, not the tip badge.
 func (b *broker) tailState() string {
-	if !b.verifier.enabled() {
-		return "unknown"
-	}
-	rep := b.snapshot()
-	if rep.ChainIntact != nil && *rep.ChainIntact {
-		return "ok"
-	}
 	return "unknown"
 }
 

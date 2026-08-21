@@ -534,6 +534,39 @@ func TestVerifyDisabledIsUnknown(t *testing.T) {
 	}
 }
 
+// TestTailTipPendingOnIntactChain proves that a LIVE tailed entry badges as
+// "unknown" (pending re-verify) even when the cached snapshot reports an intact,
+// server-verified chain. A live tip has not been individually verified at tail
+// time, so it must not inherit "ok" from an intact snapshot — that would let a
+// freshly appended, not-yet-verified (possibly tampered) entry wear the verified
+// badge until the next /verify cycle. "ok" is earned only via the replay/snapshot
+// path once /verify confirms the entry.
+func TestTailTipPendingOnIntactChain(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+
+	t.Setenv("NOCKGUARD_TEST_AUDIT_PUB", hex.EncodeToString(pub))
+	v, err := newVerifier("NOCKGUARD_TEST_AUDIT_PUB", "")
+	if err != nil {
+		t.Fatalf("newVerifier: %v", err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = v
+
+	// Populate the cached snapshot with an intact, server-verified chain.
+	rep := doVerify(t, b)
+	if rep.ChainIntact == nil || !*rep.ChainIntact {
+		t.Fatalf("clean trail: chain_intact = %v, want true", rep.ChainIntact)
+	}
+
+	// Even so, the live tip is pending — never "ok".
+	if got := b.tailState(); got != "unknown" {
+		t.Fatalf("tailState on intact chain = %q, want unknown (live tip is pending, not server-verified)", got)
+	}
+}
+
 func replayedVerifyStates(t *testing.T, buf *bytes.Buffer) []string {
 	t.Helper()
 	var out []string
