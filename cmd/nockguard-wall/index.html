@@ -102,6 +102,15 @@
               padding:2px 7px; border-radius:5px; }
   .row[data-severity="critical"] .sev { background:rgba(255,77,77,.2); color:var(--block); }
   .row[data-severity="high"] .sev { background:rgba(240,136,62,.18); color:var(--deny); }
+  /* audit-chain verification badge: a subtle ✓ when this entry's signature chained
+     clean; a loud ✗ TAMPERED only when it is the broken entry. "unknown" (no key /
+     past a break / demo) shows nothing — the badge is a positive/negative signal,
+     not noise. */
+  .row .vchip { font-size:11px; font-weight:700; padding:2px 6px; border-radius:5px; white-space:nowrap; }
+  .row .vchip.ok { color:var(--allow); opacity:.5; }
+  .row .vchip.broken { background:rgba(255,77,77,.22); color:var(--block); letter-spacing:1px; }
+  .row[data-verify="broken"] { border-color:rgba(255,77,77,.6);
+                box-shadow:inset 0 0 0 1px rgba(255,77,77,.3); }
   .row[data-severity="critical"] { border-color:rgba(255,77,77,.55);
                 box-shadow:inset 0 0 0 1px rgba(255,77,77,.22); }
   body.crit #feed .row:not([data-severity="critical"]):not([data-severity="high"]) { display:none; }
@@ -118,6 +127,20 @@
   .block .badge{ background:rgba(255,77,77,.18); color:var(--block); }
   @keyframes flashred { 0%{box-shadow:0 0 0 0 rgba(255,77,77,.55)} 100%{box-shadow:0 0 22px 2px rgba(255,77,77,0)} }
   .empty { color:var(--dim); text-align:center; margin:auto; }
+
+  /* tamper banner (leg 3): the loud global signal when the signed audit chain
+     fails verification. Live events keep streaming underneath (optimistic) — this
+     bar is the alarm, the per-row ✗ pins the offending entry. */
+  .tamper { display:flex; align-items:center; gap:12px; padding:12px 22px; z-index:60;
+            color:#fff; font-weight:700; letter-spacing:.5px;
+            background:linear-gradient(90deg, rgba(255,77,77,.92), rgba(190,26,26,.92));
+            border-bottom:1px solid rgba(255,77,77,.6);
+            animation:tamperpulse 1.6s ease-in-out infinite; }
+  .tamper[hidden] { display:none; }
+  .tamper .tamper-icon { font-size:18px; }
+  .tamper .tamper-detail { font-weight:400; opacity:.9; font-size:12px; margin-left:auto;
+            white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:40%; }
+  @keyframes tamperpulse { 0%,100%{ box-shadow:0 0 0 0 rgba(255,77,77,0);} 50%{ box-shadow:0 0 26px 3px rgba(255,77,77,.5);} }
   footer { padding:8px 22px; border-top:1px solid var(--line); color:var(--dim); font-size:11px;
            display:flex; justify-content:space-between; }
 
@@ -135,6 +158,11 @@
 </head>
 <body>
   <div id="flash"></div>
+  <div id="tamper" class="tamper" role="alert" aria-live="assertive" hidden>
+    <span class="tamper-icon">⚠</span>
+    <span class="tamper-text">AUDIT CHAIN TAMPERED — the signed audit trail failed verification. Live events keep streaming, but the record can no longer be trusted.</span>
+    <span class="tamper-detail" id="tamper-detail"></span>
+  </div>
   <header>
     <div class="brand">
       <span class="dot" id="live"></span>
@@ -362,6 +390,15 @@
     row.dataset.tool = (ev.tool || '').toLowerCase();
     row.dataset.decision = dec;
     row.dataset.severity = sev;
+    // Verification badge is derived server-side (verify.go) and arrives on the
+    // event; the wall only reads the tag — it holds no key and never verifies.
+    const vs = ev.verifyState || 'unknown';
+    row.dataset.verify = vs;
+    const vChip = vs === 'ok'
+      ? '<span class="vchip ok" title="audit chain verified up to here">✓</span>'
+      : vs === 'broken'
+        ? '<span class="vchip broken" title="audit chain BROKEN at this entry">✗ TAMPERED</span>'
+        : '';
     const sevChip = (sev === 'critical' || sev === 'high')
       ? '<span class="sev">' + sev + '</span>' : '';
     row.innerHTML =
@@ -369,7 +406,7 @@
       '<span class="agent">' + esc(ev.agent || '—') + '</span>' +
       '<span class="tool">' + esc(ev.tool || '') +
         (ev.reason ? '<div class="reason">' + esc(ev.reason) + '</div>' : '') + '</span>' +
-      '<span class="verdict">' + sevChip +
+      '<span class="verdict">' + vChip + sevChip +
         '<span class="badge">' + esc(ev.decision || '?') + '</span></span>';
     feed.prepend(row);
     if ((fq || fdec) && !rowMatches(row)) row.classList.add('fout');
@@ -390,6 +427,32 @@
     es.onerror = () => { conn.textContent = 'reconnecting…'; };
   }
   connect();
+
+  // --- audit-chain verification (leg 3) -----------------------------------
+  // A full /verify runs on page load and then on a poll timer. On a broken chain
+  // we raise the loud global banner but KEEP streaming live events (optimistic —
+  // decision c); a null chain_intact means verification is unconfigured/unknown,
+  // which must NOT trip the banner. NOTE: the poll does a full re-verify each tick
+  // — a true incremental tip-check would need an audit-package API to resume from
+  // the last-verified signature (deferred; see the PR).
+  const tamper = document.getElementById('tamper');
+  const tamperDetail = document.getElementById('tamper-detail');
+  async function checkChain() {
+    try {
+      const r = await fetch('/verify', { cache: 'no-store' });
+      if (!r.ok) return;
+      const v = await r.json();
+      if (v.chain_intact === false) {
+        tamper.hidden = false;
+        tamperDetail.textContent =
+          (v.break_at != null ? 'break at entry ' + v.break_at + ' · ' : '') + (v.detail || '');
+      } else {
+        tamper.hidden = true;
+      }
+    } catch (e) { /* transient fetch failure: leave the banner as-is */ }
+  }
+  checkChain();
+  setInterval(checkChain, 15000);
 </script>
 </body>
 </html>

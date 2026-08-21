@@ -11,6 +11,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"embed"
 	"encoding/csv"
@@ -54,6 +55,13 @@ type event struct {
 	Decision string `json:"decision"` // allow | deny | block | ratelimit | hide
 	Reason   string `json:"reason,omitempty"`
 	Severity string `json:"severity,omitempty"` // derived threat tier, not from audit
+	// VerifyState is the tamper-evidence badge for this entry: "ok" (its
+	// signature chained clean), "broken" (this is the first entry whose signature
+	// failed), or "unknown" (unverifiable — no signing key configured, a demo
+	// event, or an entry at/after a chain break). Derived server-side from the
+	// existing internal/audit chain verification (see verify.go); never from the
+	// browser, which holds no key.
+	VerifyState string `json:"verifyState,omitempty"`
 }
 
 // classify tags an event with its derived threat tier. Called at every ingest
@@ -69,12 +77,50 @@ type broker struct {
 	auditPath string // replayed to each newly-connected client as history
 	mu        sync.Mutex
 	clients   map[chan event]struct{}
+
+	// verifier holds the server-side trusted key used to verify the audit chain;
+	// vsnap caches the most recent full-verify result so per-event badges (replay
+	// and tail) can be tagged without re-walking the whole trail per event.
+	verifier *verifier
+	vmu      sync.Mutex
+	vsnap    verifyReport
 }
 
 func newBroker() *broker {
 	return &broker{
 		clients: make(map[chan event]struct{}),
 	}
+}
+
+// snapshot returns the cached full-verify result.
+func (b *broker) snapshot() verifyReport {
+	b.vmu.Lock()
+	defer b.vmu.Unlock()
+	return b.vsnap
+}
+
+// refreshSnapshot re-runs the full chain verification over the tailed trail and
+// caches the result. Called on startup, on each SSE connect (replay), and by the
+// /verify handler.
+func (b *broker) refreshSnapshot() verifyReport {
+	rep := b.verifier.verify(b.auditPath)
+	b.vmu.Lock()
+	b.vsnap = rep
+	b.vmu.Unlock()
+	return rep
+}
+
+// tailState is the per-event badge for a LIVE (tailed) event. A live-tailed entry
+// has NOT been individually server-verified at tail time, so it is always pending
+// re-verify → "unknown". "ok" means server-verified and is assigned only by the
+// replay/snapshot path (lineState) once a /verify cycle confirms the entry chains
+// clean; "broken" likewise comes from that path when an entry's signature fails.
+// A live tip must never inherit "ok" from an intact cached snapshot — a freshly
+// appended, not-yet-verified entry would then wear the verified badge for up to a
+// poll interval, a false positive. The loud live tamper signal is the
+// /verify-driven banner, not the tip badge.
+func (b *broker) tailState() string {
+	return "unknown"
 }
 
 func (b *broker) register(c chan event) {
@@ -115,7 +161,7 @@ func (b *broker) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	// Replay existing audit history to this client first, so opening the wall
 	// shows the full record rather than only decisions that arrive afterward.
-	replayHistory(b.auditPath, w)
+	b.replayHistory(w)
 	fl.Flush()
 
 	c := make(chan event, 64)
@@ -147,11 +193,17 @@ func (b *broker) handleSSE(w http.ResponseWriter, r *http.Request) {
 // oldest first (the page prepends, so newest lands on top). Bounded so a large
 // trail can't flood the page. This is what makes opening the wall show the full
 // record instead of only decisions that arrive after the page loads.
-func replayHistory(path string, w io.Writer) {
-	if path == "" {
+//
+// It first refreshes the full-chain verification snapshot, then tags each replayed
+// entry with its VerifyState. The line counter increments on EVERY non-empty line
+// — the same rule audit.Verify counts entries by — so the badge index stays
+// aligned with the break position even past a line the wall itself can't render.
+func (b *broker) replayHistory(w io.Writer) {
+	if b.auditPath == "" {
 		return
 	}
-	f, err := os.Open(path)
+	rep := b.refreshSnapshot()
+	f, err := os.Open(b.auditPath)
 	if err != nil {
 		return
 	}
@@ -159,11 +211,19 @@ func replayHistory(path string, w io.Writer) {
 	var lines [][]byte
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	lineNo := 0
 	for sc.Scan() {
+		raw := sc.Bytes()
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
+		lineNo++ // matches audit.Verify's 1-based entry counting
 		var ev event
-		if json.Unmarshal(sc.Bytes(), &ev) == nil && ev.Decision != "" {
-			b, _ := json.Marshal(classify(ev))
-			lines = append(lines, b)
+		if json.Unmarshal(raw, &ev) == nil && ev.Decision != "" {
+			ev = classify(ev)
+			ev.VerifyState = lineState(rep, lineNo)
+			line, _ := json.Marshal(ev)
+			lines = append(lines, line)
 			if len(lines) > maxWindow {
 				lines = lines[1:]
 			}
@@ -428,7 +488,9 @@ func tail(ctx context.Context, path string, b *broker) {
 					for sc.Scan() {
 						var ev event
 						if json.Unmarshal(sc.Bytes(), &ev) == nil && ev.Decision != "" {
-							b.emit(classify(ev))
+							ev = classify(ev)
+							ev.VerifyState = b.tailState()
+							b.emit(ev)
 						}
 					}
 					if err := sc.Err(); err != nil {
@@ -477,7 +539,9 @@ func demo(ctx context.Context, b *broker) {
 				s := bads[r.Intn(len(bads))]
 				ev.Tool, ev.Decision, ev.Reason = s.tool, s.decision, s.reason
 			}
-			b.emit(classify(ev))
+			ev = classify(ev)
+			ev.VerifyState = "unknown" // synthetic events are not part of a signed trail
+			b.emit(ev)
 			t.Reset(time.Duration(350+r.Intn(900)) * time.Millisecond)
 		}
 	}
@@ -492,6 +556,10 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8787", "address to serve the wall on (loopback = private)")
 	auditPath := flag.String("audit", defaultAuditPath(), "path to the NockGuard audit JSONL")
 	demoMode := flag.Bool("demo", false, "synthesize a sample event stream (use when there is no live traffic)")
+	verifyPubEnv := flag.String("verify-ed25519-pub-env", "NOCKGUARD_AUDIT_ED25519_PUB",
+		"env var holding the Ed25519 PUBLIC key that verifies the audit chain (server-side trust; never client-supplied). Unset var = verification disabled.")
+	verifyKeyEnv := flag.String("verify-key-env", "",
+		"env var holding the HMAC key that verifies the audit chain (alternative to Ed25519; server-side trust)")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -499,6 +567,14 @@ func main() {
 
 	b := newBroker()
 	b.auditPath = *auditPath
+
+	v, verr := newVerifier(*verifyPubEnv, *verifyKeyEnv)
+	if verr != nil {
+		log.Fatalf("audit verification config: %v", verr)
+	}
+	b.verifier = v
+	b.refreshSnapshot() // seed the snapshot so live badges have a baseline
+
 	go tail(ctx, *auditPath, b)
 	if *demoMode {
 		go demo(ctx, b)
@@ -508,6 +584,7 @@ func main() {
 	mux.HandleFunc("/events", b.handleSSE)
 	mux.HandleFunc("/pulse", b.handlePulse)
 	mux.HandleFunc("/export", b.handleExport)
+	mux.HandleFunc("/verify", b.handleVerify)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -518,7 +595,8 @@ func main() {
 		_, _ = w.Write(data)
 	})
 
-	fmt.Printf("NockGuard Live Wall → http://%s   (audit: %s, demo: %v)\n", *addr, *auditPath, *demoMode)
+	fmt.Printf("NockGuard Live Wall → http://%s   (audit: %s, demo: %v, chain-verify: %v)\n",
+		*addr, *auditPath, *demoMode, v.enabled())
 	srv := &http.Server{
 		Addr:         *addr,
 		Handler:      mux,
