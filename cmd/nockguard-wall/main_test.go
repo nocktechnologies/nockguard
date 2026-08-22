@@ -98,7 +98,9 @@ func TestReplayHistoryLogsScannerErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	longLine := strings.Repeat("x", 1024*1024+1)
+	// Must exceed the shared trail-line cap (N9870 raised it to audit.MaxTrailLineBytes)
+	// so the wall's replay scanner still errors and logs on a genuinely over-cap line.
+	longLine := strings.Repeat("x", audit.MaxTrailLineBytes+1)
 	if _, err := f.WriteString(longLine + "\n"); err != nil {
 		t.Fatal(err)
 	}

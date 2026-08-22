@@ -138,6 +138,15 @@
             animation:tamperpulse 1.6s ease-in-out infinite; }
   .tamper[hidden] { display:none; }
   .tamper .tamper-icon { font-size:18px; }
+  /* chainnote: the quiet "verification unavailable" state — muted, no pulse, no
+     red. Distinct from the tamper banner so a benign read glitch never looks like
+     a breach. */
+  .chainnote { display:flex; align-items:center; gap:12px; padding:9px 22px; z-index:55;
+               background:rgba(110,118,129,.16); color:var(--dim); font-size:12.5px;
+               border-bottom:1px solid rgba(110,118,129,.28); }
+  .chainnote[hidden] { display:none; }
+  .chainnote .chainnote-icon { font-size:14px; }
+  .chainnote .chainnote-detail { margin-left:auto; opacity:.85; font-variant-numeric:tabular-nums; }
   .tamper .tamper-detail { font-weight:400; opacity:.9; font-size:12px; margin-left:auto;
             white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:40%; }
   @keyframes tamperpulse { 0%,100%{ box-shadow:0 0 0 0 rgba(255,77,77,0);} 50%{ box-shadow:0 0 26px 3px rgba(255,77,77,.5);} }
@@ -162,6 +171,15 @@
     <span class="tamper-icon">⚠</span>
     <span class="tamper-text">AUDIT CHAIN TAMPERED — the signed audit trail failed verification. Live events keep streaming, but the record can no longer be trusted.</span>
     <span class="tamper-detail" id="tamper-detail"></span>
+  </div>
+  <!-- Quiet, non-alarming counterpart to the tamper banner: verification could
+       not be completed (a read/scan error, e.g. a line past the scanner cap).
+       This is UNKNOWN, not a tamper — status="unavailable" from /verify. It uses
+       role="status" (polite), never role="alert", so it never reads as a breach. -->
+  <div id="chainnote" class="chainnote" role="status" aria-live="polite" hidden>
+    <span class="chainnote-icon">◌</span>
+    <span class="chainnote-text">Audit chain verification unavailable — the trail could not be fully read, so its integrity is unknown (not a tamper).</span>
+    <span class="chainnote-detail" id="chainnote-detail"></span>
   </div>
   <header>
     <div class="brand">
@@ -437,19 +455,30 @@
   // the last-verified signature (deferred; see the PR).
   const tamper = document.getElementById('tamper');
   const tamperDetail = document.getElementById('tamper-detail');
+  const chainnote = document.getElementById('chainnote');
+  const chainnoteDetail = document.getElementById('chainnote-detail');
   async function checkChain() {
     try {
       const r = await fetch('/verify', { cache: 'no-store' });
       if (!r.ok) return;
       const v = await r.json();
+      // ONLY an explicit chain_intact:false is a tamper. status "unavailable"
+      // (a read/scan error, chain_intact null) surfaces as the quiet chainnote,
+      // never the red banner — a benign read glitch must not cry wolf (N9870).
       if (v.chain_intact === false) {
         tamper.hidden = false;
         tamperDetail.textContent =
           (v.break_at != null ? 'break at entry ' + v.break_at + ' · ' : '') + (v.detail || '');
+        chainnote.hidden = true;
+      } else if (v.status === 'unavailable') {
+        tamper.hidden = true;
+        chainnote.hidden = false;
+        chainnoteDetail.textContent = v.detail || '';
       } else {
         tamper.hidden = true;
+        chainnote.hidden = true;
       }
-    } catch (e) { /* transient fetch failure: leave the banner as-is */ }
+    } catch (e) { /* transient fetch failure: leave the banners as-is */ }
   }
   checkChain();
   setInterval(checkChain, 15000);
