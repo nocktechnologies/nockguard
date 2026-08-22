@@ -253,7 +253,7 @@ func readEntries(path string) ([]audit.Event, error) {
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), audit.MaxTrailLineBytes)
 	var out []audit.Event
 	line := 0
 	for sc.Scan() {

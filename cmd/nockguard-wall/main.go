@@ -30,6 +30,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/forward"
 )
 
@@ -210,7 +211,7 @@ func (b *broker) replayHistory(w io.Writer) {
 	defer f.Close()
 	var lines [][]byte
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), audit.MaxTrailLineBytes)
 	lineNo := 0
 	for sc.Scan() {
 		raw := sc.Bytes()
@@ -366,7 +367,7 @@ func loadEvents(path string) []event {
 	defer f.Close()
 	var evs []event
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), audit.MaxTrailLineBytes)
 	for sc.Scan() {
 		var ev event
 		if json.Unmarshal(sc.Bytes(), &ev) == nil && ev.Decision != "" {
@@ -484,7 +485,7 @@ func tail(ctx context.Context, path string, b *broker) {
 				}
 				if _, err := f.Seek(offset, io.SeekStart); err == nil {
 					sc := bufio.NewScanner(f)
-					sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+					sc.Buffer(make([]byte, 0, 64*1024), audit.MaxTrailLineBytes)
 					for sc.Scan() {
 						var ev event
 						if json.Unmarshal(sc.Bytes(), &ev) == nil && ev.Decision != "" {

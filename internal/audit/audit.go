@@ -33,6 +33,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -498,7 +499,7 @@ func countEntries(path string) (int, error) {
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), scanBufferCap)
 	n := 0
 	for sc.Scan() {
 		if len(bytes.TrimSpace(sc.Bytes())) > 0 {
@@ -637,10 +638,101 @@ func consumeValue(dec *json.Decoder, depth *int) error {
 	return nil
 }
 
+// Error classification for trail verification.
+//
+// A caller must be able to tell a REAL chain/signature break (an edit, deletion,
+// insertion, reorder, forgery, wrong key, or tail truncation) apart from a benign
+// IO/scan failure that merely stopped the trail being read to the end (e.g. a
+// line longer than the scanner buffer). The first means the record can no longer
+// be trusted — TAMPER. The second means verification is UNAVAILABLE, not failed,
+// and must never raise a tamper alarm.
+//
+// Classification adds NO text to any existing error message: each wrapper's
+// Error() returns the underlying detection text verbatim, and callers classify
+// purely through errors.Is / errors.As against the sentinels below. Every legacy
+// caller that only checks `err != nil` (the CLI verify, evidence, and the
+// open-time refusal in New) keeps behaving exactly as before.
+
+// ErrTamper matches (via errors.Is) every error returned for a genuine
+// chain/signature break. IO/scan errors never match it.
+var ErrTamper = errors.New("audit chain tamper")
+
+// ErrScan matches (via errors.Is) an error that stopped the walk before the trail
+// was fully read — verification is UNAVAILABLE for that trail, not tampered.
+var ErrScan = errors.New("audit trail read/scan error")
+
+// TamperError classifies a genuine tamper detection. Line is the 1-based entry at
+// the break (0 when not line-scoped). Its message is the detection message,
+// unchanged, so existing error strings and their assertions are unaffected.
+type TamperError struct {
+	Line int
+	Err  error
+}
+
+func (e *TamperError) Error() string        { return e.Err.Error() }
+func (e *TamperError) Unwrap() error        { return e.Err }
+func (e *TamperError) Is(target error) bool { return target == ErrTamper }
+
+// ScanError classifies a read/scan failure while walking the trail. Its message
+// is the underlying scanner error, unchanged.
+type ScanError struct{ Err error }
+
+func (e *ScanError) Error() string        { return e.Err.Error() }
+func (e *ScanError) Unwrap() error        { return e.Err }
+func (e *ScanError) Is(target error) bool { return target == ErrScan }
+
+// markTamper tags err as a genuine tamper at the given 1-based line.
+func markTamper(line int, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &TamperError{Line: line, Err: err}
+}
+
+// markBoundaryTamper tags a REAL tamper that is not attributable to a single
+// scanned entry: a high-water-mark / checkpoint failure (tail truncation, a
+// deleted sidecar, or an altered checkpoint). The chain break is genuine so the
+// banner must fire, but every entry the walk actually reached verified clean —
+// the break is at the boundary, not a line — so Line is 0. Consumers then keep
+// entries_verified = n and omit break_at instead of fingering a valid entry. The
+// error text still carries the boundary specifics (which entry/count).
+func markBoundaryTamper(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &TamperError{Line: 0, Err: err}
+}
+
+// markScan tags err as a read/scan failure (verification unavailable).
+func markScan(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ScanError{Err: err}
+}
+
+// MaxTrailLineBytes caps a single audit-trail line the verifier — and the wall's
+// replay/tail scanners — will read. The previous 1 MiB cap made a legitimately
+// long entry trip bufio.ErrTooLong, which the wall then misread as a chain break
+// (crying wolf). 8 MiB sits far above any real decision record yet stays bounded,
+// so a pathological line still surfaces as an ErrScan (unavailable), never as a
+// tamper and never as unbounded memory growth. Shared so every trail-walking
+// scanner uses the identical cap and their 1-based line counts stay aligned.
+const MaxTrailLineBytes = 8 * 1024 * 1024
+
+// scanBufferCap is the live cap — a package var (not the const directly) so tests
+// can shrink it to exercise the oversized-line (ErrScan) path without an 8 MiB
+// fixture.
+var scanBufferCap = MaxTrailLineBytes
+
 // Verify walks a signed audit file and checks the hash chain end to end. It
 // returns the number of entries verified, or the 1-based line number and an
 // error at the first entry whose signature does not match — which happens if any
 // entry was edited, deleted, inserted, or reordered, or if the wrong key is used.
+//
+// Error classification: a genuine chain/signature break is a *TamperError
+// (errors.Is(err, ErrTamper)); a read/scan failure that stopped the walk early is
+// a *ScanError (errors.Is(err, ErrScan)). Messages are unchanged.
 func Verify(path string, key []byte) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -652,7 +744,7 @@ func Verify(path string, key []byte) (int, error) {
 		return 0, herr
 	}
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), scanBufferCap)
 	prev := ""
 	n := 0
 	sigAtCount := ""
@@ -663,37 +755,44 @@ func Verify(path string, key []byte) (int, error) {
 		}
 		n++
 		if err := rejectDuplicateTopLevelKeys(raw); err != nil {
-			return n, fmt.Errorf("line %d: %w", n, err)
+			return n, markTamper(n, fmt.Errorf("line %d: %w", n, err))
 		}
 		var ev Event
 		if err := json.Unmarshal(raw, &ev); err != nil {
-			return n, fmt.Errorf("line %d: invalid json: %w", n, err)
+			return n, markTamper(n, fmt.Errorf("line %d: invalid json: %w", n, err))
 		}
 		got := ev.Sig
 		if got == "" {
-			return n, fmt.Errorf("line %d: entry is not signed", n)
+			return n, markTamper(n, fmt.Errorf("line %d: entry is not signed", n))
 		}
 		ev.Sig = ""
 		canonical, err := json.Marshal(ev)
 		if err != nil {
+			// Re-marshaling an already-parsed Event does not fail in practice; this
+			// is an internal serialization error, not evidence of tampering, so it
+			// is left unclassified (surfaces as unavailable, never a tamper alarm).
 			return n, err
 		}
 		want := signLine(key, canonical, prev)
 		if !hmac.Equal([]byte(got), []byte(want)) {
-			return n, fmt.Errorf("line %d: signature mismatch — trail was tampered, deleted from, reordered, or signed with a different key", n)
+			return n, markTamper(n, fmt.Errorf("line %d: signature mismatch — trail was tampered, deleted from, reordered, or signed with a different key", n))
 		}
 		prev = got
 		if hwm != nil && n == hwm.Count {
 			sigAtCount = got
 		}
 	}
+	// The scanner-error check MUST stay before checkHighWaterMark: a read glitch
+	// aborts the walk with n < the real entry count, and the hwm check would then
+	// report a false "trail truncated" tamper. Classify it as a scan error
+	// (unavailable) here so a benign read failure never launders into tamper.
 	if err := sc.Err(); err != nil {
-		return n, err
+		return n, markScan(err)
 	}
 	if err := checkHighWaterMark(hwm, n, sigAtCount, func(signed []byte, sigHex string) bool {
 		return hmac.Equal([]byte(signLine(key, signed, "")), []byte(sigHex))
 	}); err != nil {
-		return n, err
+		return n, markBoundaryTamper(err)
 	}
 	return n, nil
 }
@@ -716,7 +815,7 @@ func VerifyEd25519(path string, pub ed25519.PublicKey) (int, error) {
 		return 0, herr
 	}
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), scanBufferCap)
 	prev := ""
 	n := 0
 	sigAtCount := ""
@@ -727,35 +826,38 @@ func VerifyEd25519(path string, pub ed25519.PublicKey) (int, error) {
 		}
 		n++
 		if err := rejectDuplicateTopLevelKeys(raw); err != nil {
-			return n, fmt.Errorf("line %d: %w", n, err)
+			return n, markTamper(n, fmt.Errorf("line %d: %w", n, err))
 		}
 		var ev Event
 		if err := json.Unmarshal(raw, &ev); err != nil {
-			return n, fmt.Errorf("line %d: invalid json: %w", n, err)
+			return n, markTamper(n, fmt.Errorf("line %d: invalid json: %w", n, err))
 		}
 		if ev.Sig == "" {
-			return n, fmt.Errorf("line %d: entry is not signed", n)
+			return n, markTamper(n, fmt.Errorf("line %d: entry is not signed", n))
 		}
 		sig, err := hex.DecodeString(ev.Sig)
 		if err != nil {
-			return n, fmt.Errorf("line %d: signature is not valid hex: %w", n, err)
+			return n, markTamper(n, fmt.Errorf("line %d: signature is not valid hex: %w", n, err))
 		}
 		got := ev.Sig
 		ev.Sig = ""
 		canonical, err := json.Marshal(ev)
 		if err != nil {
+			// Internal serialization error (see Verify): not tamper, left unclassified.
 			return n, err
 		}
 		if !ed25519.Verify(pub, chainedMessage(canonical, prev), sig) {
-			return n, fmt.Errorf("line %d: signature mismatch — trail was tampered, deleted from, reordered, or signed with a different key", n)
+			return n, markTamper(n, fmt.Errorf("line %d: signature mismatch — trail was tampered, deleted from, reordered, or signed with a different key", n))
 		}
 		prev = got
 		if hwm != nil && n == hwm.Count {
 			sigAtCount = got
 		}
 	}
+	// See Verify: the scan-error check stays ahead of the hwm check so a read
+	// glitch surfaces as unavailable, not a false truncation tamper.
 	if err := sc.Err(); err != nil {
-		return n, err
+		return n, markScan(err)
 	}
 	if err := checkHighWaterMark(hwm, n, sigAtCount, func(signed []byte, sigHex string) bool {
 		sigBytes, derr := hex.DecodeString(sigHex)
@@ -764,7 +866,7 @@ func VerifyEd25519(path string, pub ed25519.PublicKey) (int, error) {
 		}
 		return ed25519.Verify(pub, chainedMessage(signed, ""), sigBytes)
 	}); err != nil {
-		return n, err
+		return n, markBoundaryTamper(err)
 	}
 	return n, nil
 }
