@@ -147,20 +147,36 @@ func classifyVerifyResult(n int, err error, now string) verifyReport {
 		return rep
 	}
 	if errors.Is(err, audit.ErrTamper) {
-		// Genuine chain/signature break. audit.Verify returns n = the 1-based line
-		// that FAILED; the entries before it verified clean. Guard break_at so a
-		// non-line-scoped tamper (n < 1) never emits the meaningless break_at:0.
-		verified := n - 1
-		if verified < 0 {
-			verified = 0
-		}
+		// Genuine chain break — the banner must fire. Attribution comes from the
+		// tamper's Line, NOT the returned count n: an in-loop signature failure sets
+		// Line = the 1-based entry that FAILED (entries before it verified clean),
+		// while a high-water-mark / checkpoint failure sets Line = 0 because every
+		// entry the walk reached verified clean and the break is at the boundary,
+		// not a scanned line.
 		rep.ChainIntact = boolptr(false)
-		rep.EntriesVerified = verified
-		if n >= 1 {
-			rep.BreakAt = intptr(n)
-		}
 		rep.Detail = strptr(err.Error())
 		rep.Status = statusTampered
+		line := 0
+		var te *audit.TamperError
+		if errors.As(err, &te) {
+			line = te.Line
+		}
+		if line >= 1 {
+			// Line-scoped break: report where it broke and count the clean entries
+			// before it.
+			verified := line - 1
+			if verified < 0 {
+				verified = 0
+			}
+			rep.EntriesVerified = verified
+			rep.BreakAt = intptr(line)
+		} else {
+			// Boundary tamper (Line 0): all n scanned entries verified clean; there
+			// is no single break line, so retain n and omit break_at. Every per-event
+			// badge falls through to "unknown" (lineState) because the chain as a
+			// whole can no longer be trusted past the boundary.
+			rep.EntriesVerified = n
+		}
 		return rep
 	}
 	// Read/scan or IO error: verification is UNAVAILABLE, not failed. chain_intact

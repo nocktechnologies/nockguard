@@ -689,6 +689,20 @@ func markTamper(line int, err error) error {
 	return &TamperError{Line: line, Err: err}
 }
 
+// markBoundaryTamper tags a REAL tamper that is not attributable to a single
+// scanned entry: a high-water-mark / checkpoint failure (tail truncation, a
+// deleted sidecar, or an altered checkpoint). The chain break is genuine so the
+// banner must fire, but every entry the walk actually reached verified clean —
+// the break is at the boundary, not a line — so Line is 0. Consumers then keep
+// entries_verified = n and omit break_at instead of fingering a valid entry. The
+// error text still carries the boundary specifics (which entry/count).
+func markBoundaryTamper(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &TamperError{Line: 0, Err: err}
+}
+
 // markScan tags err as a read/scan failure (verification unavailable).
 func markScan(err error) error {
 	if err == nil {
@@ -778,7 +792,7 @@ func Verify(path string, key []byte) (int, error) {
 	if err := checkHighWaterMark(hwm, n, sigAtCount, func(signed []byte, sigHex string) bool {
 		return hmac.Equal([]byte(signLine(key, signed, "")), []byte(sigHex))
 	}); err != nil {
-		return n, markTamper(n, err)
+		return n, markBoundaryTamper(err)
 	}
 	return n, nil
 }
@@ -852,7 +866,7 @@ func VerifyEd25519(path string, pub ed25519.PublicKey) (int, error) {
 		}
 		return ed25519.Verify(pub, chainedMessage(signed, ""), sigBytes)
 	}); err != nil {
-		return n, markTamper(n, err)
+		return n, markBoundaryTamper(err)
 	}
 	return n, nil
 }

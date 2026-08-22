@@ -54,6 +54,33 @@ func TestClassifyTamperFiresBanner(t *testing.T) {
 	}
 }
 
+func TestClassifyHighWaterMarkTamperHasNoBreakLine(t *testing.T) {
+	// A high-water-mark / checkpoint tamper as internal/audit produces it: a
+	// *TamperError with Line 0 (boundary, not a scanned line), returned alongside
+	// n = the entries that verified clean in-loop. The banner must fire, but no
+	// single scanned entry is fingered and the clean count is preserved (N9870 CR
+	// follow-up: post-scan hwm failures were mislabeled as breaking at entry n and
+	// undercounting verified entries by one).
+	terr := &audit.TamperError{Line: 0, Err: fmt.Errorf("trail truncated — 5 entries on disk but the signed high-water-mark records 7 (entries removed from the tail)")}
+	rep := classifyVerifyResult(5, terr, testNow)
+
+	if rep.ChainIntact == nil || *rep.ChainIntact {
+		t.Fatalf("hwm tamper: chain_intact = %v, want false (banner must fire)", rep.ChainIntact)
+	}
+	if rep.Status != statusTampered {
+		t.Fatalf("hwm tamper: status = %q, want %q", rep.Status, statusTampered)
+	}
+	if rep.BreakAt != nil {
+		t.Fatalf("hwm tamper: break_at = %v, want nil (a boundary tamper fingers no valid entry)", *rep.BreakAt)
+	}
+	if rep.EntriesVerified != 5 {
+		t.Fatalf("hwm tamper: entries_verified = %d, want 5 (all scanned entries verified clean)", rep.EntriesVerified)
+	}
+	if rep.Detail == nil || *rep.Detail == "" {
+		t.Fatal("hwm tamper: expected a non-empty detail")
+	}
+}
+
 func TestClassifyScanErrorIsUnavailableNotTamper(t *testing.T) {
 	// A read/scan failure as internal/audit produces it: a *ScanError wrapping the
 	// oversized-line error. It must NOT become a tamper.
