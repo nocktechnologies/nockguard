@@ -117,6 +117,32 @@ func TestComputePulse(t *testing.T) {
 	}
 }
 
+// TestEmbeddedPageWiresSeverityFilter guards the embedded page against a
+// front-end regression the Go test suite would otherwise miss entirely: the
+// severity <select> must be present and the cosmetic CRIT/HIGH / THREATS ONLY
+// toggles it replaced must be fully gone. A dangling getElementById on a removed
+// id throws at script-parse time and renders the wall blank while every Go test
+// still passes green, so this asserts the contract at the markup level.
+func TestEmbeddedPageWiresSeverityFilter(t *testing.T) {
+	page, err := indexFS.ReadFile("index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	html := string(page)
+	for _, want := range []string{`id="f-severity"`, `p.set('severity'`, `fSeverity`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("embedded page missing severity-filter wiring: %q", want)
+		}
+	}
+	// Removed cosmetic toggles and their CSS-only hiding must leave no trace — a
+	// stale reference is a runtime throw, not a compile error.
+	for _, gone := range []string{"t-threats", "t-crit", "body.threats", "body.crit"} {
+		if strings.Contains(html, gone) {
+			t.Errorf("embedded page still references removed toggle: %q", gone)
+		}
+	}
+}
+
 func TestReplayHistoryLogsScannerErrors(t *testing.T) {
 	f, err := os.CreateTemp(t.TempDir(), "audit-*.jsonl")
 	if err != nil {
