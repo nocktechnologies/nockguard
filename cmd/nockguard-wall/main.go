@@ -276,15 +276,33 @@ func bucket(decision string) string {
 	}
 }
 
-// matches reports whether an event survives the wall's two filters: an exact
-// decision match and a case-insensitive substring over "agent tool". q must
-// already be lower-cased and trimmed (normalizeQuery). This is the SINGLE
-// predicate shared by the pulse aggregate (/pulse) and the raw export
-// (/export) so their filter semantics can never drift — a mismatch between
-// what the wall counts and what it exports would be a lie in an audit product.
-func matches(ev event, q, decision string) bool {
+// matches reports whether an event survives the wall's three filters: an exact
+// decision match, a threat-severity match, and a case-insensitive substring over
+// "agent tool". q must already be lower-cased and trimmed (normalizeQuery). This
+// is the SINGLE predicate shared by the pulse aggregate (/pulse) and the raw
+// export (/export) so their filter semantics can never drift — a mismatch
+// between what the wall counts and what it exports would be a lie in an audit
+// product.
+//
+// Severity is filtered off the SAME source the pulse counts with —
+// forward.Severity(Decision, Reason), the pure classifier — never a cached
+// ev.Severity tag, so a caller that skipped classify() can't split the filter
+// from the count. The sentinel severity "threat" means "any live catch"
+// (critical|high|low, i.e. not none); an empty string means no severity filter,
+// which is distinct from severity="none" (allows / non-catches only).
+func matches(ev event, q, decision, severity string) bool {
 	if decision != "" && ev.Decision != decision {
 		return false
+	}
+	if severity != "" {
+		sev := forward.Severity(ev.Decision, ev.Reason)
+		if severity == severityThreat {
+			if sev == forward.ThreatNone {
+				return false
+			}
+		} else if sev != severity {
+			return false
+		}
 	}
 	if q != "" && !strings.Contains(strings.ToLower(ev.Agent+" "+ev.Tool), q) {
 		return false
@@ -292,19 +310,26 @@ func matches(ev event, q, decision string) bool {
 	return true
 }
 
+// severityThreat is the sentinel ?severity= value meaning "any live catch" —
+// critical, high, or low, but not none. It is not one of forward's tiers; it is
+// the wall's "THREATS" preset expressed as a filter value so /pulse and /export
+// honour it identically to the browser.
+const severityThreat = "threat"
+
 // normalizeQuery lower-cases and trims a raw ?q= filter so matches can compare
 // against it directly. Every caller normalizes once, up front.
 func normalizeQuery(q string) string { return strings.ToLower(strings.TrimSpace(q)) }
 
 // computePulse aggregates events into a pulse, honouring the same filters the
-// wall exposes (#46): a case-insensitive substring over "agent tool" and an
-// exact decision match. It is O(events-in-window) — a single pass, no re-scan.
-func computePulse(evs []event, q, decision string) pulse {
+// wall exposes: a case-insensitive substring over "agent tool", an exact
+// decision match, and a threat-severity match. It is O(events-in-window) — a
+// single pass, no re-scan.
+func computePulse(evs []event, q, decision, severity string) pulse {
 	q = normalizeQuery(q)
 	byAgent := map[string]int{}
 	var p pulse
 	for _, ev := range evs {
-		if !matches(ev, q, decision) {
+		if !matches(ev, q, decision, severity) {
 			continue
 		}
 		p.Total++
@@ -387,20 +412,21 @@ func loadEvents(path string) []event {
 // honouring optional ?q= and ?decision= filters. This is the same aggregation
 // the browser renders live, exposed for scripting and headless monitoring.
 func (b *broker) handlePulse(w http.ResponseWriter, r *http.Request) {
-	p := computePulse(loadEvents(b.auditPath), r.URL.Query().Get("q"), r.URL.Query().Get("decision"))
+	q := r.URL.Query()
+	p := computePulse(loadEvents(b.auditPath), q.Get("q"), q.Get("decision"), q.Get("severity"))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(p)
 }
 
 // filterEvents returns the subset of the audit window that survives the wall's
-// ?q=/?decision= filters, in window order (oldest first). It shares the exact
-// matches predicate the pulse aggregate uses, so the export can never disagree
-// with the counts the wall shows for the same filter.
-func filterEvents(evs []event, q, decision string) []event {
+// ?q=/?decision=/?severity= filters, in window order (oldest first). It shares
+// the exact matches predicate the pulse aggregate uses, so the export can never
+// disagree with the counts the wall shows for the same filter.
+func filterEvents(evs []event, q, decision, severity string) []event {
 	q = normalizeQuery(q)
 	out := make([]event, 0, len(evs))
 	for _, ev := range evs {
-		if matches(ev, q, decision) {
+		if matches(ev, q, decision, severity) {
 			out = append(out, ev)
 		}
 	}
@@ -433,13 +459,14 @@ func csvSafe(s string) string {
 
 // handleExport serves the current (filtered) audit window as a downloadable
 // file so a decision snapshot can land in a compliance report or incident
-// write-up. It honours the SAME ?q=/?decision= filters as /pulse and the
-// browser, defaults to CSV, and serves JSON on ?format=json. It exposes only
+// write-up. It honours the SAME ?q=/?decision=/?severity= filters as /pulse and
+// the browser, defaults to CSV, and serves JSON on ?format=json. It exposes only
 // what /events and /pulse already serve over the same loopback bind — the
 // audit trail never records raw tool-call arguments — so it widens nothing.
 func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
-	evs := filterEvents(loadEvents(b.auditPath), r.URL.Query().Get("q"), r.URL.Query().Get("decision"))
-	if r.URL.Query().Get("format") == "json" {
+	q := r.URL.Query()
+	evs := filterEvents(loadEvents(b.auditPath), q.Get("q"), q.Get("decision"), q.Get("severity"))
+	if q.Get("format") == "json" {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Disposition", `attachment; filename="nockguard-wall.json"`)
 		_ = json.NewEncoder(w).Encode(evs)
