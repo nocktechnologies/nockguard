@@ -48,7 +48,7 @@ func TestComputePulse(t *testing.T) {
 	}
 
 	// No filters: every event counted, bucketed by decision.
-	p := computePulse(evs, "", "")
+	p := computePulse(evs, "", "", "")
 	if p.Total != 8 {
 		t.Fatalf("total: got %d want 8", p.Total)
 	}
@@ -74,22 +74,72 @@ func TestComputePulse(t *testing.T) {
 	}
 
 	// Decision filter respected: only allow events survive.
-	if pa := computePulse(evs, "", "allow"); pa.Total != 3 || pa.Approved != 3 || pa.Blocked != 0 || pa.Threats != 0 {
+	if pa := computePulse(evs, "", "allow", ""); pa.Total != 3 || pa.Approved != 3 || pa.Blocked != 0 || pa.Threats != 0 {
 		t.Fatalf("decision filter: got %+v want total 3, approved 3, blocked 0, threats 0", pa)
 	}
 
 	// Text filter respected: case-insensitive substring over "agent tool".
-	if pk := computePulse(evs, "KIT", ""); pk.Total != 2 || pk.Approved != 1 || pk.Blocked != 1 {
+	if pk := computePulse(evs, "KIT", "", ""); pk.Total != 2 || pk.Approved != 1 || pk.Blocked != 1 {
 		t.Fatalf("agent text filter: got %+v want total 2, approved 1, blocked 1", pk)
 	}
-	if pf := computePulse(evs, "webfetch", ""); pf.Total != 1 || pf.Pending != 1 {
+	if pf := computePulse(evs, "webfetch", "", ""); pf.Total != 1 || pf.Pending != 1 {
 		t.Fatalf("tool text filter: got %+v want total 1, pending 1", pf)
 	}
 
-	// Combined filters intersect.
-	pc := computePulse(evs, "ash", "allow")
+	// Severity filter respected. "threat" = any live catch (crit+high+low): the 3
+	// allows drop, leaving the 5 caught events.
+	if pt := computePulse(evs, "", "", "threat"); pt.Total != 5 || pt.Approved != 0 || pt.Threats != 5 {
+		t.Fatalf("threat severity filter: got %+v want total 5, approved 0, threats 5", pt)
+	}
+	// Exact tier: only the critical "rm -rf" block.
+	if pcrit := computePulse(evs, "", "", "critical"); pcrit.Total != 1 || pcrit.Critical != 1 || pcrit.Blocked != 1 {
+		t.Fatalf("critical severity filter: got %+v want total 1, critical 1, blocked 1", pcrit)
+	}
+	// "none" is a real severity (allows only), NOT the same as no filter.
+	if pn := computePulse(evs, "", "", "none"); pn.Total != 3 || pn.Approved != 3 || pn.Threats != 0 {
+		t.Fatalf("none severity filter: got %+v want total 3, approved 3, threats 0", pn)
+	}
+	// "low" = ratelimit + two hides.
+	if pl := computePulse(evs, "", "", "low"); pl.Total != 3 || pl.Low != 3 {
+		t.Fatalf("low severity filter: got %+v want total 3, low 3", pl)
+	}
+
+	// Combined filters intersect (text ∩ decision).
+	pc := computePulse(evs, "ash", "allow", "")
 	if pc.Total != 1 || len(pc.TopAgents) != 1 || pc.TopAgents[0].Agent != "ash" {
 		t.Fatalf("combined filter: got %+v want total 1, top agent ash", pc)
+	}
+	// Combined text ∩ severity: "ash" as a substring over "agent tool" catches
+	// kit's "Bash: rm -rf /" (critical) too, plus ash's ratelimit (low) and
+	// reasonless deny (high) — three threats; ash's allow drops as none.
+	if pcs := computePulse(evs, "ash", "", "threat"); pcs.Total != 3 || pcs.Threats != 3 || pcs.Critical != 1 || pcs.High != 1 || pcs.Low != 1 {
+		t.Fatalf("combined text+severity filter: got %+v want total 3, threats 3, crit/high/low 1/1/1", pcs)
+	}
+}
+
+// TestEmbeddedPageWiresSeverityFilter guards the embedded page against a
+// front-end regression the Go test suite would otherwise miss entirely: the
+// severity <select> must be present and the cosmetic CRIT/HIGH / THREATS ONLY
+// toggles it replaced must be fully gone. A dangling getElementById on a removed
+// id throws at script-parse time and renders the wall blank while every Go test
+// still passes green, so this asserts the contract at the markup level.
+func TestEmbeddedPageWiresSeverityFilter(t *testing.T) {
+	page, err := indexFS.ReadFile("index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	html := string(page)
+	for _, want := range []string{`id="f-severity"`, `p.set('severity'`, `fSeverity`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("embedded page missing severity-filter wiring: %q", want)
+		}
+	}
+	// Removed cosmetic toggles and their CSS-only hiding must leave no trace — a
+	// stale reference is a runtime throw, not a compile error.
+	for _, gone := range []string{"t-threats", "t-crit", "body.threats", "body.crit"} {
+		if strings.Contains(html, gone) {
+			t.Errorf("embedded page still references removed toggle: %q", gone)
+		}
 	}
 }
 
@@ -137,21 +187,30 @@ var exportEvents = []event{
 // as computePulse counts as Total, for the same filters. Both go through the
 // single shared matches() predicate, so a drift here is a real regression.
 func TestFilterEventsMatchesPulse(t *testing.T) {
-	cases := []struct{ q, decision string }{
-		{"", ""},
-		{"", "allow"},
-		{"ash", ""},
-		{"KIT", ""},      // case-insensitive
-		{"webfetch", ""}, // matches tool, not agent
-		{"ash", "allow"}, // combined
-		{"nomatch", ""},  // empty result
-		{"", "nonsense"}, // unknown decision → empty
+	cases := []struct{ q, decision, severity string }{
+		{"", "", ""},
+		{"", "allow", ""},
+		{"ash", "", ""},
+		{"KIT", "", ""},      // case-insensitive
+		{"webfetch", "", ""}, // matches tool, not agent
+		{"ash", "allow", ""}, // combined
+		{"nomatch", "", ""},  // empty result
+		{"", "nonsense", ""}, // unknown decision → empty
+		{"", "", "threat"},   // any live catch (crit+high+low)
+		{"", "", "critical"}, // exact tier
+		{"", "", "high"},
+		{"", "", "low"},
+		{"", "", "none"},        // allows only — distinct from no filter
+		{"", "", "nonsense"},    // unknown tier → empty
+		{"ash", "", "threat"},   // text ∩ severity
+		{"", "deny", "high"},    // decision ∩ severity
+		{"", "allow", "threat"}, // contradictory (allow is never a threat) → empty
 	}
 	for _, c := range cases {
-		got := len(filterEvents(exportEvents, c.q, c.decision))
-		want := computePulse(exportEvents, c.q, c.decision).Total
+		got := len(filterEvents(exportEvents, c.q, c.decision, c.severity))
+		want := computePulse(exportEvents, c.q, c.decision, c.severity).Total
 		if got != want {
-			t.Fatalf("filterEvents/pulse drift for q=%q decision=%q: rows=%d total=%d", c.q, c.decision, got, want)
+			t.Fatalf("filterEvents/pulse drift for q=%q decision=%q severity=%q: rows=%d total=%d", c.q, c.decision, c.severity, got, want)
 		}
 	}
 }
@@ -237,7 +296,7 @@ func TestHandleExportCSV(t *testing.T) {
 		t.Fatalf("formula injection not neutralised: reason=%q", reason)
 	}
 	// Server parity: exported data rows == pulse Total for the same filter.
-	total := computePulse(loadEvents(b.auditPath), "", "block").Total
+	total := computePulse(loadEvents(b.auditPath), "", "block", "").Total
 	if dataRows := len(recs) - 1; dataRows != total {
 		t.Fatalf("export/pulse row parity: csv=%d pulse=%d", dataRows, total)
 	}

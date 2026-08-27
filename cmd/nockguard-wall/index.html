@@ -82,7 +82,6 @@
   .dimquiet { color:var(--dim); }
 
   #feed { flex:1; overflow:hidden; padding:10px 14px; display:flex; flex-direction:column; gap:6px; }
-  body.threats #feed .row.allow { display:none; }
   #feed .row.fout { display:none; }
   .row {
     display:grid; grid-template-columns:80px 120px 1fr auto; align-items:center; gap:14px;
@@ -113,7 +112,6 @@
                 box-shadow:inset 0 0 0 1px rgba(255,77,77,.3); }
   .row[data-severity="critical"] { border-color:rgba(255,77,77,.55);
                 box-shadow:inset 0 0 0 1px rgba(255,77,77,.22); }
-  body.crit #feed .row:not([data-severity="critical"]):not([data-severity="high"]) { display:none; }
   .allow      { border-left-color:var(--allow); }
   .allow      .badge{ background:rgba(63,185,80,.15); color:var(--allow); }
   .deny       { border-left-color:var(--deny); }  .deny .badge{ background:rgba(240,136,62,.15); color:var(--deny); }
@@ -194,8 +192,6 @@
       <div class="pill limited"><span class="n" id="c-rate">0</span><span class="l">limited</span></div>
       <div class="pill denied"><span class="n" id="c-deny">0</span><span class="l">denied/hidden</span></div>
       <div class="pill caught"><span class="n" id="c-caught">0%</span><span class="l">catch rate</span></div>
-      <button class="toggle" id="t-threats" title="show only non-allowed">THREATS ONLY</button>
-      <button class="toggle" id="t-crit" title="show only critical/high threats">CRIT/HIGH</button>
       <button class="toggle snd" id="t-sound" title="beep when something is blocked">🔊 SOUND</button>
     </div>
     <div class="filters">
@@ -207,6 +203,14 @@
         <option value="block">block</option>
         <option value="ratelimit">ratelimit</option>
         <option value="hide">hide</option>
+      </select>
+      <select id="f-severity" class="finput" title="filter by threat severity">
+        <option value="">all severities</option>
+        <option value="threat">threats (crit+high+low)</option>
+        <option value="critical">critical</option>
+        <option value="high">high</option>
+        <option value="low">low</option>
+        <option value="none">none (non-catch)</option>
       </select>
       <button class="toggle" id="f-clear" title="clear filters">✕ CLEAR</button>
       <a class="toggle" id="f-export" title="download the current audit window (respects the active filters) as CSV" href="/export" download>⬇ EXPORT</a>
@@ -248,17 +252,7 @@
 
   // --- toggles ---
   let soundOn = false;
-  const tThreats = document.getElementById('t-threats');
-  const tCrit = document.getElementById('t-crit');
   const tSound = document.getElementById('t-sound');
-  tThreats.addEventListener('click', () => {
-    document.body.classList.toggle('threats');
-    tThreats.classList.toggle('on', document.body.classList.contains('threats'));
-  });
-  tCrit.addEventListener('click', () => {
-    document.body.classList.toggle('crit');
-    tCrit.classList.toggle('on', document.body.classList.contains('crit'));
-  });
   let audioCtx = null;
   tSound.addEventListener('click', () => {
     soundOn = !soundOn;
@@ -270,10 +264,11 @@
   // --- filters: substring match on agent/tool + exact decision ---
   const fText = document.getElementById('f-text');
   const fDecision = document.getElementById('f-decision');
+  const fSeverity = document.getElementById('f-severity');
   const fClear = document.getElementById('f-clear');
   const fCount = document.getElementById('f-count');
   const fExport = document.getElementById('f-export');
-  let fq = '', fdec = '';
+  let fq = '', fdec = '', fsev = '';
   // Build the /export URL from the SAME inputs that drive the row filter, so the
   // downloaded file matches the filter the operator is looking at. The server
   // re-applies the identical matches() predicate over the persisted window.
@@ -282,18 +277,30 @@
     const q = fText.value.trim();
     if (q) p.set('q', q);
     if (fDecision.value) p.set('decision', fDecision.value);
+    if (fSeverity.value) p.set('severity', fSeverity.value);
     const qs = p.toString();
     fExport.href = '/export' + (qs ? '?' + qs : '');
   }
+  // Mirrors the server's matches() severity leg: "threat" = any live catch
+  // (critical|high|low, i.e. not none); any other value is an exact tier match.
+  // Empty means no severity filter (distinct from "none", which is the
+  // non-catch bucket: allows, dry-run shadow would-denies, and observe audits).
+  function sevMatches(sev) {
+    if (!fsev) return true;
+    if (fsev === 'threat') return sev !== 'none';
+    return sev === fsev;
+  }
   function rowMatches(row) {
     if (fdec && (row.dataset.decision || '') !== fdec) return false;
+    if (!sevMatches(row.dataset.severity || 'none')) return false;
     if (fq && ((row.dataset.agent || '') + ' ' + (row.dataset.tool || '')).indexOf(fq) === -1) return false;
     return true;
   }
   function applyFilters() {
     fq = fText.value.trim().toLowerCase();
     fdec = fDecision.value;
-    const active = !!(fq || fdec);
+    fsev = fSeverity.value;
+    const active = !!(fq || fdec || fsev);
     fClear.classList.toggle('on', active);
     let shown = 0, tot = 0;
     for (const row of feed.children) {
@@ -309,7 +316,8 @@
   }
   fText.addEventListener('input', applyFilters);
   fDecision.addEventListener('change', applyFilters);
-  fClear.addEventListener('click', () => { fText.value = ''; fDecision.value = ''; applyFilters(); });
+  fSeverity.addEventListener('change', applyFilters);
+  fClear.addEventListener('click', () => { fText.value = ''; fDecision.value = ''; fSeverity.value = ''; applyFilters(); });
 
   // --- pulse header: a filter-aware, at-a-glance aggregate over the events on
   // the wall right now. Recomputed from the retained rows (bounded by MAX_ROWS)
@@ -427,10 +435,10 @@
       '<span class="verdict">' + vChip + sevChip +
         '<span class="badge">' + esc(ev.decision || '?') + '</span></span>';
     feed.prepend(row);
-    if ((fq || fdec) && !rowMatches(row)) row.classList.add('fout');
+    if ((fq || fdec || fsev) && !rowMatches(row)) row.classList.add('fout');
     while (feed.childElementCount > MAX_ROWS) feed.lastElementChild.remove();
-    if (fq || fdec) applyFilters(); // refresh the "shown / total" count
-    else renderPulse();             // (applyFilters already refreshes the pulse)
+    if (fq || fdec || fsev) applyFilters(); // refresh the "shown / total" count
+    else renderPulse();                     // (applyFilters already refreshes the pulse)
     bump(dec);
     // The alarm fires on the loudest signals: any block, and any critical catch
     // (e.g. a secret-exfil deny) — a routine allowlist deny stays quiet.
