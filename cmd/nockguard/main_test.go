@@ -52,6 +52,21 @@ func TestVerifyCommandCleanTrailProtected(t *testing.T) {
 	}
 }
 
+func TestKeygenHelpPrintsUsageWithoutKeyMaterial(t *testing.T) {
+	code, stdout, stderr := runCommandForTest(t, "keygen", "--help")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "nockguard keygen [--agent <name>]") {
+		t.Fatalf("help output should include keygen usage, got:\n%s", stderr)
+	}
+	output := stdout + stderr
+	if strings.Contains(output, "NOCKGUARD_AUDIT_ED25519_KEY=") ||
+		strings.Contains(output, "NOCKGUARD_AUDIT_ED25519_PUB=") {
+		t.Fatalf("keygen --help emitted a key-material line:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+}
+
 func TestVerifyCommandTamperedTrailExit2(t *testing.T) {
 	dir := t.TempDir()
 	path, pubHex := writeEd25519Trail(t, dir, "kit")

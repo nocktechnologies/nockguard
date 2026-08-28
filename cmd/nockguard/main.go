@@ -1157,6 +1157,13 @@ func runTrust(args []string) int {
 // (NOCKGUARD_AGENT_<UPPER>_ED25519_KEY / _PUB) so each agent can hold its own
 // signing identity. Without --agent it emits the legacy global variable names.
 func runKeygen(args []string) int {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			printUsage()
+			return 0
+		}
+	}
+
 	var agentName string
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--agent" {
