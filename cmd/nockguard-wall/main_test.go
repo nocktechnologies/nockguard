@@ -48,7 +48,7 @@ func TestComputePulse(t *testing.T) {
 	}
 
 	// No filters: every event counted, bucketed by decision.
-	p := computePulse(evs, "", "", "")
+	p := computePulse(evs, "", "", "", nil, nil)
 	if p.Total != 8 {
 		t.Fatalf("total: got %d want 8", p.Total)
 	}
@@ -74,45 +74,45 @@ func TestComputePulse(t *testing.T) {
 	}
 
 	// Decision filter respected: only allow events survive.
-	if pa := computePulse(evs, "", "allow", ""); pa.Total != 3 || pa.Approved != 3 || pa.Blocked != 0 || pa.Threats != 0 {
+	if pa := computePulse(evs, "", "allow", "", nil, nil); pa.Total != 3 || pa.Approved != 3 || pa.Blocked != 0 || pa.Threats != 0 {
 		t.Fatalf("decision filter: got %+v want total 3, approved 3, blocked 0, threats 0", pa)
 	}
 
 	// Text filter respected: case-insensitive substring over "agent tool".
-	if pk := computePulse(evs, "KIT", "", ""); pk.Total != 2 || pk.Approved != 1 || pk.Blocked != 1 {
+	if pk := computePulse(evs, "KIT", "", "", nil, nil); pk.Total != 2 || pk.Approved != 1 || pk.Blocked != 1 {
 		t.Fatalf("agent text filter: got %+v want total 2, approved 1, blocked 1", pk)
 	}
-	if pf := computePulse(evs, "webfetch", "", ""); pf.Total != 1 || pf.Pending != 1 {
+	if pf := computePulse(evs, "webfetch", "", "", nil, nil); pf.Total != 1 || pf.Pending != 1 {
 		t.Fatalf("tool text filter: got %+v want total 1, pending 1", pf)
 	}
 
 	// Severity filter respected. "threat" = any live catch (crit+high+low): the 3
 	// allows drop, leaving the 5 caught events.
-	if pt := computePulse(evs, "", "", "threat"); pt.Total != 5 || pt.Approved != 0 || pt.Threats != 5 {
+	if pt := computePulse(evs, "", "", "threat", nil, nil); pt.Total != 5 || pt.Approved != 0 || pt.Threats != 5 {
 		t.Fatalf("threat severity filter: got %+v want total 5, approved 0, threats 5", pt)
 	}
 	// Exact tier: only the critical "rm -rf" block.
-	if pcrit := computePulse(evs, "", "", "critical"); pcrit.Total != 1 || pcrit.Critical != 1 || pcrit.Blocked != 1 {
+	if pcrit := computePulse(evs, "", "", "critical", nil, nil); pcrit.Total != 1 || pcrit.Critical != 1 || pcrit.Blocked != 1 {
 		t.Fatalf("critical severity filter: got %+v want total 1, critical 1, blocked 1", pcrit)
 	}
 	// "none" is a real severity (allows only), NOT the same as no filter.
-	if pn := computePulse(evs, "", "", "none"); pn.Total != 3 || pn.Approved != 3 || pn.Threats != 0 {
+	if pn := computePulse(evs, "", "", "none", nil, nil); pn.Total != 3 || pn.Approved != 3 || pn.Threats != 0 {
 		t.Fatalf("none severity filter: got %+v want total 3, approved 3, threats 0", pn)
 	}
 	// "low" = ratelimit + two hides.
-	if pl := computePulse(evs, "", "", "low"); pl.Total != 3 || pl.Low != 3 {
+	if pl := computePulse(evs, "", "", "low", nil, nil); pl.Total != 3 || pl.Low != 3 {
 		t.Fatalf("low severity filter: got %+v want total 3, low 3", pl)
 	}
 
 	// Combined filters intersect (text ∩ decision).
-	pc := computePulse(evs, "ash", "allow", "")
+	pc := computePulse(evs, "ash", "allow", "", nil, nil)
 	if pc.Total != 1 || len(pc.TopAgents) != 1 || pc.TopAgents[0].Agent != "ash" {
 		t.Fatalf("combined filter: got %+v want total 1, top agent ash", pc)
 	}
 	// Combined text ∩ severity: "ash" as a substring over "agent tool" catches
 	// kit's "Bash: rm -rf /" (critical) too, plus ash's ratelimit (low) and
 	// reasonless deny (high) — three threats; ash's allow drops as none.
-	if pcs := computePulse(evs, "ash", "", "threat"); pcs.Total != 3 || pcs.Threats != 3 || pcs.Critical != 1 || pcs.High != 1 || pcs.Low != 1 {
+	if pcs := computePulse(evs, "ash", "", "threat", nil, nil); pcs.Total != 3 || pcs.Threats != 3 || pcs.Critical != 1 || pcs.High != 1 || pcs.Low != 1 {
 		t.Fatalf("combined text+severity filter: got %+v want total 3, threats 3, crit/high/low 1/1/1", pcs)
 	}
 }
@@ -207,8 +207,8 @@ func TestFilterEventsMatchesPulse(t *testing.T) {
 		{"", "allow", "threat"}, // contradictory (allow is never a threat) → empty
 	}
 	for _, c := range cases {
-		got := len(filterEvents(exportEvents, c.q, c.decision, c.severity))
-		want := computePulse(exportEvents, c.q, c.decision, c.severity).Total
+		got := len(filterEvents(exportEvents, c.q, c.decision, c.severity, nil, nil))
+		want := computePulse(exportEvents, c.q, c.decision, c.severity, nil, nil).Total
 		if got != want {
 			t.Fatalf("filterEvents/pulse drift for q=%q decision=%q severity=%q: rows=%d total=%d", c.q, c.decision, c.severity, got, want)
 		}
@@ -296,7 +296,7 @@ func TestHandleExportCSV(t *testing.T) {
 		t.Fatalf("formula injection not neutralised: reason=%q", reason)
 	}
 	// Server parity: exported data rows == pulse Total for the same filter.
-	total := computePulse(loadEvents(b.auditPath), "", "block", "").Total
+	total := computePulse(loadEvents(b.auditPath), "", "block", "", nil, nil).Total
 	if dataRows := len(recs) - 1; dataRows != total {
 		t.Fatalf("export/pulse row parity: csv=%d pulse=%d", dataRows, total)
 	}
@@ -643,4 +643,207 @@ func replayedVerifyStates(t *testing.T, buf *bytes.Buffer) []string {
 		out = append(out, ev.VerifyState)
 	}
 	return out
+}
+
+// TestParseTimeFilter verifies that parseTimeFilter correctly parses RFC3339
+// timestamps and Go duration strings, and returns nil for invalid values.
+func TestParseTimeFilter(t *testing.T) {
+	now := time.Now()
+
+	// Test empty string returns nil
+	if got := parseTimeFilter(""); got != nil {
+		t.Fatalf("parseTimeFilter empty: got %v, want nil", got)
+	}
+
+	// Test RFC3339 parsing
+	ts := now.Format(time.RFC3339)
+	parsed := parseTimeFilter(ts)
+	if parsed == nil {
+		t.Fatalf("parseTimeFilter RFC3339: returned nil")
+	}
+	// Check that the parsed time is close to now (within a second)
+	if diff := now.Sub(*parsed); diff < -1*time.Second || diff > 1*time.Second {
+		t.Fatalf("parseTimeFilter RFC3339: got %v, want ~%v (diff=%v)", parsed, now, diff)
+	}
+
+	// Test duration parsing: "15m" should be ~15 minutes ago
+	dur15m := parseTimeFilter("15m")
+	if dur15m == nil {
+		t.Fatalf("parseTimeFilter 15m: returned nil")
+	}
+	expected15m := time.Now().Add(-15 * time.Minute)
+	if diff := expected15m.Sub(*dur15m); diff < -1*time.Second || diff > 1*time.Second {
+		t.Fatalf("parseTimeFilter 15m: got %v, want ~%v", dur15m, expected15m)
+	}
+
+	// Test invalid string returns nil (ignored)
+	if got := parseTimeFilter("invalid"); got != nil {
+		t.Fatalf("parseTimeFilter invalid: got %v, want nil", got)
+	}
+}
+
+// TestComputePulseWithTimeRange ensures that time bounds (since/until) filter
+// events correctly in the pulse aggregate.
+func TestComputePulseWithTimeRange(t *testing.T) {
+	now := time.Now()
+	past30min := now.Add(-30 * time.Minute)
+	past2h := now.Add(-2 * time.Hour)
+	future := now.Add(1 * time.Hour)
+
+	evs := []event{
+		{Ts: past2h.Format(time.RFC3339), Agent: "kit", Tool: "Read", Decision: "allow"},
+		{Ts: past30min.Format(time.RFC3339), Agent: "kit", Tool: "Bash", Decision: "block", Reason: "destructive"},
+		{Ts: now.Format(time.RFC3339), Agent: "ash", Tool: "WebFetch", Decision: "allow"},
+		{Ts: future.Format(time.RFC3339), Agent: "ash", Tool: "Read", Decision: "allow"},
+	}
+
+	// No time filter: all 4 events
+	p := computePulse(evs, "", "", "", nil, nil)
+	if p.Total != 4 {
+		t.Fatalf("no time filter: got %d, want 4", p.Total)
+	}
+
+	// Since 1 hour ago: should exclude the oldest (2h ago), get 3 events
+	since1h := time.Now().Add(-1 * time.Hour)
+	p = computePulse(evs, "", "", "", &since1h, nil)
+	if p.Total != 3 {
+		t.Fatalf("since 1h ago: got %d, want 3", p.Total)
+	}
+
+	// Until now: excludes future events, gets past ones
+	p = computePulse(evs, "", "", "", nil, &now)
+	if p.Total != 3 {
+		t.Fatalf("until now: got %d, want 3", p.Total)
+	}
+
+	// Since 1h ago AND until now: excludes both the very old (2h) and future
+	p = computePulse(evs, "", "", "", &since1h, &now)
+	if p.Total != 2 {
+		t.Fatalf("since 1h and until now: got %d, want 2", p.Total)
+	}
+}
+
+// TestFilterEventsMatchesPulseWithTimeRange locks the invariant that export and
+// pulse never disagree on time-filtered results.
+func TestFilterEventsMatchesPulseWithTimeRange(t *testing.T) {
+	now := time.Now()
+	past1h := now.Add(-1 * time.Hour)
+
+	evs := []event{
+		{Ts: past1h.Format(time.RFC3339), Agent: "kit", Tool: "Read", Decision: "allow"},
+		{Ts: now.Format(time.RFC3339), Agent: "ash", Tool: "Bash", Decision: "block", Reason: "x"},
+	}
+
+	// Test several filter combinations to ensure export/pulse parity
+	cases := []struct {
+		name                  string
+		q, decision, severity string
+		since, until          *time.Time
+	}{
+		{"no time filter", "", "", "", nil, nil},
+		{"since in past", "", "", "", &past1h, nil},
+		{"until now", "", "", "", nil, &now},
+		{"with other filters", "ash", "block", "", nil, nil},
+	}
+
+	for _, c := range cases {
+		got := len(filterEvents(evs, c.q, c.decision, c.severity, c.since, c.until))
+		want := computePulse(evs, c.q, c.decision, c.severity, c.since, c.until).Total
+		if got != want {
+			t.Fatalf("%s: filterEvents/pulse drift: rows=%d total=%d", c.name, got, want)
+		}
+	}
+}
+
+// TestEmbeddedPageWiresTimeRangeFilter guards against regression in the embedded
+// page: the time-range <select> must be present and wired through to applyFilters,
+// and rows must carry data-ts for timestamp filtering.
+func TestEmbeddedPageWiresTimeRangeFilter(t *testing.T) {
+	page, err := indexFS.ReadFile("index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	html := string(page)
+	for _, want := range []string{`id="f-timerange"`, `fTimerange`, `ftimeSinceMs`, `durationToSince`, `dataset.ts`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("embedded page missing time-range filter wiring: %q", want)
+		}
+	}
+}
+
+// TestHandleExportWithTimeRange ensures that ?since= query params are correctly
+// parsed and passed through to filterEvents, and that invalid time values are
+// gracefully ignored (no 500 error).
+func TestHandleExportWithTimeRange(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "audit-*.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	past1h := now.Add(-1 * time.Hour)
+	future := now.Add(1 * time.Hour)
+
+	rows := []event{
+		{Ts: past1h.Format(time.RFC3339), Agent: "kit", Tool: "Read", Decision: "allow"},
+		{Ts: now.Format(time.RFC3339), Agent: "ash", Tool: "Edit", Decision: "block"},
+		{Ts: future.Format(time.RFC3339), Agent: "bob", Tool: "WebFetch", Decision: "allow"},
+	}
+	for _, ev := range rows {
+		b, _ := json.Marshal(ev)
+		if _, err := f.Write(append(b, '\n')); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	b := newBroker()
+	b.auditPath = f.Name()
+
+	// Test with a duration since parameter: "1h" should exclude the oldest event
+	req := httptest.NewRequest(http.MethodGet, "/export?since=1h", nil).WithContext(t.Context())
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("export with since param: status = %d, want 200", rec.Code)
+	}
+
+	recs, err := csv.NewReader(strings.NewReader(rec.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("export is not valid CSV: %v", err)
+	}
+	// Should have header + 2 rows (not the 1h-old event)
+	if len(recs) != 3 {
+		t.Fatalf("export with since=1h: got %d rows (header + data), want 3 (header + 2 data)", len(recs))
+	}
+
+	// Test with an invalid since value: should be silently ignored, return all rows
+	req = httptest.NewRequest(http.MethodGet, "/export?since=not-a-time", nil).WithContext(t.Context())
+	rec = httptest.NewRecorder()
+	b.handleExport(rec, req)
+
+	recs, err = csv.NewReader(strings.NewReader(rec.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("export with invalid since: %v", err)
+	}
+	// Should have all rows (invalid value ignored)
+	if len(recs) != 4 {
+		t.Fatalf("export with invalid since: got %d rows, want 4 (header + 3 data)", len(recs))
+	}
+}
+
+// TestParseTimeFilterISOWithMillis verifies that parseTimeFilter handles
+// ISO-8601 timestamps with milliseconds, which the browser's Date.toISOString() produces.
+func TestParseTimeFilterISOWithMillis(t *testing.T) {
+	// ISO-8601 with milliseconds and Z suffix (what JS Date.toISOString() produces)
+	isoTs := "2026-09-02T12:34:56.789Z"
+	parsed := parseTimeFilter(isoTs)
+	if parsed == nil {
+		t.Fatalf("parseTimeFilter with ISO-millis: returned nil for %q", isoTs)
+	}
+	// Should be parseable; the exact time doesn't matter for this test,
+	// just that it's not nil
+	_ = parsed
 }
