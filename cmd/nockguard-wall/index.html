@@ -321,7 +321,7 @@
     // Time-range filtering: parse row timestamp and compare numerically.
     if (Number.isFinite(ftimeSinceMs)) {
       const rowTs = Date.parse(row.dataset.ts || '');
-      if (!Number.isFinite(rowTs) || rowTs < ftimeSinceMs) return false;
+      if (Number.isFinite(rowTs) && rowTs < ftimeSinceMs) return false;
     }
     return true;
   }
@@ -525,6 +525,10 @@
   }
   checkChain();
   setInterval(checkChain, 15000);
+  // Re-apply filters every 30s to age out rows that pass the time window
+  setInterval(() => {
+    if (fTimerange.value) applyFilters();
+  }, 30000);
 </script>
 </body>
 </html>

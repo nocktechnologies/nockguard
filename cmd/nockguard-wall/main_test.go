@@ -847,3 +847,40 @@ func TestParseTimeFilterISOWithMillis(t *testing.T) {
 	// just that it's not nil
 	_ = parsed
 }
+
+// TestInvalidTimestampRetainedByFilterAndPulse verifies that events with
+// unparseable timestamps pass the time filter (retained by both filterEvents
+// and computePulse), matching the server's silent-pass-on-parse-error policy.
+func TestInvalidTimestampRetainedByFilterAndPulse(t *testing.T) {
+	now := time.Now()
+	thirtyMinAgo := now.Add(-30 * time.Minute)
+
+	evs := []event{
+		{Ts: "not-a-timestamp", Agent: "kit", Tool: "Read", Decision: "allow"},
+		{Ts: now.Format(time.RFC3339), Agent: "ash", Tool: "Bash", Decision: "block", Reason: "x"},
+	}
+
+	// Apply a time filter: only events from the last 30 minutes
+	filtered := filterEvents(evs, "", "", "", &thirtyMinAgo, nil)
+	pulse := computePulse(evs, "", "", "", &thirtyMinAgo, nil)
+
+	// Both must retain all 2 events (invalid Ts passes the filter)
+	if len(filtered) != 2 {
+		t.Fatalf("filterEvents with invalid Ts and active since: got %d events, want 2", len(filtered))
+	}
+	if pulse.Total != 2 {
+		t.Fatalf("computePulse with invalid Ts and active since: got total=%d, want 2", pulse.Total)
+	}
+
+	// Verify the invalid-Ts event is actually in the returned slice
+	foundInvalid := false
+	for _, ev := range filtered {
+		if ev.Agent == "kit" {
+			foundInvalid = true
+			break
+		}
+	}
+	if !foundInvalid {
+		t.Fatalf("filterEvents: invalid-Ts event (Agent=kit) not found in returned slice")
+	}
+}
