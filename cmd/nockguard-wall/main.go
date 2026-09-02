@@ -290,7 +290,7 @@ func bucket(decision string) string {
 // from the count. The sentinel severity "threat" means "any live catch"
 // (critical|high|low, i.e. not none); an empty string means no severity filter,
 // which is distinct from severity="none" (allows / non-catches only).
-func matches(ev event, q, decision, severity string) bool {
+func matches(ev event, q, decision, severity string, since, until *time.Time) bool {
 	if decision != "" && ev.Decision != decision {
 		return false
 	}
@@ -307,6 +307,18 @@ func matches(ev event, q, decision, severity string) bool {
 	if q != "" && !strings.Contains(strings.ToLower(ev.Agent+" "+ev.Tool), q) {
 		return false
 	}
+	// Time filtering: parse ev.Ts as RFC3339 and check bounds.
+	if since != nil || until != nil {
+		if evTime, err := time.Parse(time.RFC3339, ev.Ts); err == nil {
+			if since != nil && evTime.Before(*since) {
+				return false
+			}
+			if until != nil && evTime.After(*until) {
+				return false
+			}
+		}
+		// Parse error is silently ignored (event passes the time filter).
+	}
 	return true
 }
 
@@ -320,16 +332,36 @@ const severityThreat = "threat"
 // against it directly. Every caller normalizes once, up front.
 func normalizeQuery(q string) string { return strings.ToLower(strings.TrimSpace(q)) }
 
+// parseTimeFilter parses a time filter value: either an RFC3339 timestamp or a
+// Go duration string (e.g., "15m", "1h"). Durations are interpreted as
+// "now - duration". Invalid values return nil (no filter applied).
+func parseTimeFilter(s string) *time.Time {
+	if s == "" {
+		return nil
+	}
+	// Try RFC3339 first
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return &t
+	}
+	// Try duration (e.g., "15m", "1h")
+	if d, err := time.ParseDuration(s); err == nil {
+		t := time.Now().Add(-d)
+		return &t
+	}
+	// Invalid value ignored
+	return nil
+}
+
 // computePulse aggregates events into a pulse, honouring the same filters the
 // wall exposes: a case-insensitive substring over "agent tool", an exact
 // decision match, and a threat-severity match. It is O(events-in-window) — a
 // single pass, no re-scan.
-func computePulse(evs []event, q, decision, severity string) pulse {
+func computePulse(evs []event, q, decision, severity string, since, until *time.Time) pulse {
 	q = normalizeQuery(q)
 	byAgent := map[string]int{}
 	var p pulse
 	for _, ev := range evs {
-		if !matches(ev, q, decision, severity) {
+		if !matches(ev, q, decision, severity, since, until) {
 			continue
 		}
 		p.Total++
@@ -413,7 +445,9 @@ func loadEvents(path string) []event {
 // the browser renders live, exposed for scripting and headless monitoring.
 func (b *broker) handlePulse(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	p := computePulse(loadEvents(b.auditPath), q.Get("q"), q.Get("decision"), q.Get("severity"))
+	since := parseTimeFilter(q.Get("since"))
+	until := parseTimeFilter(q.Get("until"))
+	p := computePulse(loadEvents(b.auditPath), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(p)
 }
@@ -422,11 +456,11 @@ func (b *broker) handlePulse(w http.ResponseWriter, r *http.Request) {
 // ?q=/?decision=/?severity= filters, in window order (oldest first). It shares
 // the exact matches predicate the pulse aggregate uses, so the export can never
 // disagree with the counts the wall shows for the same filter.
-func filterEvents(evs []event, q, decision, severity string) []event {
+func filterEvents(evs []event, q, decision, severity string, since, until *time.Time) []event {
 	q = normalizeQuery(q)
 	out := make([]event, 0, len(evs))
 	for _, ev := range evs {
-		if matches(ev, q, decision, severity) {
+		if matches(ev, q, decision, severity, since, until) {
 			out = append(out, ev)
 		}
 	}
@@ -465,7 +499,9 @@ func csvSafe(s string) string {
 // audit trail never records raw tool-call arguments — so it widens nothing.
 func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	evs := filterEvents(loadEvents(b.auditPath), q.Get("q"), q.Get("decision"), q.Get("severity"))
+	since := parseTimeFilter(q.Get("since"))
+	until := parseTimeFilter(q.Get("until"))
+	evs := filterEvents(loadEvents(b.auditPath), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
 	if q.Get("format") == "json" {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Disposition", `attachment; filename="nockguard-wall.json"`)
