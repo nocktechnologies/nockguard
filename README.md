@@ -1,4 +1,4 @@
-# NockGuard
+# NockGuard™
 
 MCP firewall for AI agent fleets. Guard your agent's tools.
 
