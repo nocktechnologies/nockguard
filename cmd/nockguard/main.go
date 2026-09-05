@@ -1378,17 +1378,17 @@ Evidence packs:
 
 Examples:
   nockguard init                                        # scaffold a default-deny starter policy
-  nockguard proxy --upstream "npx mcp-server-nockcc" --agent kit --policy policy.yaml
-  nockguard mcp-http --upstream https://cc.nocktechnologies.io/mcp --agent mira --auth-env NOCKCC_MCP_AUTH
-  nockguard mcp-listen --listen 127.0.0.1:8790 --upstream https://cc.nocktechnologies.io/mcp --agent mira --policy policy.yaml
-  nockguard egress-proxy --listen 127.0.0.1:8899 --agent kit --policy egress.yaml
-  nockguard keygen --agent kit                          # generate per-agent keypair
-  nockguard verify --agent kit                          # prove kit's trail is intact + non-repudiable (exit 0 = clean, 2 = tampered)
+  nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project" --agent coder --policy policy.yaml
+  nockguard mcp-http --upstream https://mcp.example.com/mcp --agent coder --auth-env MCP_AUTH
+  nockguard mcp-listen --listen 127.0.0.1:8790 --upstream https://mcp.example.com/mcp --agent coder --policy policy.yaml
+  nockguard egress-proxy --listen 127.0.0.1:8899 --agent coder --policy egress.yaml
+  nockguard keygen --agent coder                        # generate per-agent keypair
+  nockguard verify --agent coder                        # prove coder's trail is intact + non-repudiable (exit 0 = clean, 2 = tampered)
   nockguard selftest --policy policy.yaml               # prove the firewall BLOCKS a denied tool + catches a secret (exit 0 = proven, 2 = gap)
   nockguard verify --all                                # prove EVERY per-agent trail in ~/.nockguard/logs in one command
-  nockguard policy propose --agent kit                   # derive a shadow allowlist from kit's observed allowed tools
-  nockguard policy shadow-report --agent kit             # count shadow would-deny misses by tool
-  nockguard evidence --framework soc2 --agent kit -o kit-soc2.html   # SOC2 pack for kit's signed trail
+  nockguard policy propose --agent coder                 # derive a shadow allowlist from coder's observed allowed tools
+  nockguard policy shadow-report --agent coder           # count shadow would-deny misses by tool
+  nockguard evidence --framework soc2 --agent coder -o coder-soc2.html   # SOC2 pack for coder's signed trail
   nockguard keygen                                      # generate global keypair (legacy)
   nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB  # verify global trail`)
 }
