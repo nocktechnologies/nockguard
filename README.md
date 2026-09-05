@@ -1,18 +1,54 @@
 # NockGuard
 
-MCP firewall for AI agent fleets. Guard your agent's tools.
+**The MCP firewall.** Put NockGuard in front of any MCP server and every tool call your agent makes is policy-checked, blocked when it should be, and written to a signed audit trail nobody can quietly edit — including you.
 
-NockGuard is an MCP proxy that sits between AI agents and their MCP servers. Every tool call passes through NockGuard's policy engine before reaching the server. If the call violates policy, NockGuard blocks it and returns an error to the agent.
+Every agent connector is untrusted until proven otherwise. NockGuard is how you prove it.
 
 ```
-Agent (Claude Code, Codex, Cursor, etc.)
+Agent (Claude Code, Codex, Cursor, any MCP client)
     |
     v
-NockGuard (MCP Proxy)
-    | <- Policy check: allowlist, deny, wildcard match
+NockGuard  ── allow / deny / ask ──▶  signed audit trail  ──▶  `nockguard verify`
+    |
     v
-MCP Server (NockCC, GitHub, filesystem, etc.)
+MCP server (filesystem, GitHub, your own)
 ```
+
+## See it in 30 seconds
+
+```bash
+brew install nocktechnologies/tap/nockguard      # or: go install github.com/nocktechnologies/nockguard/cmd/nockguard@latest
+
+nockguard init                                   # writes ~/.nockguard/policy.yaml (default-deny starter; never clobbers an existing one)
+nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem ~/work" --agent coder
+```
+
+Point your agent at `nockguard` instead of the server:
+
+```json
+{
+  "mcpServers": {
+    "files": {
+      "command": "nockguard",
+      "args": ["proxy", "--upstream", "npx -y @modelcontextprotocol/server-filesystem ~/work", "--agent", "coder"]
+    }
+  }
+}
+```
+
+From here every `tools/call` flows through the policy engine and lands in the audit trail. Then:
+
+```bash
+nockguard verify --agent coder        # prove the trail is intact and authentic (exit 0), or tampered (exit 2)
+nockguard policy propose --agent coder # turn what the agent actually used into a starter allowlist
+nockguard selftest                     # prove the firewall really BLOCKS — a denied tool and a leaked secret, through the live gate
+```
+
+`selftest` is the one to run first if you only run one: it is proof-of-block, not a config check. A firewall that proves nothing does not pass.
+
+### Observe first, then enforce
+
+You do not have to write a policy up front. Run in `mode: allow` with the audit trail on, let the agent work, then `policy propose` gives you an allowlist made of the tools it really used, `policy shadow-report` shows what a stricter policy *would* have denied, and you flip to `mode: deny` when the shadow window is clean. The trail you built while observing is the same trail you audit later.
 
 ## Install
 
@@ -26,67 +62,45 @@ Or build from source:
 go install github.com/nocktechnologies/nockguard/cmd/nockguard@latest
 ```
 
-## Quick Start
+## Writing a policy
 
-The fastest path — scaffold a default-deny starter policy, then run the firewall:
-
-```bash
-nockguard init                                  # writes ~/.nockguard/policy.yaml (won't clobber an existing one)
-nockguard proxy --upstream "npx mcp-server-nockcc" --agent my-agent
-```
-
-`init` generates a commented, default-deny policy you edit in place — no hand-writing YAML to get started. Or write one yourself:
-
-1. Create a policy file:
+`nockguard init` writes a commented, default-deny starter you edit in place. Or write one yourself — per-agent allow/deny with `*` wildcards, and a `default` for agents you did not name:
 
 ```yaml
 # policy.yaml
 agents:
-  kit:
+  coder:
     allow:
-      - "nockcc_nock_*"
-      - "nockcc_pipeline_*"
+      - "read_*"
+      - "search_*"
       - "github_*"
     deny:
-      - "nockcc_kill_switch_set"
+      - "github_delete_*"
 
-  beck:
+  reviewer:
     allow:
-      - "nockcc_nock_*"
-      - "nockcc_ops_log_*"
+      - "read_*"
+      - "search_*"
     deny:
-      - "nockcc_spend_*"
+      - "write_*"
 
   default:
     mode: allow
     deny:
-      - "nockcc_kill_switch_set"
-      - "nockcc_private_*"
+      - "deploy_*"
+      - "*_delete_*"
 ```
-
-2. Run NockGuard as a proxy:
 
 ```bash
 nockguard proxy \
-  --upstream "npx mcp-server-nockcc" \
-  --agent kit \
+  --upstream "npx -y @modelcontextprotocol/server-filesystem ~/work" \
+  --agent coder \
   --policy policy.yaml
 ```
 
-3. Point your agent at NockGuard instead of the MCP server:
+`--upstream` and `--agent` are required; `--policy` defaults to `~/.nockguard/policy.yaml`. An agent with no policy and no `default` is **fail-closed**: every tool is denied and NockGuard says so loudly at startup.
 
-```json
-{
-  "mcpServers": {
-    "nockcc": {
-      "command": "nockguard",
-      "args": ["proxy", "--upstream", "npx mcp-server-nockcc", "--agent", "kit", "--policy", "policy.yaml"]
-    }
-  }
-}
-```
-
-## Policy Rules
+## Policy rules
 
 - **allow**: Tool patterns the agent can use. Supports `*` wildcards.
 - **deny**: Tool patterns blocked regardless of allow rules. Deny takes precedence.
@@ -104,7 +118,7 @@ nockguard proxy \
 
 ```yaml
 agents:
-  kit:
+  coder:
     allow: ["read_*", "search_*"]
     shadow: ["read_*", "search_*"]
     ask: ["deploy_*"]
@@ -130,7 +144,7 @@ Rate limiting and spend caps are opt-in and independent — set one, both, or ne
 Any signed audit trail can be proven intact and non-repudiable **offline** — no daemon, no signing key, only the public key:
 
 ```bash
-nockguard verify --agent kit    # one agent's trail (exit 0 = intact + authentic, 2 = tampered)
+nockguard verify --agent coder    # one agent's trail (exit 0 = intact + authentic, 2 = tampered)
 nockguard verify --all          # every per-agent trail in one shot — prove the whole fleet
 ```
 
@@ -161,15 +175,15 @@ audit:
   enabled: true
   path: ~/.nockguard/logs/audit.jsonl   # optional; this is the default
 agents:
-  kit:
-    allow: ["nockcc_nock_*"]
+  coder:
+    allow: ["read_*", "search_*"]
 ```
 
 Each decision is one JSON object per line (JSON Lines):
 
 ```json
-{"ts":"2026-06-03T18:30:00Z","agent":"kit","tool":"nockcc_kill_switch_set","decision":"deny","reason":"deny-rule \"nockcc_kill_switch_set\""}
-{"ts":"2026-06-03T18:30:01Z","agent":"kit","tool":"nockcc_nock_list","decision":"allow","reason":"allow-rule \"nockcc_nock_*\""}
+{"ts":"2026-06-03T18:30:00Z","agent":"coder","tool":"github_delete_repo","decision":"deny","reason":"deny-rule \"github_delete_*\""}
+{"ts":"2026-06-03T18:30:01Z","agent":"coder","tool":"read_file","decision":"allow","reason":"allow-rule \"read_*\""}
 ```
 
 `decision` is one of `allow`, `deny`, `would-deny` (shadow dry-run miss), `block` (input validation), `ratelimit`, `approval-granted`, `approval-denied`, `state-write`, or `hide` (filtered from `tools/list`). Auditing is opt-in (absent or `enabled: false` keeps Phase 1–3 behavior) and fail-open — an audit write error is logged but never blocks or fails a tool call.
@@ -199,15 +213,15 @@ Use the signed audit trail to derive enforcement from the tools an agent actuall
 used:
 
 ```bash
-nockguard policy propose --agent kit
+nockguard policy propose --agent coder
 ```
 
-The command reads `~/.nockguard/logs/kit.audit.jsonl`, extracts distinct allowed
+The command reads `~/.nockguard/logs/coder.audit.jsonl`, extracts distinct allowed
 tools, and prints a proposed `shadow:` allowlist. After adding that block to the
 agent policy, run in observe mode and preview false positives:
 
 ```bash
-nockguard policy shadow-report --agent kit
+nockguard policy shadow-report --agent coder
 ```
 
 `0 would-deny entries` means the shadow window is clean enough for human review
@@ -266,7 +280,7 @@ NockGuard intercepts two MCP methods:
 
 All other MCP traffic passes through unmodified. NockGuard is version-transparent — it works with any MCP protocol version. Input validation is opt-in: an allowlist-only policy behaves exactly as in Phase 1.
 
-## Coverage Scope
+## Coverage scope
 
 NockGuard operates at the **MCP transport layer**. It intercepts messages on the stdio pipe between the agent and an MCP server. That is its coverage boundary.
 
@@ -276,7 +290,7 @@ NockGuard operates at the **MCP transport layer**. It intercepts messages on the
 - The full audit trail and Live Wall feed for those decisions.
 
 **What NockGuard does not cover:**
-- Direct HTTP/REST calls an agent makes to a backend service (e.g., NockCC's REST API via `curl` or an HTTP client) that bypass the MCP proxy entirely.
+- Direct HTTP/REST calls an agent makes to a backend service (e.g., a backend's REST API via `curl` or an HTTP client) that bypass the MCP proxy entirely.
 - Network egress to arbitrary URLs — NockGuard is not an HTTP forward proxy.
 - Calls routed to MCP servers that are not wired through NockGuard (an agent can have multiple MCP servers; only the ones using `nockguard proxy` as their command are gated).
 
@@ -290,6 +304,12 @@ If your threat model includes agents switching to curl/HTTP as a bypass, enforce
 - **NockGuard** = MCP firewall ("Guard your agent's tools")
 
 Same brand, same tap, independent products. Use one or both.
+
+## What is free, and what is a service
+
+Everything in this repository is MIT and fully functional. There is no license key, no feature flag that phones home, and nothing in the binary that stops working after a date. The on-ramp — `proxy`, `verify` / `audit verify`, `policy propose` / `shadow-report`, `init`, `keygen`, `selftest`, and the Live Wall you run yourself with `go run ./cmd/nockguard-wall` — is the product, and it is yours.
+
+What Nock Technologies sells is the part that only makes sense as a **service or at fleet scale**: a hosted Live Wall across many agents and machines, compliance evidence packs generated from your signed trails (`nockguard evidence` today; hosted generation and retention later), fleet-wide trust and egress enforcement, and support. If you never need those, you never need us — and your trail still verifies with the public key alone.
 
 ## Roadmap
 
