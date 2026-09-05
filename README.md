@@ -20,7 +20,7 @@ MCP server (filesystem, GitHub, your own)
 brew install nocktechnologies/tap/nockguard      # or: go install github.com/nocktechnologies/nockguard/cmd/nockguard@latest
 
 nockguard init                                   # writes ~/.nockguard/policy.yaml (default-deny starter; never clobbers an existing one)
-nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem ~/work" --agent coder
+nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project" --agent coder
 ```
 
 Point your agent at `nockguard` instead of the server:
@@ -30,7 +30,7 @@ Point your agent at `nockguard` instead of the server:
   "mcpServers": {
     "files": {
       "command": "nockguard",
-      "args": ["proxy", "--upstream", "npx -y @modelcontextprotocol/server-filesystem ~/work", "--agent", "coder"]
+      "args": ["proxy", "--upstream", "npx -y @modelcontextprotocol/server-filesystem /path/to/project", "--agent", "coder"]
     }
   }
 }
@@ -93,7 +93,7 @@ agents:
 
 ```bash
 nockguard proxy \
-  --upstream "npx -y @modelcontextprotocol/server-filesystem ~/work" \
+  --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project" \
   --agent coder \
   --policy policy.yaml
 ```
