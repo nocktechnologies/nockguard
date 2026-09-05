@@ -1378,7 +1378,7 @@ Evidence packs:
 
 Examples:
   nockguard init                                        # scaffold a default-deny starter policy
-  nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem ~/work" --agent coder --policy policy.yaml
+  nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project" --agent coder --policy policy.yaml
   nockguard mcp-http --upstream https://mcp.example.com/mcp --agent coder --auth-env MCP_AUTH
   nockguard mcp-listen --listen 127.0.0.1:8790 --upstream https://mcp.example.com/mcp --agent coder --policy policy.yaml
   nockguard egress-proxy --listen 127.0.0.1:8899 --agent coder --policy egress.yaml
