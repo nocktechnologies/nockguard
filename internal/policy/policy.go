@@ -165,8 +165,10 @@ func LoadBytes(data []byte) (*Engine, error) {
 // (no tool name can match both). Returns true if:
 //   - Both are literals (no wildcard) and differ, OR
 //   - One is a literal and the other is a glob that does not match the literal, OR
-//   - Both are globs and their literal prefixes (before the first wildcard) do not
-//     prefix-overlap (neither is a prefix of the other).
+//   - Both are globs and:
+//   - Their literal prefixes (before the first wildcard) do not prefix-overlap, OR
+//   - Their literal suffixes (after the last wildcard) are both non-empty and
+//     neither is a suffix of the other.
 func isGlobPatternDisjoint(pattern1, pattern2 string) bool {
 	isGlobA := strings.ContainsAny(pattern1, "*?[")
 	isGlobB := strings.ContainsAny(pattern2, "*?[")
@@ -197,7 +199,22 @@ func isGlobPatternDisjoint(pattern1, pattern2 string) bool {
 	prefix2 := pattern2[:idx2]
 
 	// Disjoint if neither prefix is a prefix of the other
-	return !strings.HasPrefix(prefix1, prefix2) && !strings.HasPrefix(prefix2, prefix1)
+	if !strings.HasPrefix(prefix1, prefix2) && !strings.HasPrefix(prefix2, prefix1) {
+		return true // Prefixes don't overlap
+	}
+
+	// Prefixes overlap: check suffixes (text after last wildcard)
+	lastIdx1 := strings.LastIndexAny(pattern1, "*?[")
+	lastIdx2 := strings.LastIndexAny(pattern2, "*?[")
+	suffix1 := pattern1[lastIdx1+1:]
+	suffix2 := pattern2[lastIdx2+1:]
+
+	// Disjoint if both suffixes are non-empty and neither is a suffix of the other
+	if suffix1 != "" && suffix2 != "" && !strings.HasSuffix(suffix1, suffix2) && !strings.HasSuffix(suffix2, suffix1) {
+		return true // Suffixes are disjoint
+	}
+
+	return false // Conservative: patterns might overlap
 }
 
 func loadFrom(r io.Reader, name string) (*Engine, error) {
@@ -340,13 +357,15 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 // rejected at Load() instead of silently failing to match — and, for a deny rule,
 // silently failing OPEN — at evaluate time.
 func validateGlob(pattern string) error {
-	if !strings.Contains(pattern, "*") {
-		return nil
-	}
-	// The candidate string is irrelevant for syntax validation; filepath.Match
-	// reports ErrBadPattern on a malformed pattern regardless of the name.
-	if _, err := filepath.Match(pattern, ""); err != nil {
-		return fmt.Errorf("malformed glob: %w", err)
+	// Validate syntax for EVERY glob pattern (*, ?, [) to catch malformed wildcards
+	// early. A malformed pattern like "github_[" would silently never match at
+	// eval time if not validated here.
+	if strings.ContainsAny(pattern, "*?[") {
+		// The candidate string is irrelevant for syntax validation; filepath.Match
+		// reports ErrBadPattern on a malformed pattern regardless of the name.
+		if _, err := filepath.Match(pattern, ""); err != nil {
+			return fmt.Errorf("malformed glob %q: %w", pattern, err)
+		}
 	}
 	return nil
 }

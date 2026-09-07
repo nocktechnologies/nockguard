@@ -1005,6 +1005,113 @@ agents:
 `,
 			wantErr: false,
 		},
+		{
+			name: "same-arg suffix-disjoint globs OK",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*_issue"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_*_repo"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: false,
+		},
+		{
+			name: "same-arg glob vs empty-suffix glob reject",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*_issue"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_*"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "same-arg overlapping-prefix globs reject",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_create_*"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writePolicy(t, tt.yaml)
+			_, err := Load(path)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Load() wantErr=%v, got err=%v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestInjectValidateGlobSyntax tests that validateGlob rejects malformed patterns.
+func TestInjectValidateGlobSyntax(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr bool
+	}{
+		{
+			name: "malformed bracket glob rejects",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_["]
+        ref: "env:SECRET1"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "valid question mark glob loads",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_?"]
+        ref: "env:SECRET1"
+        arg: "auth"
+`,
+			wantErr: false,
+		},
+		{
+			name: "valid mixed globs load",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_[a-z]*_issue"]
+        ref: "env:SECRET1"
+        arg: "auth"
+`,
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
