@@ -849,3 +849,71 @@ agents:
 		t.Errorf("warning should name the agent: %s", warning)
 	}
 }
+
+// TestInjectGlobOverlap verifies that glob patterns matching each other are rejected.
+func TestInjectGlobOverlap(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr bool
+	}{
+		{
+			name: "identical globs OK if different arg",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*"]
+        ref: "env:SECRET1"
+        arg: "auth1"
+      - tools: ["github_*"]
+        ref: "env:SECRET2"
+        arg: "auth2"
+`,
+			wantErr: false,
+		},
+		{
+			name: "overlapping glob patterns rejected",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_create_*"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "glob matching literal rejected",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_create_issue"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writePolicy(t, tt.yaml)
+			_, err := Load(path)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Load() wantErr=%v, got err=%v", tt.wantErr, err)
+			}
+		})
+	}
+}

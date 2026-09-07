@@ -237,6 +237,27 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 				}
 			}
 		}
+		// Check for glob patterns that overlap with each other (both directions)
+		for i, rule1 := range pol.Inject {
+			for j, rule2 := range pol.Inject {
+				if i >= j {
+					continue
+				}
+				for _, tool1 := range rule1.Tools {
+					for _, tool2 := range rule2.Tools {
+						if tool1 == tool2 {
+							continue
+						}
+						if matched1, _ := filepath.Match(tool1, tool2); matched1 {
+							return nil, fmt.Errorf("agent %q: inject rule tool glob %q matches pattern %q in different rule (potential conflict)", agent, tool1, tool2)
+						}
+						if matched2, _ := filepath.Match(tool2, tool1); matched2 {
+							return nil, fmt.Errorf("agent %q: inject rule tool glob %q matches pattern %q in different rule (potential conflict)", agent, tool2, tool1)
+						}
+					}
+				}
+			}
+		}
 		// Check for conflicting inject rules (same tool glob AND same arg path)
 		type injectKey struct {
 			tool string
@@ -523,6 +544,27 @@ func (e *Engine) InjectRulesFor(agent, tool string) []InjectRule {
 // responsibility to log these warnings.
 func (e *Engine) Warnings() []string {
 	return e.warnings
+}
+
+// InjectEnvNames returns all environment variable names referenced by inject
+// rules across all agents (prefixed with "env:"). The proxy must strip these
+// from the upstream child's environment so a policed agent cannot read the
+// secret value from its own /proc/self/environ. Duplicates are removed.
+func (e *Engine) InjectEnvNames() []string {
+	var names []string
+	seen := make(map[string]bool)
+	for _, pol := range e.config.Agents {
+		for _, rule := range pol.Inject {
+			if strings.HasPrefix(rule.Ref, "env:") {
+				name := strings.TrimPrefix(rule.Ref, "env:")
+				if !seen[name] {
+					names = append(names, name)
+					seen[name] = true
+				}
+			}
+		}
+	}
+	return names
 }
 
 func (e *Engine) FailModeVerdict(agent, reason string) Decision {

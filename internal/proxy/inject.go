@@ -55,6 +55,19 @@ func (p *StdioProxy) applyInject(toolName string, canonicalParams json.RawMessag
 		resolved = append(resolved, resolvedRule{rule, val})
 	}
 
+	// Check for runtime conflicts: same arg path matched by multiple rules
+	argPathCount := make(map[string]int)
+	for _, rr := range resolved {
+		argPathCount[rr.rule.Arg]++
+	}
+	for argPath, count := range argPathCount {
+		if count > 1 {
+			p.logger.Printf("INJECT-FAIL agent=%s tool=%s reason=conflict arg=%s count=%d", p.agent, toolName, argPath, count)
+			p.audit(toolName, "block", fmt.Sprintf("inject-conflict arg=%s", argPath))
+			return nil, fmt.Sprintf("nockguard: tool %q injection failed", toolName), false
+		}
+	}
+
 	// Apply all injections. Fail if any arg path is unsettable.
 	for _, rr := range resolved {
 		value := rr.value
@@ -78,9 +91,14 @@ func (p *StdioProxy) applyInject(toolName string, canonicalParams json.RawMessag
 		return nil, fmt.Sprintf("nockguard: tool %q injection failed", toolName), false
 	}
 
-	// Success: record scrub set and emit audit rows
+	// Success: record scrub set (both raw and templated) and emit audit rows
 	for _, rr := range resolved {
 		p.scrubber.add(rr.value)
+		// Also register the templated value if a template was used
+		if rr.rule.Template != "" {
+			templated := strings.ReplaceAll(rr.rule.Template, "{secret}", rr.value)
+			p.scrubber.add(templated)
+		}
 		p.audit(toolName, "inject", fmt.Sprintf("ref=%s arg=%s", rr.rule.Ref, rr.rule.Arg))
 	}
 
@@ -96,6 +114,10 @@ func setArgPathInParams(params *map[string]json.RawMessage, path string, value s
 	if argRaw, exists := (*params)["arguments"]; exists {
 		if err := json.Unmarshal(argRaw, &arguments); err != nil {
 			return false
+		}
+		// json.Unmarshal of JSON null leaves map nil with no error
+		if arguments == nil {
+			arguments = make(map[string]json.RawMessage)
 		}
 	} else {
 		arguments = make(map[string]json.RawMessage)
@@ -133,9 +155,13 @@ func setAtPathRaw(obj *map[string]json.RawMessage, parts []string, value string)
 	var next map[string]json.RawMessage
 
 	if raw, exists := (*obj)[key]; exists {
-		// Unmarshal existing value
+		// Unmarshal existing value; check for both unmarshal errors and null values
 		if err := json.Unmarshal(raw, &next); err != nil {
 			return false
+		}
+		// json.Unmarshal of JSON null leaves map nil with no error; treat as absent
+		if next == nil {
+			next = make(map[string]json.RawMessage)
 		}
 	} else {
 		// Create new intermediate object

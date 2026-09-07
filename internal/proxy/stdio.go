@@ -191,6 +191,7 @@ func (p *StdioProxy) Run() error {
 	//      os.Getenv is unaffected by this child-only sanitize), so the child never needs them.
 	// The two strip sets compose; sanitizedEnv only touches the CHILD's cmd.Env.
 	strip := append(p.engine.SigningKeyEnvNamesFor(p.agent), approval.CredEnvNames()...)
+	strip = append(strip, p.engine.InjectEnvNames()...)
 	cmd.Env = sanitizedEnv(strip)
 
 	upstreamIn, err := cmd.StdinPipe()

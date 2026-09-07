@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"syscall"
@@ -76,8 +77,8 @@ func resolveFile(path string) (string, error) {
 		return "", fmt.Errorf("file %q owned by uid %d, not %d or 0", path, sys.Uid, euid)
 	}
 
-	// Read content
-	data, err := os.ReadFile(path)
+	// Read content from the validated fd with size limit (64 KiB)
+	data, err := io.ReadAll(io.LimitReader(fd, 64*1024))
 	if err != nil {
 		return "", fmt.Errorf("failed to read %q: %w", path, err)
 	}

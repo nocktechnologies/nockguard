@@ -5,7 +5,9 @@ import (
 	"container/list"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 )
 
@@ -22,13 +24,14 @@ type scrubSet struct {
 
 // scrubEncodings holds all forms of a secret value for substring scrubbing.
 type scrubEncodings struct {
-	value    string
-	jsonEsc  string // JSON-escaped form (without surrounding quotes)
-	urlEsc   string // URL-escaped form
-	b64Std   string // base64 standard, padded
-	b64StdNp string // base64 standard, unpadded
-	b64URL   string // base64 URL-safe, padded
-	b64URLNp string // base64 URL-safe, unpadded
+	value       string
+	jsonEsc     string // JSON-escaped form (without surrounding quotes)
+	urlEsc      string // URL-escaped form (percent-encoded)
+	urlEscLower string // URL-escaped form with lowercase hex digits
+	b64Std      string // base64 standard, padded
+	b64StdNp    string // base64 standard, unpadded
+	b64URL      string // base64 URL-safe, padded
+	b64URLNp    string // base64 URL-safe, unpadded
 }
 
 // newScrubSet creates an LRU-bounded scrubbing set capped at maxSize entries.
@@ -42,6 +45,20 @@ func newScrubSet(maxSize int) *scrubSet {
 
 // add records a secret value and its precomputed encodings. If the LRU is at
 // capacity, the oldest entry is evicted.
+// lowercaseHexEscape returns the percent-encoded form with lowercase hex digits.
+func lowercaseHexEscape(val string) string {
+	var result strings.Builder
+	for _, b := range []byte(val) {
+		if (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') ||
+			b == '-' || b == '_' || b == '.' || b == '~' {
+			result.WriteByte(b)
+		} else {
+			fmt.Fprintf(&result, "%%%02x", b)
+		}
+	}
+	return result.String()
+}
+
 func (s *scrubSet) add(val string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -73,13 +90,14 @@ func (s *scrubSet) add(val string) {
 
 	// Add new value
 	enc := &scrubEncodings{
-		value:    val,
-		jsonEsc:  jsonEscapeWithoutQuotes(val),
-		urlEsc:   url.QueryEscape(val),
-		b64Std:   base64.StdEncoding.EncodeToString([]byte(val)),
-		b64StdNp: base64.StdEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(val)),
-		b64URL:   base64.URLEncoding.EncodeToString([]byte(val)),
-		b64URLNp: base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(val)),
+		value:       val,
+		jsonEsc:     jsonEscapeWithoutQuotes(val),
+		urlEsc:      url.QueryEscape(val),
+		urlEscLower: lowercaseHexEscape(val),
+		b64Std:      base64.StdEncoding.EncodeToString([]byte(val)),
+		b64StdNp:    base64.StdEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(val)),
+		b64URL:      base64.URLEncoding.EncodeToString([]byte(val)),
+		b64URLNp:    base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(val)),
 	}
 	s.encodings[val] = enc
 	s.lru.PushFront(val)
@@ -103,8 +121,9 @@ func (s *scrubSet) scrub(line []byte) []byte {
 		result = bytes.ReplaceAll(result, []byte(enc.value), marker)
 		// Scrub JSON-escaped form
 		result = bytes.ReplaceAll(result, []byte(enc.jsonEsc), marker)
-		// Scrub URL-escaped form
+		// Scrub URL-escaped forms (both upper and lowercase hex)
 		result = bytes.ReplaceAll(result, []byte(enc.urlEsc), marker)
+		result = bytes.ReplaceAll(result, []byte(enc.urlEscLower), marker)
 		// Scrub all base64 variants
 		result = bytes.ReplaceAll(result, []byte(enc.b64Std), marker)
 		result = bytes.ReplaceAll(result, []byte(enc.b64StdNp), marker)
