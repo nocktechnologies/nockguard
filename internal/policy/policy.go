@@ -14,6 +14,7 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/forward"
 	"github.com/nocktechnologies/nockguard/internal/ratelimit"
+	"github.com/nocktechnologies/nockguard/internal/secrets"
 	"github.com/nocktechnologies/nockguard/internal/trust"
 	"github.com/nocktechnologies/nockguard/internal/validate"
 	"gopkg.in/yaml.v3"
@@ -88,6 +89,14 @@ type AgentPolicy struct {
 	// human nod before the call is forwarded upstream, even when the tool is
 	// allowed by policy. Empty = no approval gate (Phase 1-4 behavior preserved).
 	RequireApproval []string `yaml:"require_approval"`
+	// Credential injection (opt-in). InjectRules names tools, secrets, and JSON
+	// paths where credentials should be injected at proxy forward time. The secret
+	// is resolved from env or file (never seen by the agent), and the value is
+	// OVERWRITTEN into the argument path, creating intermediate objects if needed.
+	// A rule's template wraps the credential (e.g. "Bearer {secret}"), defaulting
+	// to the raw value. Injection happens only on allowed calls, after validation,
+	// before the final marshal to upstream. Empty = no injection.
+	Inject []InjectRule `yaml:"inject"`
 }
 
 // RateLimitPolicy bounds tool-call rate: at most MaxCalls within Window (a Go
@@ -104,13 +113,32 @@ type SpendCapPolicy struct {
 	MaxCalls int `yaml:"max_calls"`
 }
 
+// InjectRule specifies one credential-injection rule for a tool or tools.
+type InjectRule struct {
+	// Tools is a list of tool-name globs (same semantics as allow/deny) that this
+	// rule applies to. Must be non-empty and cannot be a bare "*" or "**".
+	Tools []string `yaml:"tools"`
+	// Ref is the secret reference (e.g. "env:GITHUB_TOKEN" or "file:/etc/secret"),
+	// prefixed with a scheme known to the resolver. Required, non-empty.
+	Ref string `yaml:"ref"`
+	// Arg is the dot-delimited JSON path under params.arguments where the secret
+	// is injected (e.g. "headers.Authorization"). Required, non-empty, and cannot
+	// be "." or start/end with ".".
+	Arg string `yaml:"arg"`
+	// Template wraps the resolved secret (e.g. "Bearer {secret}"). If present,
+	// must contain exactly one "{secret}" placeholder. Omitted or empty means the
+	// raw resolved value.
+	Template string `yaml:"template,omitempty"`
+}
+
 type TrustPolicy struct {
 	Enabled bool   `yaml:"enabled"`
 	Path    string `yaml:"path"`
 }
 
 type Engine struct {
-	config Config
+	config   Config
+	warnings []string // non-blocking load-time observations (e.g. tool globs in multiple rules)
 }
 
 func Load(path string) (*Engine, error) {
@@ -133,6 +161,39 @@ func LoadBytes(data []byte) (*Engine, error) {
 // loadFrom decodes and validates a policy from r. name is used only in error
 // messages. Load and LoadBytes both delegate here so the on-disk and in-memory
 // paths share identical glob/category validation.
+// isGlobPatternDisjoint reports whether two tool patterns are proven disjoint
+// (no tool name can match both). Returns true only in two safe cases:
+//   - Both are literals (no wildcard chars) and differ, OR
+//   - Exactly one is a literal and the glob does not match it.
+//
+// Returns false for all other cases (globs vs globs, overlapping literals).
+func isGlobPatternDisjoint(pattern1, pattern2 string) bool {
+	isGlobA := strings.ContainsAny(pattern1, "*?[")
+	isGlobB := strings.ContainsAny(pattern2, "*?[")
+
+	if !isGlobA && !isGlobB {
+		// Both literals: disjoint if different
+		return pattern1 != pattern2
+	}
+
+	if !isGlobA && isGlobB {
+		// pattern1 is literal, pattern2 is glob
+		// Disjoint if glob does not match the literal
+		matched, _ := filepath.Match(pattern2, pattern1)
+		return !matched
+	}
+
+	if isGlobA && !isGlobB {
+		// pattern1 is glob, pattern2 is literal
+		// Disjoint if glob does not match the literal
+		matched, _ := filepath.Match(pattern1, pattern2)
+		return !matched
+	}
+
+	// Both are globs: never proven disjoint; always reject for same arg
+	return false
+}
+
 func loadFrom(r io.Reader, name string) (*Engine, error) {
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
@@ -172,8 +233,100 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 				return nil, fmt.Errorf("agent %q validate_input category %q is not supported (valid: %s)", agent, c, strings.Join(validate.Categories(), ", "))
 			}
 		}
+		// Validate inject rules at load time. Each rule's globs, ref, and arg
+		// must be well-formed. A bare "*" or "**" is refused (too broad).
+		// Conflicting rules (same tool glob with same arg path) are rejected.
+		for _, rule := range pol.Inject {
+			if len(rule.Tools) == 0 {
+				return nil, fmt.Errorf("agent %q inject rule: tools is empty", agent)
+			}
+			if rule.Ref == "" {
+				return nil, fmt.Errorf("agent %q inject rule: ref is empty", agent)
+			}
+			if rule.Arg == "" {
+				return nil, fmt.Errorf("agent %q inject rule: arg is empty", agent)
+			}
+			if rule.Arg == "." || strings.HasPrefix(rule.Arg, ".") || strings.HasSuffix(rule.Arg, ".") {
+				return nil, fmt.Errorf("agent %q inject rule arg %q: cannot be \".\", start with \".\", or end with \".\"", agent, rule.Arg)
+			}
+			// Validate globs
+			for _, tool := range rule.Tools {
+				if tool == "*" || tool == "**" {
+					return nil, fmt.Errorf("agent %q inject rule: bare %q glob not allowed (must name specific tools)", agent, tool)
+				}
+				if err := validateGlob(tool); err != nil {
+					return nil, fmt.Errorf("agent %q inject rule tool %q: %w", agent, tool, err)
+				}
+			}
+			// Validate ref scheme
+			if !secrets.KnownScheme(rule.Ref) {
+				return nil, fmt.Errorf("agent %q inject rule: unknown secret scheme in %q", agent, rule.Ref)
+			}
+			// Validate template if present
+			if rule.Template != "" {
+				count := strings.Count(rule.Template, "{secret}")
+				if count != 1 {
+					return nil, fmt.Errorf("agent %q inject rule template must contain exactly one {secret} placeholder, found %d", agent, count)
+				}
+			}
+		}
+		// Check for conflicting inject rules with the same arg path.
+		// Two rules with the same arg conflict unless proven disjoint: both literals
+		// differing, or one literal and a non-matching glob. Two globs writing the
+		// same argument are always rejected, even if they look disjoint.
+		for i, rule1 := range pol.Inject {
+			for j, rule2 := range pol.Inject {
+				if i >= j {
+					continue
+				}
+				// Only check rules with the same arg path
+				if rule1.Arg != rule2.Arg {
+					continue
+				}
+				// For each pair of tool patterns, check if they are proven disjoint
+				for _, tool1 := range rule1.Tools {
+					for _, tool2 := range rule2.Tools {
+						if isGlobPatternDisjoint(tool1, tool2) {
+							continue // Proven disjoint; no conflict
+						}
+						// Not disjoint: patterns could overlap
+						return nil, fmt.Errorf("agent %q: inject rules for arg %q have overlapping tool patterns %q and %q (cannot both apply)", agent, rule1.Arg, tool1, tool2)
+					}
+				}
+			}
+		}
+		// Check for conflicting inject rules (same tool glob AND same arg path)
+		type injectKey struct {
+			tool string
+			arg  string
+		}
+		seenInjectRules := make(map[injectKey]bool)
+		for _, rule := range pol.Inject {
+			for _, tool := range rule.Tools {
+				key := injectKey{tool, rule.Arg}
+				if seenInjectRules[key] {
+					return nil, fmt.Errorf("agent %q: multiple inject rules with tool glob %q and arg %q", agent, tool, rule.Arg)
+				}
+				seenInjectRules[key] = true
+			}
+		}
 	}
-	return &Engine{config: cfg}, nil
+	// Collect warnings about tools appearing in multiple inject rules
+	var warnings []string
+	for agent, pol := range cfg.Agents {
+		toolCount := make(map[string]int)
+		for _, rule := range pol.Inject {
+			for _, tool := range rule.Tools {
+				toolCount[tool]++
+			}
+		}
+		for tool, count := range toolCount {
+			if count > 1 {
+				warnings = append(warnings, fmt.Sprintf("agent %q: tool glob %q appears in %d inject rules", agent, tool, count))
+			}
+		}
+	}
+	return &Engine{config: cfg, warnings: warnings}, nil
 }
 
 // validateGlob confirms a policy pattern is a usable glob. A literal (no '*') is
@@ -182,13 +335,15 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 // rejected at Load() instead of silently failing to match — and, for a deny rule,
 // silently failing OPEN — at evaluate time.
 func validateGlob(pattern string) error {
-	if !strings.Contains(pattern, "*") {
-		return nil
-	}
-	// The candidate string is irrelevant for syntax validation; filepath.Match
-	// reports ErrBadPattern on a malformed pattern regardless of the name.
-	if _, err := filepath.Match(pattern, ""); err != nil {
-		return fmt.Errorf("malformed glob: %w", err)
+	// Validate syntax for EVERY glob pattern (*, ?, [) to catch malformed wildcards
+	// early. A malformed pattern like "github_[" would silently never match at
+	// eval time if not validated here.
+	if strings.ContainsAny(pattern, "*?[") {
+		// The candidate string is irrelevant for syntax validation; filepath.Match
+		// reports ErrBadPattern on a malformed pattern regardless of the name.
+		if _, err := filepath.Match(pattern, ""); err != nil {
+			return fmt.Errorf("malformed glob %q: %w", pattern, err)
+		}
 	}
 	return nil
 }
@@ -397,6 +552,58 @@ func (e *Engine) RequiresApproval(agent, tool string) bool {
 		}
 	}
 	return false
+}
+
+// InjectRulesFor returns all inject rules from the policy for a given (agent, tool)
+// pair. It falls back to the "default" agent policy if the named agent has no policy.
+// The rules are unfiltered; callers should check the policy verdict (Allow) separately
+// to ensure injection only happens on forwarded calls.
+func (e *Engine) InjectRulesFor(agent, tool string) []InjectRule {
+	pol, ok := e.config.Agents[agent]
+	if !ok {
+		pol, ok = e.config.Agents["default"]
+		if !ok {
+			return nil
+		}
+	}
+	var matches []InjectRule
+	for _, rule := range pol.Inject {
+		for _, pattern := range rule.Tools {
+			if matchPattern(pattern, tool) {
+				matches = append(matches, rule)
+				break
+			}
+		}
+	}
+	return matches
+}
+
+// Warnings returns any non-blocking load-time observations (e.g. tool globs
+// appearing in multiple inject rules for the same agent). It is the caller's
+// responsibility to log these warnings.
+func (e *Engine) Warnings() []string {
+	return e.warnings
+}
+
+// InjectEnvNames returns all environment variable names referenced by inject
+// rules across all agents (prefixed with "env:"). The proxy must strip these
+// from the upstream child's environment so a policed agent cannot read the
+// secret value from its own /proc/self/environ. Duplicates are removed.
+func (e *Engine) InjectEnvNames() []string {
+	var names []string
+	seen := make(map[string]bool)
+	for _, pol := range e.config.Agents {
+		for _, rule := range pol.Inject {
+			if strings.HasPrefix(rule.Ref, "env:") {
+				name := strings.TrimPrefix(rule.Ref, "env:")
+				if !seen[name] {
+					names = append(names, name)
+					seen[name] = true
+				}
+			}
+		}
+	}
+	return names
 }
 
 func (e *Engine) FailModeVerdict(agent, reason string) Decision {

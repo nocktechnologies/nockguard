@@ -176,6 +176,11 @@ func runCLI(args []string) int {
 		return 1
 	}
 
+	// Log any policy load-time warnings (e.g., tools in multiple inject rules)
+	for _, warn := range engine.Warnings() {
+		fmt.Fprintf(os.Stderr, "warning policy: %s\n", warn)
+	}
+
 	// Fail-closed is correct but should never be a silent surprise: if the named
 	// agent has neither its own policy nor a "default", every tool will be denied.
 	// Warn loudly so the operator fixes the policy instead of debugging a deny-all.
@@ -401,6 +406,9 @@ func runEgressProxy(args []string) int {
 		fmt.Fprintf(os.Stderr, "error loading policy %s: %v\n", policyPath, err)
 		return 1
 	}
+	for _, warn := range engine.Warnings() {
+		fmt.Fprintf(os.Stderr, "warning policy: %s\n", warn)
+	}
 	if err := forwardhttp.ValidateConfig(listen, agent, engine); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
@@ -506,6 +514,9 @@ func runMCPListen(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading policy %s: %v\n", policyPath, err)
 		return 1
+	}
+	for _, warn := range engine.Warnings() {
+		fmt.Fprintf(os.Stderr, "warning policy: %s\n", warn)
 	}
 	if !engine.HasPolicyFor(agent) {
 		fmt.Fprintf(os.Stderr, "warning: no policy for agent %q and no \"default\" — ALL tools will be DENIED (fail-closed). Add an agent or \"default\" policy in %s.\n", agent, policyPath)
@@ -1299,6 +1310,10 @@ func runMCPHTTP(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading policy %s: %v\n", policyPath, err)
 		return 1
+	}
+
+	for _, warn := range engine.Warnings() {
+		fmt.Fprintf(os.Stderr, "warning policy: %s\n", warn)
 	}
 
 	auditor, err := engine.AuditorFor(agent)

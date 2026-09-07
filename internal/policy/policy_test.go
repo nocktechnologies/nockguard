@@ -536,3 +536,607 @@ agentss:
 		})
 	}
 }
+
+// TestInjectRulesValidation tests load-time validation of inject rules.
+func TestInjectRulesValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr bool
+	}{
+		{
+			name: "valid inject rule",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["test_tool"]
+        ref: "env:SECRET"
+        arg: "headers.auth"
+`,
+			wantErr: false,
+		},
+		{
+			name: "inject with template",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["test_tool"]
+        ref: "env:SECRET"
+        arg: "headers.auth"
+        template: "Bearer {secret}"
+`,
+			wantErr: false,
+		},
+		{
+			name: "empty tools",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: []
+        ref: "env:SECRET"
+        arg: "headers.auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "empty ref",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["test_tool"]
+        ref: ""
+        arg: "headers.auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "empty arg",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["test_tool"]
+        ref: "env:SECRET"
+        arg: ""
+`,
+			wantErr: true,
+		},
+		{
+			name: "bare * glob",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["*"]
+        ref: "env:SECRET"
+        arg: "headers.auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "bare ** glob",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["**"]
+        ref: "env:SECRET"
+        arg: "headers.auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "arg starts with dot",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["test_tool"]
+        ref: "env:SECRET"
+        arg: ".headers.auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "arg ends with dot",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["test_tool"]
+        ref: "env:SECRET"
+        arg: "headers.auth."
+`,
+			wantErr: true,
+		},
+		{
+			name: "arg is dot",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["test_tool"]
+        ref: "env:SECRET"
+        arg: "."
+`,
+			wantErr: true,
+		},
+		{
+			name: "bad template no placeholder",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["test_tool"]
+        ref: "env:SECRET"
+        arg: "headers.auth"
+        template: "Bearer no_placeholder"
+`,
+			wantErr: true,
+		},
+		{
+			name: "bad template multiple placeholders",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["test_tool"]
+        ref: "env:SECRET"
+        arg: "headers.auth"
+        template: "Bearer {secret} {secret}"
+`,
+			wantErr: true,
+		},
+		{
+			name: "unknown scheme",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["test_tool"]
+        ref: "vault:mysecret"
+        arg: "headers.auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "conflicting rules same tool and arg",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["test_tool"]
+        ref: "env:SECRET1"
+        arg: "headers.auth"
+      - tools: ["test_tool"]
+        ref: "env:SECRET2"
+        arg: "headers.auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "file scheme with absolute path",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["test_tool"]
+        ref: "file:/etc/secret"
+        arg: "headers.auth"
+`,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writePolicy(t, tt.yaml)
+			_, err := Load(path)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Load() wantErr=%v, got err=%v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestInjectRulesFor tests the InjectRulesFor engine method.
+func TestInjectRulesFor(t *testing.T) {
+	yaml := `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*"]
+        ref: "env:GITHUB_TOKEN"
+        arg: "headers.auth"
+      - tools: ["slack_post_*"]
+        ref: "env:SLACK_TOKEN"
+        arg: "token"
+  default:
+    mode: allow
+    inject:
+      - tools: ["openai_*"]
+        ref: "env:OPENAI_KEY"
+        arg: "api_key"
+`
+	path := writePolicy(t, yaml)
+	eng, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	tests := []struct {
+		agent    string
+		tool     string
+		wantRefs []string // Expected refs from matching rules
+	}{
+		{"test", "github_create_repo", []string{"env:GITHUB_TOKEN"}},
+		{"test", "slack_post_message", []string{"env:SLACK_TOKEN"}},
+		{"test", "github_list_issues", []string{"env:GITHUB_TOKEN"}},
+		{"test", "unknown_tool", nil},
+		{"other", "openai_create_completion", []string{"env:OPENAI_KEY"}},
+		{"other", "unknown", nil},
+	}
+
+	for _, tt := range tests {
+		rules := eng.InjectRulesFor(tt.agent, tt.tool)
+		var gotRefs []string
+		for _, rule := range rules {
+			gotRefs = append(gotRefs, rule.Ref)
+		}
+		if len(gotRefs) != len(tt.wantRefs) {
+			t.Errorf("InjectRulesFor(%s, %s): got %v, want %v", tt.agent, tt.tool, gotRefs, tt.wantRefs)
+		} else {
+			for i, ref := range gotRefs {
+				if ref != tt.wantRefs[i] {
+					t.Errorf("InjectRulesFor(%s, %s): got ref %s, want %s", tt.agent, tt.tool, ref, tt.wantRefs[i])
+				}
+			}
+		}
+	}
+}
+
+// TestInjectWarnings verifies that tools appearing in multiple inject rules
+// (with different arg paths) produce a warning.
+func TestInjectWarnings(t *testing.T) {
+	yaml := `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_create_issue", "github_list_issues"]
+        ref: "env:GITHUB_TOKEN_1"
+        arg: "headers.auth1"
+      - tools: ["github_create_issue"]  # same tool as above rule
+        ref: "env:GITHUB_TOKEN_2"
+        arg: "headers.auth2"
+`
+	path := writePolicy(t, yaml)
+	eng, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	warnings := eng.Warnings()
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+
+	warning := warnings[0]
+	if !strings.Contains(warning, "github_create_issue") {
+		t.Errorf("warning should name the tool glob: %s", warning)
+	}
+	if !strings.Contains(warning, "test") {
+		t.Errorf("warning should name the agent: %s", warning)
+	}
+}
+
+// TestInjectGlobOverlap verifies that glob patterns matching each other are rejected.
+func TestInjectGlobOverlap(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr bool
+	}{
+		{
+			name: "identical globs OK if different arg",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*"]
+        ref: "env:SECRET1"
+        arg: "auth1"
+      - tools: ["github_*"]
+        ref: "env:SECRET2"
+        arg: "auth2"
+`,
+			wantErr: false,
+		},
+		{
+			name: "overlapping glob patterns rejected",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_create_*"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "glob matching literal rejected",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_create_issue"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writePolicy(t, tt.yaml)
+			_, err := Load(path)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Load() wantErr=%v, got err=%v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestInjectSameArgConflictDetection tests load-time detection of conflicting rules.
+func TestInjectSameArgConflictDetection(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr bool
+	}{
+		{
+			name: "same-arg literal vs literal different OK",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_create_issue"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_list_issues"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: false,
+		},
+		{
+			name: "same-arg literal vs matching glob reject",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_create_issue"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_*"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "same-arg glob with nested prefixes reject",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_create_*"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "literal vs non-matching glob OK",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["slack_create_issue"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_*"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: false,
+		},
+		{
+			name: "overlapping globs different args OK",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*"]
+        ref: "env:SECRET1"
+        arg: "headers.Authorization"
+      - tools: ["github_create_*"]
+        ref: "env:SECRET2"
+        arg: "headers.SecondaryToken"
+`,
+			wantErr: false,
+		},
+		{
+			name: "glob vs glob same arg reject",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*_issue"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_*_repo"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "character class globs same arg reject",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*[0-9]"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_*5"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "glob vs glob with empty suffix same arg reject",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*_issue"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_*"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "same-arg overlapping-prefix globs reject",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_create_*"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writePolicy(t, tt.yaml)
+			_, err := Load(path)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Load() wantErr=%v, got err=%v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestInjectValidateGlobSyntax tests that validateGlob rejects malformed patterns.
+func TestInjectValidateGlobSyntax(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr bool
+	}{
+		{
+			name: "malformed bracket glob rejects",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_["]
+        ref: "env:SECRET1"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "valid question mark glob loads",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_?"]
+        ref: "env:SECRET1"
+        arg: "auth"
+`,
+			wantErr: false,
+		},
+		{
+			name: "valid mixed globs load",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_[a-z]*_issue"]
+        ref: "env:SECRET1"
+        arg: "auth"
+`,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writePolicy(t, tt.yaml)
+			_, err := Load(path)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Load() wantErr=%v, got err=%v", tt.wantErr, err)
+			}
+		})
+	}
+}
