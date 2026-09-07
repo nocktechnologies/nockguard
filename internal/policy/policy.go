@@ -162,13 +162,11 @@ func LoadBytes(data []byte) (*Engine, error) {
 // messages. Load and LoadBytes both delegate here so the on-disk and in-memory
 // paths share identical glob/category validation.
 // isGlobPatternDisjoint reports whether two tool patterns are proven disjoint
-// (no tool name can match both). Returns true if:
-//   - Both are literals (no wildcard) and differ, OR
-//   - One is a literal and the other is a glob that does not match the literal, OR
-//   - Both are globs and:
-//   - Their literal prefixes (before the first wildcard) do not prefix-overlap, OR
-//   - Their literal suffixes (after the last wildcard) are both non-empty and
-//     neither is a suffix of the other.
+// (no tool name can match both). Returns true only in two safe cases:
+//   - Both are literals (no wildcard chars) and differ, OR
+//   - Exactly one is a literal and the glob does not match it.
+//
+// Returns false for all other cases (globs vs globs, overlapping literals).
 func isGlobPatternDisjoint(pattern1, pattern2 string) bool {
 	isGlobA := strings.ContainsAny(pattern1, "*?[")
 	isGlobB := strings.ContainsAny(pattern2, "*?[")
@@ -192,29 +190,8 @@ func isGlobPatternDisjoint(pattern1, pattern2 string) bool {
 		return !matched
 	}
 
-	// Both are globs: extract literal prefixes (before first wildcard)
-	idx1 := strings.IndexAny(pattern1, "*?[")
-	idx2 := strings.IndexAny(pattern2, "*?[")
-	prefix1 := pattern1[:idx1]
-	prefix2 := pattern2[:idx2]
-
-	// Disjoint if neither prefix is a prefix of the other
-	if !strings.HasPrefix(prefix1, prefix2) && !strings.HasPrefix(prefix2, prefix1) {
-		return true // Prefixes don't overlap
-	}
-
-	// Prefixes overlap: check suffixes (text after last wildcard)
-	lastIdx1 := strings.LastIndexAny(pattern1, "*?[")
-	lastIdx2 := strings.LastIndexAny(pattern2, "*?[")
-	suffix1 := pattern1[lastIdx1+1:]
-	suffix2 := pattern2[lastIdx2+1:]
-
-	// Disjoint if both suffixes are non-empty and neither is a suffix of the other
-	if suffix1 != "" && suffix2 != "" && !strings.HasSuffix(suffix1, suffix2) && !strings.HasSuffix(suffix2, suffix1) {
-		return true // Suffixes are disjoint
-	}
-
-	return false // Conservative: patterns might overlap
+	// Both are globs: never proven disjoint; always reject for same arg
+	return false
 }
 
 func loadFrom(r io.Reader, name string) (*Engine, error) {
@@ -294,8 +271,9 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 			}
 		}
 		// Check for conflicting inject rules with the same arg path.
-		// Two rules with the same arg conflict unless disjoint: both literals differing,
-		// or one literal and a non-matching glob, or globs with unrelated prefixes.
+		// Two rules with the same arg conflict unless proven disjoint: both literals
+		// differing, or one literal and a non-matching glob. Two globs writing the
+		// same argument are always rejected, even if they look disjoint.
 		for i, rule1 := range pol.Inject {
 			for j, rule2 := range pol.Inject {
 				if i >= j {

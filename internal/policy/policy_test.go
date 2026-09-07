@@ -974,16 +974,16 @@ agents:
 			wantErr: true,
 		},
 		{
-			name: "same-arg glob with unrelated prefixes OK",
+			name: "literal vs non-matching glob OK",
 			yaml: `
 agents:
   test:
     mode: allow
     inject:
-      - tools: ["github_*"]
+      - tools: ["slack_create_issue"]
         ref: "env:SECRET1"
         arg: "auth"
-      - tools: ["slack_*"]
+      - tools: ["github_*"]
         ref: "env:SECRET2"
         arg: "auth"
 `,
@@ -1006,7 +1006,7 @@ agents:
 			wantErr: false,
 		},
 		{
-			name: "same-arg suffix-disjoint globs OK",
+			name: "glob vs glob same arg reject",
 			yaml: `
 agents:
   test:
@@ -1019,10 +1019,26 @@ agents:
         ref: "env:SECRET2"
         arg: "auth"
 `,
-			wantErr: false,
+			wantErr: true,
 		},
 		{
-			name: "same-arg glob vs empty-suffix glob reject",
+			name: "character class globs same arg reject",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*[0-9]"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_*5"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "glob vs glob with empty suffix same arg reject",
 			yaml: `
 agents:
   test:
