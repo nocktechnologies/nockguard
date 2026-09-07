@@ -18,6 +18,7 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/jsonrpc"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 	"github.com/nocktechnologies/nockguard/internal/ratelimit"
+	"github.com/nocktechnologies/nockguard/internal/secrets"
 	"github.com/nocktechnologies/nockguard/internal/trust"
 	"github.com/nocktechnologies/nockguard/internal/validate"
 )
@@ -33,6 +34,12 @@ type StdioProxy struct {
 	trust     *trust.Accumulator
 	approver  approval.Approver // Phase 5; nil = no approval gate (Phase 1-4 behavior)
 	logger    *log.Logger
+
+	// Phase 6: credential injection (opt-in). resolver handles secret schemes;
+	// scrubber redacts injected values from upstream responses. Nil resolver
+	// falls back to the default chain (env + file schemes).
+	resolver secrets.Resolver
+	scrubber *scrubSet
 
 	// agentOut is the agent-facing write channel for rejections/errors. nil means
 	// os.Stdout (production). Probe overrides it with a buffer so the `selftest`
@@ -50,10 +57,16 @@ type StdioProxy struct {
 // writeAgentLine writes one newline-terminated line to the agent-facing channel
 // under agentMu, so the two proxy goroutines never interleave output on it. w is
 // the agent writer (os.Stdout in production; injectable for tests).
+// The line is scrubbed to redact any injected secret values before writing.
 func (p *StdioProxy) writeAgentLine(w io.Writer, line []byte) error {
 	p.agentMu.Lock()
 	defer p.agentMu.Unlock()
-	_, err := fmt.Fprintf(w, "%s\n", line)
+	// Scrub any injected secret values from the line
+	scrubbed := line
+	if p.scrubber != nil {
+		scrubbed = p.scrubber.scrub(line)
+	}
+	_, err := fmt.Fprintf(w, "%s\n", scrubbed)
 	return err
 }
 
@@ -105,7 +118,15 @@ func (p *StdioProxy) WithTrust(t *trust.Accumulator) *StdioProxy {
 	return p
 }
 
+// WithResolver sets a custom secret resolver. nil means the default chain
+// (env + file schemes). Returns the proxy for chaining.
+func (p *StdioProxy) WithResolver(r secrets.Resolver) *StdioProxy {
+	p.resolver = r
+	return p
+}
+
 func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, validator *validate.Validator, limiter *ratelimit.Limiter, auditor *audit.Auditor, forwarder *forward.Forwarder, logger *log.Logger) *StdioProxy {
+	resolver := secrets.Chain()
 	return &StdioProxy{
 		upstream:  upstream,
 		agent:     agent,
@@ -115,6 +136,8 @@ func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, valid
 		auditor:   auditor,
 		forwarder: forwarder,
 		logger:    logger,
+		resolver:  resolver,
+		scrubber:  newScrubSet(256), // LRU capped at 256 secret values
 	}
 }
 
@@ -396,11 +419,30 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 			rejectMsg: fmt.Sprintf("nockguard: tool %q denied by approval gate", toolName)}
 	}
 
+	// Phase 6: credential injection (opt-in). Inject only happens on allowed calls,
+	// after every other gate has cleared. Exactly one resolution per rule, at
+	// forward time. Fail-closed: any resolution error or unsettable arg path
+	// rejects the call.
+	injectRules := p.engine.InjectRulesFor(p.agent, toolName)
+	var injectedParams json.RawMessage
+	if len(injectRules) > 0 {
+		var rejectReason string
+		var ok bool
+		injectedParams, rejectReason, ok = p.applyInject(toolName, canonicalParams, injectRules)
+		if !ok {
+			p.logger.Printf("DENY agent=%s tool=%s reason=%s", p.agent, toolName, rejectReason)
+			return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
+				rejectMsg: rejectReason}
+		}
+	} else {
+		injectedParams = canonicalParams
+	}
+
 	// Cleared every gate — forward CANONICAL bytes, never the raw line.
 	// Swap the canonical params back into the (already top-level-canonical)
 	// message map and re-marshal, so the upstream sees exactly the name we
 	// gated, once, with every other top-level field preserved verbatim.
-	topLevel["params"] = canonicalParams
+	topLevel["params"] = injectedParams
 	out, mErr := json.Marshal(topLevel)
 	if mErr != nil {
 		p.handleFailModeAsk(toolName, canonicalParams, "canonical-marshal-failed")
