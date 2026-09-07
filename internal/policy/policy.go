@@ -161,6 +161,45 @@ func LoadBytes(data []byte) (*Engine, error) {
 // loadFrom decodes and validates a policy from r. name is used only in error
 // messages. Load and LoadBytes both delegate here so the on-disk and in-memory
 // paths share identical glob/category validation.
+// isGlobPatternDisjoint reports whether two tool patterns are proven disjoint
+// (no tool name can match both). Returns true if:
+//   - Both are literals (no wildcard) and differ, OR
+//   - One is a literal and the other is a glob that does not match the literal, OR
+//   - Both are globs and their literal prefixes (before the first wildcard) do not
+//     prefix-overlap (neither is a prefix of the other).
+func isGlobPatternDisjoint(pattern1, pattern2 string) bool {
+	isGlobA := strings.ContainsAny(pattern1, "*?[")
+	isGlobB := strings.ContainsAny(pattern2, "*?[")
+
+	if !isGlobA && !isGlobB {
+		// Both literals: disjoint if different
+		return pattern1 != pattern2
+	}
+
+	if !isGlobA && isGlobB {
+		// pattern1 is literal, pattern2 is glob
+		// Disjoint if glob does not match the literal
+		matched, _ := filepath.Match(pattern2, pattern1)
+		return !matched
+	}
+
+	if isGlobA && !isGlobB {
+		// pattern1 is glob, pattern2 is literal
+		// Disjoint if glob does not match the literal
+		matched, _ := filepath.Match(pattern1, pattern2)
+		return !matched
+	}
+
+	// Both are globs: extract literal prefixes (before first wildcard)
+	idx1 := strings.IndexAny(pattern1, "*?[")
+	idx2 := strings.IndexAny(pattern2, "*?[")
+	prefix1 := pattern1[:idx1]
+	prefix2 := pattern2[:idx2]
+
+	// Disjoint if neither prefix is a prefix of the other
+	return !strings.HasPrefix(prefix1, prefix2) && !strings.HasPrefix(prefix2, prefix1)
+}
+
 func loadFrom(r io.Reader, name string) (*Engine, error) {
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
@@ -237,23 +276,26 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 				}
 			}
 		}
-		// Check for glob patterns that overlap with each other (both directions)
+		// Check for conflicting inject rules with the same arg path.
+		// Two rules with the same arg conflict unless disjoint: both literals differing,
+		// or one literal and a non-matching glob, or globs with unrelated prefixes.
 		for i, rule1 := range pol.Inject {
 			for j, rule2 := range pol.Inject {
 				if i >= j {
 					continue
 				}
+				// Only check rules with the same arg path
+				if rule1.Arg != rule2.Arg {
+					continue
+				}
+				// For each pair of tool patterns, check if they are proven disjoint
 				for _, tool1 := range rule1.Tools {
 					for _, tool2 := range rule2.Tools {
-						if tool1 == tool2 {
-							continue
+						if isGlobPatternDisjoint(tool1, tool2) {
+							continue // Proven disjoint; no conflict
 						}
-						if matched1, _ := filepath.Match(tool1, tool2); matched1 {
-							return nil, fmt.Errorf("agent %q: inject rule tool glob %q matches pattern %q in different rule (potential conflict)", agent, tool1, tool2)
-						}
-						if matched2, _ := filepath.Match(tool2, tool1); matched2 {
-							return nil, fmt.Errorf("agent %q: inject rule tool glob %q matches pattern %q in different rule (potential conflict)", agent, tool2, tool1)
-						}
+						// Not disjoint: patterns could overlap
+						return nil, fmt.Errorf("agent %q: inject rules for arg %q have overlapping tool patterns %q and %q (cannot both apply)", agent, rule1.Arg, tool1, tool2)
 					}
 				}
 			}

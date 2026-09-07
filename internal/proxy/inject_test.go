@@ -3,6 +3,8 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/nocktechnologies/nockguard/internal/secrets"
 	"io"
 	"log"
 	"os"
@@ -771,7 +773,9 @@ agents:
 }
 
 // TestInjectConflict verifies that multiple rules with same arg path are rejected.
-func TestInjectConflict(t *testing.T) {
+
+// TestInjectRuntimeConflict tests runtime detection of multiple rules matching same arg.
+func TestInjectRuntimeConflict(t *testing.T) {
 	policyYAML := `
 agents:
   test-agent:
@@ -797,40 +801,59 @@ agents:
 	p := NewStdioProxy(nil, "test-agent", engine, validator, nil, nil, nil, log.New(io.Discard, "", 0))
 	p.WithResolver(&mockResolver{
 		values: map[string]string{
-			"env:SECRET1": "secret-1-22222222",
-			"env:SECRET2": "secret-2-33333333",
+			"env:SECRET1": "secret-aaa-1111111",
+			"env:SECRET2": "secret-bbb-2222222",
 		},
 	})
 
-	// Call that matches both rules (both tool1 and tool2 in this call - won't happen, but
-	// the inject rules would conflict if we processed both)
-	// Actually, a single call can only match one tool, so test runtime conflict won't happen here.
-	// This is more of a load-time glob overlap test.
+	call1 := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tool1","arguments":{}}}`
+	forwarded, reply, err := p.Probe([]byte(call1))
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if !forwarded {
+		t.Fatalf("expected forwarded, got blocked. reply: %s", reply)
+	}
 }
 
-// TestInjectOversizedFile verifies that oversized files are rejected.
+// TestInjectOversizedFile verifies that files larger than 64 KiB are rejected.
 func TestInjectOversizedFile(t *testing.T) {
 	tmpdir := t.TempDir()
-	secretPath := filepath.Join(tmpdir, "large_secret")
+	secretPath := filepath.Join(tmpdir, "large_sec")
 
-	// Create a file larger than 64 KiB
-	largeData := make([]byte, 65*1024+1)
+	largeData := make([]byte, 65*1024)
 	for i := range largeData {
-		largeData[i] = 'a'
+		largeData[i] = 'x'
 	}
 	if err := os.WriteFile(secretPath, largeData, 0600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	r := &mockResolver{
-		values: map[string]string{},
+	policyYAML := `
+agents:
+  test-agent:
+    mode: allow
+    inject:
+      - tools: ["test_tool"]
+        ref: "file:` + secretPath + `"
+        arg: "auth"
+`
+	engine, err := policy.LoadBytes([]byte(policyYAML))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
 	}
 
-	// Attempt to resolve the file - should fail due to size limit
-	val, err := r.Resolve("file:" + secretPath)
-	if err == nil || val != "" {
-		// This mockResolver doesn't actually resolve files,
-		// so we can't truly test this here. The test would need
-		// to use the actual Chain resolver.
+	validator, err := engine.ValidatorFor("test-agent")
+	if err != nil {
+		t.Fatalf("ValidatorFor: %v", err)
+	}
+
+	p := NewStdioProxy(nil, "test-agent", engine, validator, nil, nil, nil, log.New(io.Discard, "", 0))
+	p.WithResolver(secrets.Chain())
+
+	call := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{}}}`
+	forwarded, _, _ := p.Probe([]byte(call))
+	if forwarded {
+		t.Fatalf("expected blocked (file too large), got forwarded")
 	}
 }

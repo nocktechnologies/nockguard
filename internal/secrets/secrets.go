@@ -78,9 +78,13 @@ func resolveFile(path string) (string, error) {
 	}
 
 	// Read content from the validated fd with size limit (64 KiB)
-	data, err := io.ReadAll(io.LimitReader(fd, 64*1024))
+	// Use 64*1024+1 to detect if file exceeds the limit
+	data, err := io.ReadAll(io.LimitReader(fd, 64*1024+1))
 	if err != nil {
 		return "", fmt.Errorf("failed to read %q: %w", path, err)
+	}
+	if len(data) > 64*1024 {
+		return "", fmt.Errorf("secret file %q exceeds 64 KiB", path)
 	}
 
 	// Trim one trailing newline

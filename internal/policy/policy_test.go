@@ -917,3 +917,103 @@ agents:
 		})
 	}
 }
+
+// TestInjectSameArgConflictDetection tests load-time detection of conflicting rules.
+func TestInjectSameArgConflictDetection(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr bool
+	}{
+		{
+			name: "same-arg literal vs literal different OK",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_create_issue"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_list_issues"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: false,
+		},
+		{
+			name: "same-arg literal vs matching glob reject",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_create_issue"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_*"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "same-arg glob with nested prefixes reject",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["github_create_*"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "same-arg glob with unrelated prefixes OK",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["slack_*"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: false,
+		},
+		{
+			name: "overlapping globs different args OK",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["github_*"]
+        ref: "env:SECRET1"
+        arg: "headers.Authorization"
+      - tools: ["github_create_*"]
+        ref: "env:SECRET2"
+        arg: "headers.SecondaryToken"
+`,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writePolicy(t, tt.yaml)
+			_, err := Load(path)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Load() wantErr=%v, got err=%v", tt.wantErr, err)
+			}
+		})
+	}
+}
