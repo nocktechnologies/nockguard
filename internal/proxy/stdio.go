@@ -191,22 +191,6 @@ func (p *StdioProxy) audit(tool, decision, reason string, refs *extract.Referenc
 		}
 	}
 
-	// If this is a forwarded nockcc_nock_claim, update the current card.
-	if tool == "nockcc_nock_claim" && decision == "allow" && refs != nil && refs.NockID > 0 {
-		p.cardMu.Lock()
-		p.currentCard = refs.NockID
-		p.cardMu.Unlock()
-	}
-
-	// If this is a release for the current card, clear the current card.
-	if tool == "nockcc_nock_release" && decision == "allow" && refs != nil && refs.NockID > 0 {
-		p.cardMu.Lock()
-		if p.currentCard == refs.NockID {
-			p.currentCard = 0
-		}
-		p.cardMu.Unlock()
-	}
-
 	if p.auditor.Enabled() {
 		if err := p.auditor.Record(ev); err != nil {
 			p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, tool, err)
