@@ -23,23 +23,39 @@ type References struct {
 }
 
 // FromToolCall extracts auditable references from the arguments of a known tool.
-// params may be nil (non-tools/call traffic, no extraction). Unknown tools and
-// malformed arguments yield a zero References struct (no fields).
+// The canonicalParams must be the MCP tools/call params object containing "name"
+// and "arguments" fields: {"name": "...", "arguments": {...}}.
+// Nil or empty params yield a zero References struct.
+// Unknown tools and malformed arguments yield a zero References struct.
 func FromToolCall(tool string, params json.RawMessage) References {
 	if len(params) == 0 {
 		return References{}
 	}
-	var args map[string]json.RawMessage
-	if err := json.Unmarshal(params, &args); err != nil {
+
+	// Unmarshal the full params object to extract the arguments field.
+	var paramsObj map[string]json.RawMessage
+	if err := json.Unmarshal(params, &paramsObj); err != nil {
+		return References{}
+	}
+
+	// Extract the "arguments" field.
+	argsRaw, ok := paramsObj["arguments"]
+	if !ok {
+		return References{}
+	}
+
+	// Unmarshal arguments into a map.
+	var arguments map[string]json.RawMessage
+	if err := json.Unmarshal(argsRaw, &arguments); err != nil {
 		return References{}
 	}
 
 	switch tool {
 	case "nockcc_nock_claim", "nockcc_nock_update", "nockcc_nock_get", "nockcc_nock_release":
-		return extractNockToolID(args)
+		return extractNockToolID(arguments)
 	// Reserved for future GitHub PR tool extractors:
 	// case "gh_pr_create", "gh_pr_update":
-	//     return extractGitHubPR(args)
+	//     return extractGitHubPR(arguments)
 	default:
 		return References{}
 	}
@@ -49,8 +65,8 @@ func FromToolCall(tool string, params json.RawMessage) References {
 // The id may arrive as a JSON number or string (different client implementations);
 // both are accepted and normalized to an integer. Invalid or missing id yields
 // References{}.
-func extractNockToolID(args map[string]json.RawMessage) References {
-	idRaw, ok := args["id"]
+func extractNockToolID(arguments map[string]json.RawMessage) References {
+	idRaw, ok := arguments["id"]
 	if !ok {
 		return References{}
 	}

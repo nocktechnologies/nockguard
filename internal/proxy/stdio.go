@@ -219,6 +219,32 @@ func (p *StdioProxy) audit(tool, decision, reason string, refs *extract.Referenc
 
 // The current card is stamped onto rows that don't explicitly carry a NockID.
 
+// updateCardState updates the session-scoped current card based on a forwarded claim or release.
+// This is called only after the transport has confirmed the forward succeeded, ensuring
+// state commits don't happen for failed forwards. tool and refs must match what was audited.
+func (p *StdioProxy) updateCardState(tool string, refs *extract.References) {
+	if refs == nil || refs.NockID == 0 {
+		return
+	}
+
+	// If this is a forwarded nockcc_nock_claim, set the current card.
+	if tool == "nockcc_nock_claim" {
+		p.cardMu.Lock()
+		p.currentCard = refs.NockID
+		p.cardMu.Unlock()
+		return
+	}
+
+	// If this is a forwarded nockcc_nock_release for the current card, clear it.
+	if tool == "nockcc_nock_release" {
+		p.cardMu.Lock()
+		if p.currentCard == refs.NockID {
+			p.currentCard = 0
+		}
+		p.cardMu.Unlock()
+	}
+}
+
 // isEnforcement reports whether a decision is a policy action worth surfacing in
 // the NockCC ops-log. Allowed calls and tool-list hides are excluded to keep the
 // centralized feed to notable enforcement or shadow-enforcement signal.
@@ -327,6 +353,10 @@ type mcpDecision struct {
 	// a tools/call (informational; empty otherwise).
 	toolsListID json.RawMessage
 	tool        string
+	// cardStateUpdate stores tool name and extracted refs for updateCardState()
+	// after a successful forward. nil means no state update needed.
+	toolForState string              // tool name, empty if no state update needed
+	refsForState *extract.References // extracted references, nil if no state update needed
 }
 
 func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map) error {
@@ -349,6 +379,10 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 		if d.forward != nil {
 			if _, writeErr := fmt.Fprintf(w, "%s\n", d.forward); writeErr != nil {
 				return writeErr
+			}
+			// After successful forward, update card state if needed
+			if d.toolForState != "" {
+				p.updateCardState(d.toolForState, d.refsForState)
 			}
 		}
 	}
@@ -421,7 +455,7 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 		// A tools/call whose name we cannot extract fails CLOSED — the
 		// upstream might still resolve a name the proxy could not see.
 		dec := p.engine.FailModeVerdict(p.agent, "unextractable-name")
-		if dec.Verdict == policy.Ask && p.approveAsk("", canonicalLine, dec) {
+		if dec.Verdict == policy.Ask && p.approveAsk("", canonicalLine, nil, dec) {
 			return mcpDecision{forward: canonicalLine}
 		}
 		p.logger.Printf("DENY agent=%s reason=unextractable-name", p.agent)
@@ -475,7 +509,7 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 		}
 	}
 
-	if dec.Verdict == policy.Ask && !p.approveAsk(toolName, canonicalParams, dec) {
+	if dec.Verdict == policy.Ask && !p.approveAsk(toolName, canonicalParams, &refs, dec) {
 		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
 			rejectMsg: fmt.Sprintf("nockguard: tool %q denied by approval gate", toolName)}
 	}
@@ -517,7 +551,7 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 		p.audit(toolName, "would-deny", dec.Reason, &refs)
 	}
 	p.audit(toolName, "allow", dec.Reason, &refs)
-	return mcpDecision{forward: out, tool: toolName}
+	return mcpDecision{forward: out, tool: toolName, toolForState: toolName, refsForState: &refs}
 }
 
 // approveAsk holds an `ask`-verdict call (native ask rules AND legacy
@@ -525,20 +559,20 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 // CLOSED: with no approver wired (p.approver == nil) the call is denied, never
 // forwarded. N8328 removed the prior allowWithoutApprover escape hatch that made
 // legacy require_approval fail OPEN.
-func (p *StdioProxy) approveAsk(tool string, params json.RawMessage, dec policy.Decision) bool {
+func (p *StdioProxy) approveAsk(tool string, params json.RawMessage, refs *extract.References, dec policy.Decision) bool {
 	if p.approver == nil {
 		p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=no-approver-configured (fail-closed)", p.agent, tool)
-		p.audit(tool, "approval-denied", "no-approver-configured", nil)
+		p.audit(tool, "approval-denied", "no-approver-configured", refs)
 		return false
 	}
 	v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: tool, Params: params})
 	if !v.Approved {
 		p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)
-		p.audit(tool, "approval-denied", v.Reason, nil)
+		p.audit(tool, "approval-denied", v.Reason, refs)
 		return false
 	}
 	p.logger.Printf("APPROVAL-GRANTED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)
-	p.audit(tool, "approval-granted", v.Reason, nil)
+	p.audit(tool, "approval-granted", v.Reason, refs)
 	p.applyWithheld(tool, dec.Withheld)
 	return true
 }
@@ -548,7 +582,7 @@ func (p *StdioProxy) handleFailModeAsk(tool string, params json.RawMessage, reas
 	if dec.Verdict != policy.Ask {
 		return false
 	}
-	return p.approveAsk(tool, params, dec)
+	return p.approveAsk(tool, params, nil, dec)
 }
 
 func (p *StdioProxy) applyWithheld(tool string, writes []policy.StateWrite) {
