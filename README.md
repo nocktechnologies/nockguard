@@ -244,6 +244,31 @@ audit:
 
 ```bash
 nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB   # exit 0 = intact + authentic, 2 = tampered or wrong signer
+
+### Auditable References (observe mode)
+
+When your policy allows `nockcc_nock_*` tool calls, NockGuard extracts the NockCC card ID from each call and records it in the audit trail. This links every policy decision to the card it acted for — not just "the agent called nockcc_nock_get" but "the agent called it for card #12345". The extracted reference is part of the signed payload, so it is tamper-evident proof of *what* the call acted for.
+
+Each audit entry can carry these extracted fields:
+
+- **nock_id** — The NockCC card ID (extracted from `nockcc_nock_claim`, `nockcc_nock_update`, `nockcc_nock_get`, `nockcc_nock_release` calls).
+- **pr** — Reserved for GitHub PR references (not yet extracted).
+- **review_id** — Reserved for NockCC review IDs (not yet extracted).
+- **parent_audit_seq** — Reserved for audit sequence links (not yet extracted).
+
+For example, a sequence of tool calls:
+
+```json
+{"ts":"2026-06-03T18:30:00Z","agent":"kit","tool":"nockcc_nock_claim","decision":"allow","nock_id":12345,"sig":"abc123..."}
+{"ts":"2026-06-03T18:30:01Z","agent":"kit","tool":"nockcc_nock_update","decision":"allow","nock_id":12345,"sig":"def456..."}
+{"ts":"2026-06-03T18:30:02Z","agent":"kit","tool":"nockcc_nock_release","decision":"allow","nock_id":12345,"sig":"ghi789..."}
+```
+
+All three rows carry `nock_id:12345` — the claim sets it, the update extracts it from its own arguments, and the release confirms it. The signature chain includes the nock_id field, so verifying the trail also proves each card reference was not altered after recording.
+
+Extraction is conservative: only known tools and typed parameter patterns are recognized. Unknown tools, missing parameters, or malformed arguments yield no extracted field for that row. The feature never guesses. This keeps the audit trail faithful to what actually happened.
+
+## Live Wall
 ```
 
 ## Live Wall

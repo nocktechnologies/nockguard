@@ -22,7 +22,41 @@
 // Auditing is opt-in: an empty path yields a disabled, nil-safe Auditor, and a
 // disabled Auditor's Record is a no-op. Audit writes never block or fail a tool
 // call — a write error is returned to the caller (which logs and proceeds);
+// Package audit implements NockGuard Phase 4: a structured, append-only audit
+// trail of policy decisions, written as JSON Lines.
+//
+// Each tool-call decision the proxy makes (allow / deny / block / ratelimit /
+// hide) is recorded as one JSON object per line at a configured path
+// (default ~/.nockguard/logs/audit.jsonl). This turns the firewall from a gate
+// into an accountable record — what each agent attempted and what the policy
+// did about it.
+//
+// Phase 4 (3/3) — tamper-evidence. When a signing key is supplied, each entry is
+// HMAC-SHA256 signed over its canonical content AND the previous entry's
+// signature, forming a hash chain. Any edit, deletion, insertion, or reorder of
+// the trail breaks the chain and is caught by Verify. The key never lives in the
+// policy file (it is read from an environment variable), and signing is opt-in:
+// an unsigned trail behaves exactly as before.
+//
+// Auditable references: a small, declared set of MCP tools (nockcc_nock_* tools)
+// carry extracted fields in each audit entry that link it to the card or request
+// it acted for. These fields — NockID, PR, ReviewID — are extracted from tool
+// arguments by the extract package (internal/extract) and are INCLUDED in the
+// Ed25519 signature chain, making them tamper-evident proof of what the call acted for.
+// Unknown tools and calls never carry these fields; the feature is conservative
+// and never guesses.
+//
+// Deliberate omission: NockGuard does NOT write raw tool-call parameters to the
+// audit file. Logging arguments would persist exactly the secrets and injection
+// payloads that Phase 2 input-validation exists to keep out — so the trail
+// records the decision (agent, tool, outcome, reason), not the payload. Extracted
+// references are an exception: they are typed, declared, and never raw arguments.
+//
+// Auditing is opt-in: an empty path yields a disabled, nil-safe Auditor, and a
+// disabled Auditor's Record is a no-op. Audit writes never block or fail a tool
+// call — a write error is returned to the caller (which logs and proceeds);
 // auditing is fail-open by design.
+
 package audit
 
 import (
@@ -46,13 +80,22 @@ import (
 // Event is one recorded policy decision. Time is stamped by the Auditor. Sig, when
 // present, is the hex HMAC chain signature over the entry's canonical content
 // (every field except Sig) and the previous entry's Sig.
+//
+// Auditable fields (NockID, PR, ReviewID, ParentAuditSeq) are extracted from
+// tool-call arguments by declared extractors. These fields are INCLUDED in the
+// canonical payload signed by the Ed25519 chain, so they form part of the
+// tamper-evident trail. Unknown tools and calls never carry these fields.
 type Event struct {
-	Time     string `json:"ts"`
-	Agent    string `json:"agent"`
-	Tool     string `json:"tool"`
-	Decision string `json:"decision"` // allow | deny | block | ratelimit | hide
-	Reason   string `json:"reason,omitempty"`
-	Sig      string `json:"sig,omitempty"`
+	Time           string `json:"ts"`
+	Agent          string `json:"agent"`
+	Tool           string `json:"tool"`
+	Decision       string `json:"decision"` // allow | deny | block | ratelimit | hide
+	Reason         string `json:"reason,omitempty"`
+	NockID         int    `json:"nock_id,omitempty"`          // NockCC card id, extracted from nockcc_nock_* tools or set by session stamp
+	PR             string `json:"pr,omitempty"`               // GitHub PR reference owner/repo#n, extracted from gh_* tools
+	ReviewID       string `json:"review_id,omitempty"`        // NockCC review id, extracted from known tools
+	ParentAuditSeq int    `json:"parent_audit_seq,omitempty"` // Reserved for future use; never populated
+	Sig            string `json:"sig,omitempty"`
 }
 
 // Auditor appends Events as JSON Lines to a file. It is safe for concurrent use

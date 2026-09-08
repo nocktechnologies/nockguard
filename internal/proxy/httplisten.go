@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/nocktechnologies/nockguard/internal/extract"
 	"github.com/nocktechnologies/nockguard/internal/jsonrpc"
 	"github.com/nocktechnologies/nockguard/internal/proxy/forwardhttp"
 )
@@ -166,7 +167,7 @@ func (l *HTTPListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Cleared the gate (or non-tools/call traffic like initialize/tools/list):
 	// forward the CANONICAL bytes upstream and stream the response back unchanged.
-	l.forward(w, r, d.forward)
+	l.forward(w, r, d.forward, d.toolForState, d.refsForState)
 }
 
 // writeJSONRPCError returns a JSON-RPC error object as a 200 response body. See
@@ -179,7 +180,7 @@ func (l *HTTPListener) writeJSONRPCError(w http.ResponseWriter, id json.RawMessa
 
 // forward POSTs the allowed body to the upstream MCP endpoint and streams the
 // response (application/json or SSE) back to the connector byte-for-byte.
-func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []byte) {
+func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []byte, toolForState string, refsForState *extract.References) {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, l.upstream, bytes.NewReader(body))
 	if err != nil {
 		l.logger.Printf("UPSTREAM-ERROR agent=%s: build request: %v", l.gate.agent, err)
@@ -198,8 +199,10 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 	}
 	// Streamable-HTTP session passthrough: the connector is a spec-compliant MCP
 	// HTTP client that owns its Mcp-Session-Id, so relay it upstream and let the
-	// upstream's response header flow back below. The proxy stays stateless — no
-	// capture needed, and net/http's parallel handlers add no shared mutable state.
+	// upstream's response header flow back below. Card state is intentionally
+	// process/session-scoped: this design assumes one connector session per
+	// listener instance with non-overlapping claim/act/release calls. Concurrent
+	// multi-session HTTP traffic through one listener is out of scope for this PR.
 	if sid := r.Header.Get("Mcp-Session-Id"); sid != "" {
 		req.Header.Set("Mcp-Session-Id", sid)
 	}
@@ -239,6 +242,18 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
+
+	// After successful forward AND verified 2xx status, update card state if needed.
+	// Only commit the card state on a 2xx response; any upstream 5xx or other error
+	// means the upstream call may have failed and we should not mutate state.
+	// (This matches the existing stdio path's agentToUpstream, which likewise only
+	// checks that its own local pipe write succeeded, never the upstream's actual
+	// JSON-RPC-level outcome — that asymmetry is a pre-existing, documented
+	// limitation of the feature as designed for both transports.)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && toolForState != "" {
+		l.gate.updateCardState(toolForState, refsForState)
+	}
+
 	l.streamBody(w, resp.Body)
 }
 
