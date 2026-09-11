@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/extract"
@@ -149,9 +150,12 @@ func (l *HTTPListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d := l.gate.decide(body)
+	seq := atomic.AddUint64(&l.gate.auditSeq, 1) - 1
+	d := l.gate.decide(body, seq)
 
 	if d.reject {
+		// Resolve immediately for rejected calls
+		l.gate.resolveAudit(seq)
 		if d.rejectID == nil {
 			// Denied NOTIFICATION: JSON-RPC has no response channel for a message
 			// with no id. There is no "drop" over HTTP, so acknowledge receipt with
@@ -168,7 +172,7 @@ func (l *HTTPListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Cleared the gate (or non-tools/call traffic like initialize/tools/list):
 	// forward the CANONICAL bytes upstream and stream the response back unchanged.
-	l.forward(w, r, d.forward, d.toolForState, d.refsForState, d.deferredAudits, d.refsForAudit, d.tool)
+	l.forward(w, r, d.forward, d.toolForState, d.refsForState, d.deferredAudits, d.refsForAudit, d.tool, seq)
 }
 
 // writeJSONRPCError returns a JSON-RPC error object as a 200 response body. See
@@ -183,7 +187,7 @@ func (l *HTTPListener) writeJSONRPCError(w http.ResponseWriter, id json.RawMessa
 // response (application/json or SSE) back to the connector byte-for-byte.
 // deferredAudits are emitted in the response path after verifying JSON-RPC success,
 // ensuring audit stamping happens after card state is committed.
-func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []byte, toolForState string, refsForState *extract.References, deferredAudits []deferredAudit, refsForAudit *extract.References, tool string) {
+func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []byte, toolForState string, refsForState *extract.References, deferredAudits []deferredAudit, refsForAudit *extract.References, tool string, seq uint64) {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, l.upstream, bytes.NewReader(body))
 	if err != nil {
 		l.logger.Printf("UPSTREAM-ERROR agent=%s: build request: %v", l.gate.agent, err)
@@ -289,11 +293,9 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 				// Commit card state only if JSON-RPC succeeded.
 				if shouldCommit {
 					l.gate.updateCardState(toolForState, refsForState)
-					// Emit deferred audits now that state is committed and currentCard is available
-					for _, aud := range deferredAudits {
-						l.gate.audit(tool, aud.decision, aud.reason, refsForAudit)
-					}
 				}
+				// Resolve audits unconditionally to ensure the queue doesn't stall.
+				l.gate.resolveAudit(seq)
 			}
 			return
 		}

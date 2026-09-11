@@ -19,7 +19,7 @@ import (
 //
 // Exactly one resolution happens per rule at forward time, with no retries.
 // If a secret is too short (< 8 bytes), it is treated as unresolved.
-func (p *StdioProxy) applyInject(toolName string, canonicalParams json.RawMessage, rules []policy.InjectRule) (json.RawMessage, string /*rejectReason*/, bool /*success*/) {
+func (p *StdioProxy) applyInject(toolName string, canonicalParams json.RawMessage, rules []policy.InjectRule, seq uint64) (json.RawMessage, string /*rejectReason*/, bool /*success*/) {
 	if len(rules) == 0 {
 		return canonicalParams, "", true
 	}
@@ -41,14 +41,14 @@ func (p *StdioProxy) applyInject(toolName string, canonicalParams json.RawMessag
 		val, err := p.resolver.Resolve(rule.Ref)
 		if err != nil {
 			p.logger.Printf("INJECT-FAIL agent=%s tool=%s reason=unresolved ref=%s error=%v", p.agent, toolName, rule.Ref, err)
-			p.audit(toolName, "block", fmt.Sprintf("inject-unresolved ref=%s", rule.Ref), nil)
+			p.appendAudit(seq, toolName, "block", fmt.Sprintf("inject-unresolved ref=%s", rule.Ref), nil); p.resolveAudit(seq)
 			return nil, fmt.Sprintf("nockguard: tool %q injection failed", toolName), false
 		}
 
 		// Check minimum length
 		if len(val) < 8 {
 			p.logger.Printf("INJECT-FAIL agent=%s tool=%s reason=too-short ref=%s", p.agent, toolName, rule.Ref)
-			p.audit(toolName, "block", fmt.Sprintf("inject-too-short ref=%s", rule.Ref), nil)
+			p.appendAudit(seq, toolName, "block", fmt.Sprintf("inject-too-short ref=%s", rule.Ref), nil); p.resolveAudit(seq)
 			return nil, fmt.Sprintf("nockguard: tool %q injection failed", toolName), false
 		}
 
@@ -63,7 +63,7 @@ func (p *StdioProxy) applyInject(toolName string, canonicalParams json.RawMessag
 	for argPath, count := range argPathCount {
 		if count > 1 {
 			p.logger.Printf("INJECT-FAIL agent=%s tool=%s reason=conflict arg=%s count=%d", p.agent, toolName, argPath, count)
-			p.audit(toolName, "block", fmt.Sprintf("inject-conflict arg=%s", argPath), nil)
+			p.appendAudit(seq, toolName, "block", fmt.Sprintf("inject-conflict arg=%s", argPath), nil); p.resolveAudit(seq)
 			return nil, fmt.Sprintf("nockguard: tool %q injection failed", toolName), false
 		}
 	}
@@ -78,7 +78,7 @@ func (p *StdioProxy) applyInject(toolName string, canonicalParams json.RawMessag
 		// Set the value at the path in params
 		if !setArgPathInParams(&params, rr.rule.Arg, value) {
 			p.logger.Printf("INJECT-FAIL agent=%s tool=%s reason=unsettable arg=%s", p.agent, toolName, rr.rule.Arg)
-			p.audit(toolName, "block", fmt.Sprintf("inject-unsettable arg=%s", rr.rule.Arg), nil)
+			p.appendAudit(seq, toolName, "block", fmt.Sprintf("inject-unsettable arg=%s", rr.rule.Arg), nil); p.resolveAudit(seq)
 			return nil, fmt.Sprintf("nockguard: tool %q injection failed", toolName), false
 		}
 	}
@@ -87,7 +87,7 @@ func (p *StdioProxy) applyInject(toolName string, canonicalParams json.RawMessag
 	out, err := json.Marshal(params)
 	if err != nil {
 		p.logger.Printf("INJECT-FAIL agent=%s tool=%s reason=marshal-error", p.agent, toolName)
-		p.audit(toolName, "block", "inject-marshal-error", nil)
+		p.appendAudit(seq, toolName, "block", "inject-marshal-error", nil); p.resolveAudit(seq)
 		return nil, fmt.Sprintf("nockguard: tool %q injection failed", toolName), false
 	}
 
@@ -99,8 +99,9 @@ func (p *StdioProxy) applyInject(toolName string, canonicalParams json.RawMessag
 			templated := strings.ReplaceAll(rr.rule.Template, "{secret}", rr.value)
 			p.scrubber.add(templated)
 		}
-		p.audit(toolName, "inject", fmt.Sprintf("ref=%s arg=%s", rr.rule.Ref, rr.rule.Arg), nil)
+		p.appendAudit(seq, toolName, "inject", fmt.Sprintf("ref=%s arg=%s", rr.rule.Ref, rr.rule.Arg), nil)
 	}
+	p.resolveAudit(seq)
 
 	return out, "", true
 }
