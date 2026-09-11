@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/extract"
@@ -243,15 +244,56 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	// After successful forward AND verified 2xx status, update card state if needed.
-	// Only commit the card state on a 2xx response; any upstream 5xx or other error
-	// means the upstream call may have failed and we should not mutate state.
-	// (This matches the existing stdio path's agentToUpstream, which likewise only
-	// checks that its own local pipe write succeeded, never the upstream's actual
-	// JSON-RPC-level outcome — that asymmetry is a pre-existing, documented
-	// limitation of the feature as designed for both transports.)
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 && toolForState != "" {
-		l.gate.updateCardState(toolForState, refsForState)
+	// Card state commit is gated on JSON-RPC-level success, not HTTP status.
+	// For JSON responses, buffer and parse to check for errors before committing.
+	// For SSE streams, pass through byte-faithful without buffering (no state updates over SSE).
+	if toolForState != "" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		ct := resp.Header.Get("Content-Type")
+		if strings.HasPrefix(ct, "application/json") {
+			// Buffer and parse the JSON response to check for JSON-RPC errors
+			// before committing card state. Only commit if the response is a genuine
+			// JSON-RPC success (no "error" field and no tool-level isError).
+			respBody, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				// Read error — treat as upstream failure, do not commit state.
+				l.logger.Printf("UPSTREAM-STREAM-ERROR agent=%s: read response body: %v", l.gate.agent, readErr)
+				if _, werr := w.Write(respBody); werr != nil {
+					return
+				}
+			} else {
+				// Parse response to check for JSON-RPC error.
+				shouldCommit := true
+				var msg jsonrpc.Message
+				if err := json.Unmarshal(respBody, &msg); err == nil {
+					// Parsed successfully; check for JSON-RPC error.
+					if msg.Error != nil {
+						shouldCommit = false
+					}
+					// Also check for tool-level isError (MCP tool result failure).
+					// Tool errors travel as successful JSON-RPC responses with result.isError=true.
+					if shouldCommit && msg.Result != nil {
+						var result map[string]interface{}
+						if err := json.Unmarshal(msg.Result, &result); err == nil {
+							if toolErr, ok := result["isError"].(bool); ok && toolErr {
+								shouldCommit = false
+							}
+						}
+					}
+				}
+				// Write the buffered response bytes unchanged.
+				if _, werr := w.Write(respBody); werr != nil {
+					return
+				}
+				// Commit card state only if JSON-RPC succeeded.
+				if shouldCommit {
+					l.gate.updateCardState(toolForState, refsForState)
+				}
+			}
+			return
+		}
+		// SSE and other streaming responses: pass through byte-faithful without buffering.
+		// No card state is committed over streaming responses (design limitation: N/A for
+		// tool calls which return JSON responses, not SSE).
 	}
 
 	l.streamBody(w, resp.Body)

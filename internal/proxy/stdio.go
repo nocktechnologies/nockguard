@@ -317,6 +317,13 @@ func (p *StdioProxy) Run() error {
 // Producing an mcpDecision (via decide) performs the gate's side effects —
 // audit append, ops-log forward, approval prompt, logging — exactly once; it
 // writes no transport bytes itself.
+// pendingCard holds tool name and extracted references for a forwarded call
+// waiting for its JSON-RPC response to decide whether to commit card state.
+type pendingCard struct {
+	tool string
+	refs *extract.References
+}
+
 type mcpDecision struct {
 	// forward, when non-nil, is the canonical bytes to send upstream (a cleared
 	// tools/call, or non-gated traffic like initialize/tools/list). Mutually
@@ -337,8 +344,11 @@ type mcpDecision struct {
 	// a tools/call (informational; empty otherwise).
 	toolsListID json.RawMessage
 	tool        string
+	// forwardID is the JSON-RPC request id (for requests only). Set for tool calls
+	// that forward, so upstreamToAgent can correlate the response.
+	forwardID json.RawMessage
 	// cardStateUpdate stores tool name and extracted refs for updateCardState()
-	// after a successful forward. nil means no state update needed.
+	// after the JSON-RPC response is verified as successful. nil means no state update needed.
 	toolForState string              // tool name, empty if no state update needed
 	refsForState *extract.References // extracted references, nil if no state update needed
 }
@@ -364,9 +374,10 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			if _, writeErr := fmt.Fprintf(w, "%s\n", d.forward); writeErr != nil {
 				return writeErr
 			}
-			// After successful forward, update card state if needed
-			if d.toolForState != "" {
-				p.updateCardState(d.toolForState, d.refsForState)
+			// Store pending card state to be committed after verifying the JSON-RPC response.
+			// Notifications (no id) have no response to correlate, so don't store them.
+			if d.toolForState != "" && d.forwardID != nil {
+				pending.Store(string(d.forwardID), pendingCard{tool: d.toolForState, refs: d.refsForState})
 			}
 		}
 	}
@@ -535,7 +546,7 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 		p.audit(toolName, "would-deny", dec.Reason, &refs)
 	}
 	p.audit(toolName, "allow", dec.Reason, &refs)
-	return mcpDecision{forward: out, tool: toolName, toolForState: toolName, refsForState: &refs}
+	return mcpDecision{forward: out, tool: toolName, forwardID: msg.ID, toolForState: toolName, refsForState: &refs}
 }
 
 // approveAsk holds an `ask`-verdict call (native ask rules AND legacy
@@ -603,10 +614,35 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 		}
 
 		if msg.IsResponse() && msg.ID != nil {
-			if _, loaded := pending.LoadAndDelete(string(msg.ID)); loaded {
-				filtered := p.filterToolListResponse(line)
-				if filtered != nil {
-					line = filtered
+			val, loaded := pending.LoadAndDelete(string(msg.ID))
+			if loaded {
+				// Check if this is a tools/list filter or a pending card state update.
+				if boolVal, ok := val.(bool); ok && boolVal {
+					// tools/list response — filter it
+					filtered := p.filterToolListResponse(line)
+					if filtered != nil {
+						line = filtered
+					}
+				} else if cardVal, ok := val.(pendingCard); ok {
+					// Card state pending response — check JSON-RPC success before committing
+					shouldCommit := true
+					if msg.Error != nil {
+						// JSON-RPC error — don't commit state
+						shouldCommit = false
+					} else if msg.Result != nil {
+						// Check for tool-level isError (MCP tool result failure).
+						// Tool errors travel as successful JSON-RPC responses with result.isError=true.
+						var result map[string]interface{}
+						if err := json.Unmarshal(msg.Result, &result); err == nil {
+							if toolErr, ok := result["isError"].(bool); ok && toolErr {
+								shouldCommit = false
+							}
+						}
+					}
+					// Commit card state only if JSON-RPC succeeded.
+					if shouldCommit {
+						p.updateCardState(cardVal.tool, cardVal.refs)
+					}
 				}
 			}
 		}

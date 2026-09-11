@@ -533,3 +533,82 @@ func TestHTTPListener_MethodNotAllowed(t *testing.T) {
 		t.Errorf("GET status = %d, want 405", resp.StatusCode)
 	}
 }
+
+// TestHTTPListener_CardStateNotCommittedOnJSONRPCError: card state is NOT
+// committed when upstream returns HTTP 200 + JSON-RPC error field. This is the
+// core fix: JSON-RPC error (not HTTP status) gates card state commit.
+func TestHTTPListener_CardStateNotCommittedOnJSONRPCError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Return a successful HTTP response with a JSON-RPC error (claim rejected).
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":42,"error":{"code":-32000,"message":"card already claimed"}}`))
+	}))
+	defer upstream.Close()
+
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	defer lsrv.Close()
+
+	// Drive a nockcc_nock_claim call through the listener.
+	// The upstream returns 200 + JSON-RPC error, so card state should not be committed.
+	status, _, _ := post(t, lsrv.URL, `{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":5}}}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	// Verify card state was not updated (must stay 0).
+	if gate.currentCard != 0 {
+		t.Errorf("currentCard = %d, want 0 — state must not commit when JSON-RPC response has error field", gate.currentCard)
+	}
+}
+
+// TestHTTPListener_CardStateCommittedOnJSONRPCSuccess: card state IS committed
+// when upstream returns a genuine JSON-RPC success (no error field, no isError).
+func TestHTTPListener_CardStateCommittedOnJSONRPCSuccess(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Return a successful JSON-RPC response (no error field).
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":42,"result":{"content":[{"type":"text","text":"claimed"}]}}`))
+	}))
+	defer upstream.Close()
+
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	defer lsrv.Close()
+
+	status, _, _ := post(t, lsrv.URL, `{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":99}}}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	// Verify card state WAS updated (should be 99).
+	if gate.currentCard != 99 {
+		t.Errorf("currentCard = %d, want 99 — state must commit on JSON-RPC success", gate.currentCard)
+	}
+}
+
+// TestHTTPListener_CardStateNotCommittedOnToolLevelIsError: card state is NOT
+// committed when tool returns isError=true in result field. MCP tools can
+// fail at the tool level while returning HTTP 200 + JSON-RPC success.
+func TestHTTPListener_CardStateNotCommittedOnToolLevelIsError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Return a successful HTTP+JSON-RPC response but with tool-level error (isError: true).
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":42,"result":{"isError":true,"content":[{"type":"text","text":"error"}]}}`))
+	}))
+	defer upstream.Close()
+
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	defer lsrv.Close()
+
+	status, _, _ := post(t, lsrv.URL, `{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":7}}}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	// Verify card state was not updated (must stay 0).
+	if gate.currentCard != 0 {
+		t.Errorf("currentCard = %d, want 0 — state must not commit when tool returns isError=true", gate.currentCard)
+	}
+}
