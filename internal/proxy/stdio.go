@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
@@ -59,6 +60,12 @@ type StdioProxy struct {
 	// do not name it explicitly. Protected by mu (shared with the two proxy goroutines).
 	currentCard int        // 0 = no card claimed yet
 	cardMu      sync.Mutex // serializes currentCard updates
+
+	// Audit ordering: track request sequence to ensure audits are emitted in request order
+	auditSeq    uint64 // atomic: incremented for each request to assign sequence numbers
+	auditTodo   map[uint64][]*audit.Event // buffered audits awaiting emission in sequence order
+	auditMutex  sync.Mutex
+	auditNext   uint64 // next sequence number ready to emit
 }
 
 // writeAgentLine writes one newline-terminated line to the agent-facing channel
@@ -98,14 +105,33 @@ func (p *StdioProxy) agentWriter() io.Writer {
 //
 // Probe swaps agentOut without holding agentMu, so it must NOT run concurrently
 // with Run() (the selftest builds single-use proxies with no live goroutines).
+//
+// For Probe, deferred audits (would-deny, allow for forwarded calls) are emitted
+// immediately after agentToUpstream returns, since there's no upstream response path.
 func (p *StdioProxy) Probe(line []byte) (forwarded bool, reply []byte, err error) {
 	var upstream, agentReply bytes.Buffer
 	prev := p.agentOut
 	p.agentOut = &agentReply
 	defer func() { p.agentOut = prev }()
+	
+	// Use a map to capture pending data (audits, state updates)
+	pending := &sync.Map{}
+	
 	// agentToUpstream reads with a bufio.Scanner, which yields the final line
 	// even without a trailing newline — so the raw bytes need no terminator.
-	perr := p.agentToUpstream(bytes.NewReader(line), &upstream, &sync.Map{})
+	perr := p.agentToUpstream(bytes.NewReader(line), &upstream, pending)
+	
+	// For Probe, emit any deferred audits immediately since there's no response path
+	pending.Range(func(key, val interface{}) bool {
+		if cardVal, ok := val.(pendingCard); ok {
+			// Emit deferred audits (assume success since this is a probe)
+			for _, aud := range cardVal.audits {
+				p.audit(cardVal.auditToolName, aud.decision, aud.reason, cardVal.auditRefs)
+			}
+		}
+		return true
+	})
+	
 	return upstream.Len() > 0, agentReply.Bytes(), perr
 }
 
@@ -145,6 +171,7 @@ func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, valid
 		logger:    logger,
 		resolver:  resolver,
 		scrubber:  newScrubSet(256), // LRU capped at 256 secret values
+		auditTodo: make(map[uint64][]*audit.Event),
 	}
 }
 
@@ -152,6 +179,9 @@ func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, valid
 // and for enforcement decisions, forwards it to the NockCC ops-log. Both sinks are
 // independent and fail-open: a write or forward problem is logged but never blocks or
 // fails the tool call. refs may be nil (non-tools/call traffic or unknown tools).
+//
+// For request-path audits (denied, blocked, ratelimited), we track sequence order
+// to ensure they're emitted after any preceding deferred audits.
 func (p *StdioProxy) audit(tool, decision, reason string, refs *extract.References) {
 	if p.trust.Enabled() {
 		if outcome, ok := trust.DecisionToOutcome(decision); ok {
@@ -226,6 +256,31 @@ func (p *StdioProxy) updateCardState(tool string, refs *extract.References) {
 			p.currentCard = 0
 		}
 		p.cardMu.Unlock()
+	}
+}
+
+// emitAuditsInOrder emits any buffered deferred audits in sequence order.
+// This is called in upstreamToAgent after processing responses to ensure
+// audits are written in request order, not response order.
+func (p *StdioProxy) emitAuditsInOrder() {
+	p.auditMutex.Lock()
+	defer p.auditMutex.Unlock()
+	
+	// Emit all audits from auditNext until we hit a gap
+	for {
+		if audits, exists := p.auditTodo[p.auditNext]; exists {
+			for _, ev := range audits {
+				if p.auditor.Enabled() {
+					if err := p.auditor.Record(*ev); err != nil {
+						p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, ev.Tool, err)
+					}
+				}
+			}
+			delete(p.auditTodo, p.auditNext)
+			p.auditNext++
+		} else {
+			break
+		}
 	}
 }
 
@@ -319,9 +374,18 @@ func (p *StdioProxy) Run() error {
 // writes no transport bytes itself.
 // pendingCard holds tool name and extracted references for a forwarded call
 // waiting for its JSON-RPC response to decide whether to commit card state.
+type deferredAudit struct {
+	decision string
+	reason   string
+}
+
 type pendingCard struct {
-	tool string
-	refs *extract.References
+	tool          string
+	refs          *extract.References               // for card state updates (claim/release only)
+	audits        []deferredAudit                   // audit decisions to emit after response is verified
+	auditToolName string                            // tool name for auditing
+	auditRefs     *extract.References               // extracted refs for auditing (all tools)
+	auditSeq      uint64                            // sequence number for audit ordering
 }
 
 type mcpDecision struct {
@@ -351,12 +415,22 @@ type mcpDecision struct {
 	// after the JSON-RPC response is verified as successful. nil means no state update needed.
 	toolForState string              // tool name, empty if no state update needed
 	refsForState *extract.References // extracted references, nil if no state update needed
+
+	// deferredAudits holds audit decisions (would-deny, allow) that are emitted
+	// in the response path after JSON-RPC success is confirmed. This ensures
+	// audit stamping happens after card state is committed.
+	deferredAudits []deferredAudit
+	// refsForAudit holds extracted references for deferred audits (same as refsForState for card-state tools)
+	refsForAudit *extract.References
 }
 
 func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 	for scanner.Scan() {
+		// Assign sequence number to this request for audit ordering
+		seq := atomic.AddUint64(&p.auditSeq, 1) - 1
+		
 		d := p.decide(scanner.Bytes())
 		if d.toolsListID != nil {
 			// tools/list (always a request) — track the id so the response can be
@@ -374,10 +448,17 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			if _, writeErr := fmt.Fprintf(w, "%s\n", d.forward); writeErr != nil {
 				return writeErr
 			}
-			// Store pending card state to be committed after verifying the JSON-RPC response.
+			// Store pending data (state update + audits) to be processed after verifying the JSON-RPC response.
 			// Notifications (no id) have no response to correlate, so don't store them.
-			if d.toolForState != "" && d.forwardID != nil {
-				pending.Store(string(d.forwardID), pendingCard{tool: d.toolForState, refs: d.refsForState})
+			if d.forwardID != nil {
+				pending.Store(string(d.forwardID), pendingCard{
+					tool:          d.toolForState,
+					refs:          d.refsForState,
+					audits:        d.deferredAudits,
+					auditToolName: d.tool,     // tool name for auditing
+					auditRefs:     d.refsForAudit, // extracted refs for auditing
+					auditSeq:      seq, // sequence number for audit ordering
+				})
 			}
 		}
 	}
@@ -542,10 +623,15 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 			rejectMsg: "nockguard: tools/call rejected — could not canonicalize message"}
 	}
 	p.logger.Printf("ALLOW agent=%s tool=%s", p.agent, toolName)
+	
+	// Collect audits to be emitted after response verification (in response path).
+	// This defers audit stamping until after card state is committed, ensuring
+	// that generic tools see the current card from a preceding claim's response.
+	audits := []deferredAudit{}
 	if dec.ShadowWouldDeny {
-		p.audit(toolName, "would-deny", dec.Reason, &refs)
+		audits = append(audits, deferredAudit{"would-deny", dec.Reason})
 	}
-	p.audit(toolName, "allow", dec.Reason, &refs)
+	audits = append(audits, deferredAudit{"allow", dec.Reason})
 
 	// Only set card state for tools that actually update card state (claim/release).
 	// This ensures updateCardState is only called on JSON-RPC success.
@@ -555,7 +641,7 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 		toolForState, refsForState = toolName, &refs
 	}
 
-	return mcpDecision{forward: out, tool: toolName, forwardID: msg.ID, toolForState: toolForState, refsForState: refsForState}
+	return mcpDecision{forward: out, tool: toolName, forwardID: msg.ID, toolForState: toolForState, refsForState: refsForState, deferredAudits: audits, refsForAudit: &refs}
 }
 
 // approveAsk holds an `ask`-verdict call (native ask rules AND legacy
@@ -633,10 +719,10 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 						line = filtered
 					}
 				} else if cardVal, ok := val.(pendingCard); ok {
-					// Card state pending response — check JSON-RPC success before committing
+					// Pending forward — check JSON-RPC success before committing state or auditing
 					shouldCommit := true
 					if msg.Error != nil {
-						// JSON-RPC error — don't commit state
+						// JSON-RPC error — don't commit state or audit
 						shouldCommit = false
 					} else if msg.Result != nil {
 						// Check for tool-level isError (MCP tool result failure).
@@ -648,9 +734,15 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 							}
 						}
 					}
-					// Commit card state only if JSON-RPC succeeded.
+					// Only commit state and emit audits if JSON-RPC succeeded.
+					// This ensures audit stamping happens after card state is committed,
+					// and that failed calls produce no audit trail.
 					if shouldCommit {
 						p.updateCardState(cardVal.tool, cardVal.refs)
+						// Emit deferred audits now that state is committed and currentCard is available
+						for _, aud := range cardVal.audits {
+							p.audit(cardVal.auditToolName, aud.decision, aud.reason, cardVal.auditRefs)
+						}
 					}
 				}
 			}

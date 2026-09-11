@@ -168,7 +168,7 @@ func (l *HTTPListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Cleared the gate (or non-tools/call traffic like initialize/tools/list):
 	// forward the CANONICAL bytes upstream and stream the response back unchanged.
-	l.forward(w, r, d.forward, d.toolForState, d.refsForState)
+	l.forward(w, r, d.forward, d.toolForState, d.refsForState, d.deferredAudits, d.refsForAudit, d.tool)
 }
 
 // writeJSONRPCError returns a JSON-RPC error object as a 200 response body. See
@@ -181,7 +181,9 @@ func (l *HTTPListener) writeJSONRPCError(w http.ResponseWriter, id json.RawMessa
 
 // forward POSTs the allowed body to the upstream MCP endpoint and streams the
 // response (application/json or SSE) back to the connector byte-for-byte.
-func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []byte, toolForState string, refsForState *extract.References) {
+// deferredAudits are emitted in the response path after verifying JSON-RPC success,
+// ensuring audit stamping happens after card state is committed.
+func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []byte, toolForState string, refsForState *extract.References, deferredAudits []deferredAudit, refsForAudit *extract.References, tool string) {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, l.upstream, bytes.NewReader(body))
 	if err != nil {
 		l.logger.Printf("UPSTREAM-ERROR agent=%s: build request: %v", l.gate.agent, err)
@@ -244,10 +246,10 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	// Card state commit is gated on JSON-RPC-level success, not HTTP status.
-	// For JSON responses, buffer and parse to check for errors before committing.
+	// Card state commit and audit emission are gated on JSON-RPC-level success, not HTTP status.
+	// For JSON responses, buffer and parse to check for errors before committing/auditing.
 	// For SSE streams, pass through byte-faithful without buffering (no state updates over SSE).
-	if toolForState != "" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+	if (toolForState != "" || len(deferredAudits) > 0) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		ct := resp.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "application/json") {
 			// Buffer and parse the JSON response to check for JSON-RPC errors
@@ -287,6 +289,10 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 				// Commit card state only if JSON-RPC succeeded.
 				if shouldCommit {
 					l.gate.updateCardState(toolForState, refsForState)
+					// Emit deferred audits now that state is committed and currentCard is available
+					for _, aud := range deferredAudits {
+						l.gate.audit(tool, aud.decision, aud.reason, refsForAudit)
+					}
 				}
 			}
 			return
