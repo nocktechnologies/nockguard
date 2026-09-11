@@ -546,7 +546,16 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 		p.audit(toolName, "would-deny", dec.Reason, &refs)
 	}
 	p.audit(toolName, "allow", dec.Reason, &refs)
-	return mcpDecision{forward: out, tool: toolName, forwardID: msg.ID, toolForState: toolName, refsForState: &refs}
+
+	// Only set card state for tools that actually update card state (claim/release).
+	// This ensures updateCardState is only called on JSON-RPC success.
+	var toolForState string
+	var refsForState *extract.References
+	if toolName == "nockcc_nock_claim" || toolName == "nockcc_nock_release" {
+		toolForState, refsForState = toolName, &refs
+	}
+
+	return mcpDecision{forward: out, tool: toolName, forwardID: msg.ID, toolForState: toolForState, refsForState: refsForState}
 }
 
 // approveAsk holds an `ask`-verdict call (native ask rules AND legacy

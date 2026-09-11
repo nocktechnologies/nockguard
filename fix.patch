@@ -1,0 +1,20 @@
+--- a/internal/proxy/stdio.go
++++ b/internal/proxy/stdio.go
+@@ -546,7 +546,15 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]j
+ 		p.audit(toolName, "would-deny", dec.Reason, &refs)
+ 	}
+ 	p.audit(toolName, "allow", dec.Reason, &refs)
+-	return mcpDecision{forward: out, tool: toolName, forwardID: msg.ID, toolForState: toolName, refsForState: &refs}
++
++	// Only set card state for tools that actually update card state (claim/release).
++	// This gates the updateCardState call on JSON-RPC success (in upstreamToAgent),
++	// so card state is not committed when the response carries an error or isError=true.
++	var toolForState string
++	var refsForState *extract.References
++	if toolName == "nockcc_nock_claim" || toolName == "nockcc_nock_release" {
++		toolForState, refsForState = toolName, &refs
++	}
+-	return mcpDecision{forward: out, tool: toolName, forwardID: msg.ID, toolForState: toolForState, refsForState: refsForState}
++	return mcpDecision{forward: out, tool: toolName, forwardID: msg.ID, toolForState: toolForState, refsForState: refsForState}
+ }
+ 
