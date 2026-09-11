@@ -223,11 +223,27 @@ func (p *StdioProxy) appendAudit(seq uint64, tool, decision, reason string, refs
 	}
 }
 
-// resolveAudit marks a sequence as ready to flush and flushes any consecutive
-// sequences that are ready, starting from auditNext.
+// resolveAudit marks a sequence as ready to flush and stamps currentCard onto
+// any audits for this sequence that don't already have a NockID. This ensures
+// the stamp value is captured at resolve time (when currentCard is correct) rather
+// than at flush time (which might be much later when currentCard has changed).
 func (p *StdioProxy) resolveAudit(seq uint64) {
 	p.auditMutex.Lock()
 	defer p.auditMutex.Unlock()
+
+	// Capture currentCard NOW (at resolve time) for this sequence's audits.
+	p.cardMu.Lock()
+	currentCard := p.currentCard
+	p.cardMu.Unlock()
+
+	// Stamp currentCard onto any events in this sequence that don't have an extracted NockID.
+	if audits, exists := p.auditTodo[seq]; exists {
+		for _, ev := range audits {
+			if ev.NockID == 0 && currentCard > 0 {
+				ev.NockID = currentCard
+			}
+		}
+	}
 
 	// Mark this sequence as resolved.
 	p.auditResolved[seq] = struct{}{}
@@ -252,19 +268,8 @@ func (p *StdioProxy) flushAuditsLocked() {
 			continue
 		}
 
-		// Emit all audits for this sequence
+		// Emit all audits for this sequence (already stamped at resolve time).
 		for _, ev := range audits {
-			// Stamp the current card onto this row if it's not already set by extraction.
-			// Must lock cardMu to read currentCard safely.
-			if ev.NockID == 0 {
-				p.cardMu.Lock()
-				currentCard := p.currentCard
-				p.cardMu.Unlock()
-				if currentCard > 0 {
-					ev.NockID = currentCard
-				}
-			}
-
 			// Record to audit trail
 			if p.auditor.Enabled() {
 				if err := p.auditor.Record(*ev); err != nil {
@@ -365,31 +370,6 @@ func (p *StdioProxy) updateCardState(tool string, refs *extract.References) {
 	}
 }
 
-// emitAuditsInOrder emits any buffered deferred audits in sequence order.
-// This is called in upstreamToAgent after processing responses to ensure
-// audits are written in request order, not response order.
-func (p *StdioProxy) emitAuditsInOrder() {
-	p.auditMutex.Lock()
-	defer p.auditMutex.Unlock()
-	
-	// Emit all audits from auditNext until we hit a gap
-	for {
-		if audits, exists := p.auditTodo[p.auditNext]; exists {
-			for _, ev := range audits {
-				if p.auditor.Enabled() {
-					if err := p.auditor.Record(*ev); err != nil {
-						p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, ev.Tool, err)
-					}
-				}
-			}
-			delete(p.auditTodo, p.auditNext)
-			p.auditNext++
-		} else {
-			break
-		}
-	}
-}
-
 // isEnforcement reports whether a decision is a policy action worth surfacing in
 // the NockCC ops-log. Allowed calls and tool-list hides are excluded to keep the
 // centralized feed to notable enforcement or shadow-enforcement signal.
@@ -487,10 +467,10 @@ type deferredAudit struct {
 
 type pendingCard struct {
 	tool          string
-	refs          *extract.References               // for card state updates (claim/release only)
+	refs          extract.References                // for card state updates (claim/release only) - COPY, not pointer
 	audits        []deferredAudit                   // audit decisions to emit after response is verified
 	auditToolName string                            // tool name for auditing
-	auditRefs     *extract.References               // extracted refs for auditing (all tools)
+	auditRefs     *extract.References               // extracted refs for auditing (all tools) - NOTE: used immediately in response processing
 	auditSeq      uint64                            // sequence number for audit ordering
 }
 type toolsListSeq struct {
@@ -565,9 +545,14 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			// Store pending data (state update + audits) to be processed after verifying the JSON-RPC response.
 			// Notifications (no id) have no response to correlate, so don't store them.
 			if d.forwardID != nil {
+				// Copy refs to avoid storing pointer to local variable in decideToolCall
+				var refsCopy extract.References
+				if d.refsForState != nil {
+					refsCopy = *d.refsForState
+				}
 				pending.Store(string(d.forwardID), pendingCard{
 					tool:          d.toolForState,
-					refs:          d.refsForState,
+					refs:          refsCopy,
 					audits:        d.deferredAudits,
 					auditToolName: d.tool,     // tool name for auditing
 					auditRefs:     d.refsForAudit, // extracted refs for auditing
@@ -862,7 +847,7 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 					// Only commit state if JSON-RPC succeeded.
 					// Audits are resolved unconditionally to ensure the queue doesn't stall.
 					if shouldCommit {
-						p.updateCardState(cardVal.tool, cardVal.refs)
+						p.updateCardState(cardVal.tool, &cardVal.refs)
 					}
 					// Resolve audits unconditionally - even if shouldCommit is false.
 					// Appended audits will be emitted in order by flushAuditsLocked.
