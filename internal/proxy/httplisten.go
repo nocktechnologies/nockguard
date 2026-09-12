@@ -151,28 +151,41 @@ func (l *HTTPListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	seq := atomic.AddUint64(&l.gate.auditSeq, 1) - 1
+
+	// Guarantee exactly-once resolution per reserved seq: establish defer with flag
+	// that ensures even on early returns, the seq gets resolved exactly once.
+	resolved := false
+	defer func() {
+		if !resolved {
+			l.gate.resolveAudit(seq)
+		}
+	}()
+
 	d := l.gate.decide(body, seq)
 
 	if d.reject {
-		// Resolve immediately for rejected calls
-		l.gate.resolveAudit(seq)
 		if d.rejectID == nil {
 			// Denied NOTIFICATION: JSON-RPC has no response channel for a message
 			// with no id. There is no "drop" over HTTP, so acknowledge receipt with
 			// an empty 202 and never contact upstream.
+			resolved = true
+			l.gate.resolveAudit(seq)
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 		// Denied REQUEST: return the JSON-RPC error as a 200 body. A 4xx would make
 		// some MCP clients treat the exchange as a transport failure and swallow the
 		// policy reason; a 200 + error object surfaces "denied by policy" to the agent.
+		resolved = true
+		l.gate.resolveAudit(seq)
 		l.writeJSONRPCError(w, d.rejectID, d.rejectCode, d.rejectMsg)
 		return
 	}
 
 	// Cleared the gate (or non-tools/call traffic like initialize/tools/list):
 	// forward the CANONICAL bytes upstream and stream the response back unchanged.
-	l.forward(w, r, d.forward, d.toolForState, d.refsForState, d.deferredAudits, d.refsForAudit, d.tool, seq)
+	// forward() will set resolved = true to prevent double-resolution in the defer.
+	l.forward(w, r, d.forward, d.toolForState, d.refsForState, d.deferredAudits, d.refsForAudit, d.tool, seq, &resolved)
 }
 
 // writeJSONRPCError returns a JSON-RPC error object as a 200 response body. See
@@ -187,10 +200,12 @@ func (l *HTTPListener) writeJSONRPCError(w http.ResponseWriter, id json.RawMessa
 // response (application/json or SSE) back to the connector byte-for-byte.
 // deferredAudits are emitted in the response path after verifying JSON-RPC success,
 // ensuring audit stamping happens after card state is committed.
-func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []byte, toolForState string, refsForState *extract.References, deferredAudits []deferredAudit, refsForAudit *extract.References, tool string, seq uint64) {
+func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []byte, toolForState string, refsForState *extract.References, deferredAudits []deferredAudit, refsForAudit *extract.References, tool string, seq uint64, resolved *bool) {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, l.upstream, bytes.NewReader(body))
 	if err != nil {
 		l.logger.Printf("UPSTREAM-ERROR agent=%s: build request: %v", l.gate.agent, err)
+		*resolved = true
+		l.gate.resolveAudit(seq)
 		l.writeJSONRPCError(w, json.RawMessage("null"), -32603, "nockguard: upstream request build failed")
 		return
 	}
@@ -234,6 +249,8 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 		// *url.Error carries the upstream URL and internal host/port, and Go
 		// redacts only a userinfo password, so a fixed message is returned instead.
 		l.logger.Printf("UPSTREAM-ERROR agent=%s: %v", l.gate.agent, err)
+		*resolved = true
+		l.gate.resolveAudit(seq)
 		l.writeJSONRPCError(w, json.RawMessage("null"), -32603, "nockguard: upstream unreachable")
 		return
 	}
@@ -267,6 +284,7 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 					return
 				}
 				// Resolve audits unconditionally to ensure the queue doesn't stall.
+				*resolved = true
 				l.gate.resolveAudit(seq)
 			} else {
 				// Parse response to check for JSON-RPC error.
@@ -294,9 +312,10 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 				}
 				// Commit card state only if JSON-RPC succeeded.
 				if shouldCommit {
-					l.gate.updateCardState(toolForState, refsForState)
+					l.gate.updateCardState(seq, toolForState, refsForState)
 				}
 				// Resolve audits unconditionally to ensure the queue doesn't stall.
+				*resolved = true
 				l.gate.resolveAudit(seq)
 			}
 			return
@@ -305,9 +324,12 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 		// No card state is committed over streaming responses (design limitation: N/A for
 		// tool calls which return JSON responses, not SSE).
 		// Resolve audits unconditionally to ensure the queue doesn't stall.
+		*resolved = true
 		l.gate.resolveAudit(seq)
 	}
 
+	*resolved = true
+	l.gate.resolveAudit(seq)
 	l.streamBody(w, resp.Body)
 }
 

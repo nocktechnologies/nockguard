@@ -68,6 +68,7 @@ type StdioProxy struct {
 	auditMutex    sync.Mutex
 	auditNext     uint64              // next sequence number ready to emit
 	auditResolved map[uint64]struct{} // tracks which sequences are ready to flush
+	cardAfterSeq  map[uint64]int      // seq -> card state after that commit
 }
 
 // writeAgentLine writes one newline-terminated line to the agent-facing channel
@@ -175,6 +176,7 @@ func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, valid
 		scrubber:      newScrubSet(256), // LRU capped at 256 secret values
 		auditTodo:     make(map[uint64][]*audit.Event),
 		auditResolved: make(map[uint64]struct{}),
+		cardAfterSeq:  make(map[uint64]int),
 	}
 }
 
@@ -224,27 +226,12 @@ func (p *StdioProxy) appendAudit(seq uint64, tool, decision, reason string, refs
 	}
 }
 
-// resolveAudit marks a sequence as ready to flush and stamps currentCard onto
-// any audits for this sequence that don't already have a NockID. This ensures
-// the stamp value is captured at resolve time (when currentCard is correct) rather
-// than at flush time (which might be much later when currentCard has changed).
+// resolveAudit marks a sequence as ready to flush. Stamping of currentCard
+// happens later at flush time to ensure deferred audits see card state from
+// preceding claim/release commits.
 func (p *StdioProxy) resolveAudit(seq uint64) {
 	p.auditMutex.Lock()
 	defer p.auditMutex.Unlock()
-
-	// Capture currentCard NOW (at resolve time) for this sequence's audits.
-	p.cardMu.Lock()
-	currentCard := p.currentCard
-	p.cardMu.Unlock()
-
-	// Stamp currentCard onto any events in this sequence that don't have an extracted NockID.
-	if audits, exists := p.auditTodo[seq]; exists {
-		for _, ev := range audits {
-			if ev.NockID == 0 && currentCard > 0 {
-				ev.NockID = currentCard
-			}
-		}
-	}
 
 	// Mark this sequence as resolved.
 	p.auditResolved[seq] = struct{}{}
@@ -254,7 +241,8 @@ func (p *StdioProxy) resolveAudit(seq uint64) {
 }
 
 // flushAuditsLocked emits queued audits in sequence order, stamping currentCard
-// onto rows that don't have an extracted NockID. Must be called under auditMutex.
+// at flush time using the card state recorded by preceding commits.
+// Must be called under auditMutex.
 func (p *StdioProxy) flushAuditsLocked() {
 	for {
 		if _, resolved := p.auditResolved[p.auditNext]; !resolved {
@@ -269,7 +257,21 @@ func (p *StdioProxy) flushAuditsLocked() {
 			continue
 		}
 
-		// Emit all audits for this sequence (already stamped at resolve time).
+		// Stamp audits that don't have an extracted NockID using the latest
+		// card state from commits whose seq <= p.auditNext.
+		var latestCard int
+		for seq := uint64(0); seq <= p.auditNext; seq++ {
+			if card, exists := p.cardAfterSeq[seq]; exists {
+				latestCard = card
+			}
+		}
+		for _, ev := range audits {
+			if ev.NockID == 0 && latestCard > 0 {
+				ev.NockID = latestCard
+			}
+		}
+
+		// Emit all audits for this sequence.
 		for _, ev := range audits {
 			// Record to audit trail
 			if p.auditor.Enabled() {
@@ -279,7 +281,25 @@ func (p *StdioProxy) flushAuditsLocked() {
 			}
 		}
 
-		// Clean up and move to next sequence
+		// Clean up and move to next sequence.
+		// NOTE: Do NOT delete cardAfterSeq entries here - they are kept for the entire session
+		// because later seqs need to reference earlier card state updates.
+		// Prune cardAfterSeq to avoid unbounded growth: keep only the single
+		// latest entry with key < p.auditNext, which allows later seqs to still
+		// reference the card state in effect at that point.
+		var latestSeq uint64
+		for seq := range p.cardAfterSeq {
+			if seq < p.auditNext && seq > latestSeq {
+				latestSeq = seq
+			}
+		}
+		// Delete all entries with key < p.auditNext except the latest one
+		for seq := range p.cardAfterSeq {
+			if seq < p.auditNext && seq != latestSeq {
+				delete(p.cardAfterSeq, seq)
+			}
+		}
+
 		delete(p.auditTodo, p.auditNext)
 		delete(p.auditResolved, p.auditNext)
 		p.auditNext++
@@ -347,7 +367,8 @@ func (p *StdioProxy) audit(tool, decision, reason string, refs *extract.Referenc
 // updateCardState updates the session-scoped current card based on a forwarded claim or release.
 // This is called only after the transport has confirmed the forward succeeded, ensuring
 // state commits don't happen for failed forwards. tool and refs must match what was audited.
-func (p *StdioProxy) updateCardState(tool string, refs *extract.References) {
+// Also records the new card state in cardAfterSeq for use at flush time.
+func (p *StdioProxy) updateCardState(seq uint64, tool string, refs *extract.References) {
 	if refs == nil || refs.NockID == 0 {
 		return
 	}
@@ -357,6 +378,10 @@ func (p *StdioProxy) updateCardState(tool string, refs *extract.References) {
 		p.cardMu.Lock()
 		p.currentCard = refs.NockID
 		p.cardMu.Unlock()
+		// Record this card state for flush-time stamping
+		p.auditMutex.Lock()
+		p.cardAfterSeq[seq] = refs.NockID
+		p.auditMutex.Unlock()
 		return
 	}
 
@@ -367,6 +392,10 @@ func (p *StdioProxy) updateCardState(tool string, refs *extract.References) {
 			p.currentCard = 0
 		}
 		p.cardMu.Unlock()
+		// Record this card state for flush-time stamping
+		p.auditMutex.Lock()
+		p.cardAfterSeq[seq] = 0
+		p.auditMutex.Unlock()
 	}
 }
 
@@ -386,54 +415,37 @@ func isEnforcement(decision string) bool {
 
 // drainAudits flushes all buffered audits whose responses never arrived.
 // Called when the response loop exits (upstream closed or crashed).
-// Audits are emitted without card-state commits, stamped with currentCard as it stands.
+// Marks all still-pending sequences as resolved and calls flushAuditsLocked
+// to emit everything in order, stamped with card state at flush time.
 func (p *StdioProxy) drainAudits() {
 	p.auditMutex.Lock()
 	defer p.auditMutex.Unlock()
 
-	// Capture currentCard once for all stamping
-	p.cardMu.Lock()
-	currentCard := p.currentCard
-	p.cardMu.Unlock()
-
-	// Collect all unresolved sequences from auditTodo
+	// Collect unresolved sequences for logging
 	var unresolved []uint64
 	for seq := range p.auditTodo {
 		if _, isResolved := p.auditResolved[seq]; !isResolved {
 			unresolved = append(unresolved, seq)
 		}
 	}
-
-	// Sort and emit in order
 	sort.Slice(unresolved, func(i, j int) bool { return unresolved[i] < unresolved[j] })
+
+	// Mark all pending sequences as resolved so flushAuditsLocked can emit them
+	for seq := range p.auditTodo {
+		if _, isResolved := p.auditResolved[seq]; !isResolved {
+			p.auditResolved[seq] = struct{}{}
+		}
+	}
+
+	// Log the drain for unresolved sequences only
 	for _, seq := range unresolved {
-		audits := p.auditTodo[seq]
-
-		// Stamp audits that don't have an extracted NockID
-		for _, ev := range audits {
-			if ev.NockID == 0 && currentCard > 0 {
-				ev.NockID = currentCard
-			}
-		}
-
-		// Emit all audits for this sequence
-		for _, ev := range audits {
-			if p.auditor.Enabled() {
-				if err := p.auditor.Record(*ev); err != nil {
-					p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, ev.Tool, err)
-				}
-			}
-		}
-
-		// Log the drain event (once per sequence, not per audit)
-		if len(audits) > 0 {
+		if audits, exists := p.auditTodo[seq]; exists && len(audits) > 0 {
 			p.logger.Printf("AUDIT-DRAIN seq=%d tool=%s reason=upstream-closed", seq, audits[0].Tool)
 		}
-
-		// Clean up
-		delete(p.auditTodo, seq)
-		delete(p.auditResolved, seq)
 	}
+
+	// Flush everything now that all sequences are marked resolved
+	p.flushAuditsLocked()
 }
 
 func (p *StdioProxy) Run() error {
@@ -910,7 +922,7 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 					// Only commit state if JSON-RPC succeeded.
 					// Audits are resolved unconditionally to ensure the queue doesn't stall.
 					if shouldCommit {
-						p.updateCardState(cardVal.tool, &cardVal.refs)
+						p.updateCardState(cardVal.auditSeq, cardVal.tool, &cardVal.refs)
 					}
 					// Resolve audits unconditionally - even if shouldCommit is false.
 					// Appended audits will be emitted in order by flushAuditsLocked.
