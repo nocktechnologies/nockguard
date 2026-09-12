@@ -321,18 +321,25 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 			} else {
 				// Commit card state only on a genuine JSON-RPC 2.0 success response for
 				// THIS request: version "2.0", a response shape (no method), an id that
-				// matches the forwarded request, a present result, and no error. A 2xx
-				// body such as {} or null unmarshals cleanly but carries no result/id
-				// and must NOT commit — it would corrupt currentCard as a false success.
+				// matches the forwarded request, a present "result" member, and no
+				// "error" member at all (absent, not merely null). A 2xx body such as
+				// {} or null unmarshals cleanly but carries no result/id and must NOT
+				// commit — it would corrupt currentCard as a false success.
 				shouldCommit := false
 				var msg jsonrpc.Message
-				if err := json.Unmarshal(respBody, &msg); err == nil {
-					if msg.JSONRPC == "2.0" && msg.Method == "" && msg.Error == nil && msg.Result != nil && jsonRPCIDMatches(body, msg.ID) {
+				var members map[string]json.RawMessage
+				if json.Unmarshal(respBody, &msg) == nil && json.Unmarshal(respBody, &members) == nil {
+					// Use raw member presence to distinguish an ABSENT error member from
+					// an explicit "error": null — a response carrying an error member at
+					// all must not commit — and to require a present "result" member.
+					_, hasError := members["error"]
+					resultRaw, hasResult := members["result"]
+					if msg.JSONRPC == "2.0" && msg.Method == "" && !hasError && hasResult && jsonRPCIDMatches(body, msg.ID) {
 						shouldCommit = true
 						// A tool-level failure (MCP result.isError=true) is a success
 						// envelope but a failed tool call — do not commit.
 						var result map[string]interface{}
-						if err := json.Unmarshal(msg.Result, &result); err == nil {
+						if json.Unmarshal(resultRaw, &result) == nil {
 							if toolErr, ok := result["isError"].(bool); ok && toolErr {
 								shouldCommit = false
 							}

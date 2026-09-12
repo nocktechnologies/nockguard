@@ -220,8 +220,9 @@ func TestHTTPListener_StructurallyInvalidSuccessDoesNotCommitCard(t *testing.T) 
 		`null`,
 		`{"jsonrpc":"2.0","id":1}`,               // matching version, no result, wrong id
 		`{"jsonrpc":"2.0","id":999,"result":{}}`, // right shape, wrong id
-		`{"jsonrpc":"1.0","id":12345,"result":{}}`, // matching id+result, wrong protocol version
-		`{"id":12345,"result":{}}`,                 // matching id+result, missing version
+		`{"jsonrpc":"1.0","id":12345,"result":{}}`,              // matching id+result, wrong protocol version
+		`{"id":12345,"result":{}}`,                              // matching id+result, missing version
+		`{"jsonrpc":"2.0","id":12345,"result":{},"error":null}`, // matching id+result but carries an explicit error member
 	} {
 		body := body
 		t.Run(body, func(t *testing.T) {
