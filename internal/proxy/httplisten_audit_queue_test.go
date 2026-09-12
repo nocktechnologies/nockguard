@@ -210,3 +210,41 @@ func TestHTTPListener_MalformedSuccessDoesNotCommitCard(t *testing.T) {
 		t.Errorf("currentCard = %d after malformed claim response, want 0 (not committed)", card)
 	}
 }
+
+// TestHTTPListener_StructurallyInvalidSuccessDoesNotCommitCard verifies that a
+// 2xx body that parses cleanly but is not a JSON-RPC response (no result, no
+// matching id) — e.g. {} or null — does NOT commit card state.
+func TestHTTPListener_StructurallyInvalidSuccessDoesNotCommitCard(t *testing.T) {
+	for _, body := range []string{`{}`, `null`, `{"jsonrpc":"2.0","id":1}`, `{"jsonrpc":"2.0","id":999,"result":{}}`} {
+		body := body
+		t.Run(body, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(body))
+			}))
+			defer upstream.Close()
+
+			auditor, _, _ := newEd25519Auditor(t)
+			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+			lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+			defer lsrv.Close()
+
+			// Claim id=12345; the response above is either not a response or carries
+			// a non-matching id, so the card must not be committed.
+			status, _, _ := post(t, lsrv.URL, `{"jsonrpc":"2.0","id":12345,"method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":12345}}}`)
+			if status != http.StatusOK {
+				t.Errorf("status = %d, want 200", status)
+			}
+			if err := auditor.Close(); err != nil {
+				t.Fatal(err)
+			}
+			gate.cardMu.Lock()
+			card := gate.currentCard
+			gate.cardMu.Unlock()
+			if card != 0 {
+				t.Errorf("currentCard = %d after non-response body %q, want 0 (not committed)", card, body)
+			}
+		})
+	}
+}

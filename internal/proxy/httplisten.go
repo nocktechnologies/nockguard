@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -188,6 +189,25 @@ func (l *HTTPListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	l.forward(w, r, d.forward, d.toolForState, d.refsForState, d.deferredAudits, d.refsForAudit, d.tool, seq, &resolved)
 }
 
+// jsonRPCIDMatches reports whether respID is present and equals the id of the
+// forwarded request. A valid JSON-RPC response echoes the request id; a missing
+// or mismatched id means the 2xx body is not a genuine response to this call and
+// must not be treated as a committable success.
+func jsonRPCIDMatches(reqBody []byte, respID json.RawMessage) bool {
+	if respID == nil {
+		return false
+	}
+	var req jsonrpc.Message
+	if err := json.Unmarshal(reqBody, &req); err != nil || req.ID == nil {
+		return false
+	}
+	var reqID, respIDVal interface{}
+	if json.Unmarshal(req.ID, &reqID) != nil || json.Unmarshal(respID, &respIDVal) != nil {
+		return false
+	}
+	return reflect.DeepEqual(reqID, respIDVal)
+}
+
 // writeJSONRPCError returns a JSON-RPC error object as a 200 response body. See
 // ServeHTTP for why deny responses are 200, not 4xx.
 func (l *HTTPListener) writeJSONRPCError(w http.ResponseWriter, id json.RawMessage, code int, msg string) {
@@ -287,21 +307,18 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 				*resolved = true
 				l.gate.resolveAudit(seq)
 			} else {
-				// Only a genuine JSON-RPC success commits card state: the body must
-				// parse cleanly, carry no error field, and carry no tool-level isError.
-				// A malformed or unparseable 2xx body must NOT commit — a truncated
-				// response would otherwise corrupt currentCard as a false success.
+				// Commit card state only on a genuine JSON-RPC success response for
+				// THIS request: a response shape (no method), an id that matches the
+				// forwarded request, a present result, and no error. A 2xx body such
+				// as {} or null unmarshals cleanly but carries no result/id and must
+				// NOT commit — it would corrupt currentCard as a false success.
 				shouldCommit := false
 				var msg jsonrpc.Message
 				if err := json.Unmarshal(respBody, &msg); err == nil {
-					// Parsed successfully; commit unless it carries an error.
-					shouldCommit = true
-					if msg.Error != nil {
-						shouldCommit = false
-					}
-					// Also check for tool-level isError (MCP tool result failure).
-					// Tool errors travel as successful JSON-RPC responses with result.isError=true.
-					if shouldCommit && msg.Result != nil {
+					if msg.Method == "" && msg.Error == nil && msg.Result != nil && jsonRPCIDMatches(body, msg.ID) {
+						shouldCommit = true
+						// A tool-level failure (MCP result.isError=true) is a success
+						// envelope but a failed tool call — do not commit.
 						var result map[string]interface{}
 						if err := json.Unmarshal(msg.Result, &result); err == nil {
 							if toolErr, ok := result["isError"].(bool); ok && toolErr {
