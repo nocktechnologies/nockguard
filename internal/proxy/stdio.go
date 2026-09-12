@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,10 +63,10 @@ type StdioProxy struct {
 	cardMu      sync.Mutex // serializes currentCard updates
 
 	// Audit ordering: track request sequence to ensure audits are emitted in request order
-	auditSeq    uint64 // atomic: incremented for each request to assign sequence numbers
-	auditTodo   map[uint64][]*audit.Event // buffered audits awaiting emission in sequence order
-	auditMutex  sync.Mutex
-	auditNext   uint64 // next sequence number ready to emit
+	auditSeq      uint64                    // atomic: incremented for each request to assign sequence numbers
+	auditTodo     map[uint64][]*audit.Event // buffered audits awaiting emission in sequence order
+	auditMutex    sync.Mutex
+	auditNext     uint64              // next sequence number ready to emit
 	auditResolved map[uint64]struct{} // tracks which sequences are ready to flush
 }
 
@@ -114,14 +115,14 @@ func (p *StdioProxy) Probe(line []byte) (forwarded bool, reply []byte, err error
 	prev := p.agentOut
 	p.agentOut = &agentReply
 	defer func() { p.agentOut = prev }()
-	
+
 	// Use a map to capture pending data (audits, state updates)
 	pending := &sync.Map{}
-	
+
 	// agentToUpstream reads with a bufio.Scanner, which yields the final line
 	// even without a trailing newline — so the raw bytes need no terminator.
 	perr := p.agentToUpstream(bytes.NewReader(line), &upstream, pending)
-	
+
 	// For Probe, emit any deferred audits immediately since there's no response path
 	pending.Range(func(key, val interface{}) bool {
 		if cardVal, ok := val.(pendingCard); ok {
@@ -132,7 +133,7 @@ func (p *StdioProxy) Probe(line []byte) (forwarded bool, reply []byte, err error
 		}
 		return true
 	})
-	
+
 	return upstream.Len() > 0, agentReply.Bytes(), perr
 }
 
@@ -162,17 +163,17 @@ func (p *StdioProxy) WithResolver(r secrets.Resolver) *StdioProxy {
 func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, validator *validate.Validator, limiter *ratelimit.Limiter, auditor *audit.Auditor, forwarder *forward.Forwarder, logger *log.Logger) *StdioProxy {
 	resolver := secrets.Chain()
 	return &StdioProxy{
-		upstream:  upstream,
-		agent:     agent,
-		engine:    engine,
-		validator: validator,
-		limiter:   limiter,
-		auditor:   auditor,
-		forwarder: forwarder,
-		logger:    logger,
-		resolver:  resolver,
-		scrubber:  newScrubSet(256), // LRU capped at 256 secret values
-		auditTodo: make(map[uint64][]*audit.Event),
+		upstream:      upstream,
+		agent:         agent,
+		engine:        engine,
+		validator:     validator,
+		limiter:       limiter,
+		auditor:       auditor,
+		forwarder:     forwarder,
+		logger:        logger,
+		resolver:      resolver,
+		scrubber:      newScrubSet(256), // LRU capped at 256 secret values
+		auditTodo:     make(map[uint64][]*audit.Event),
 		auditResolved: make(map[uint64]struct{}),
 	}
 }
@@ -285,7 +286,6 @@ func (p *StdioProxy) flushAuditsLocked() {
 	}
 }
 
-
 // audit records a policy decision to the local trail with auditable references,
 // and for enforcement decisions, forwards it to the NockCC ops-log. Both sinks are
 // independent and fail-open: a write or forward problem is logged but never blocks or
@@ -384,7 +384,60 @@ func isEnforcement(decision string) bool {
 	}
 }
 
+// drainAudits flushes all buffered audits whose responses never arrived.
+// Called when the response loop exits (upstream closed or crashed).
+// Audits are emitted without card-state commits, stamped with currentCard as it stands.
+func (p *StdioProxy) drainAudits() {
+	p.auditMutex.Lock()
+	defer p.auditMutex.Unlock()
+
+	// Capture currentCard once for all stamping
+	p.cardMu.Lock()
+	currentCard := p.currentCard
+	p.cardMu.Unlock()
+
+	// Collect all unresolved sequences from auditTodo
+	var unresolved []uint64
+	for seq := range p.auditTodo {
+		if _, isResolved := p.auditResolved[seq]; !isResolved {
+			unresolved = append(unresolved, seq)
+		}
+	}
+
+	// Sort and emit in order
+	sort.Slice(unresolved, func(i, j int) bool { return unresolved[i] < unresolved[j] })
+	for _, seq := range unresolved {
+		audits := p.auditTodo[seq]
+
+		// Stamp audits that don't have an extracted NockID
+		for _, ev := range audits {
+			if ev.NockID == 0 && currentCard > 0 {
+				ev.NockID = currentCard
+			}
+		}
+
+		// Emit all audits for this sequence
+		for _, ev := range audits {
+			if p.auditor.Enabled() {
+				if err := p.auditor.Record(*ev); err != nil {
+					p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, ev.Tool, err)
+				}
+			}
+		}
+
+		// Log the drain event (once per sequence, not per audit)
+		if len(audits) > 0 {
+			p.logger.Printf("AUDIT-DRAIN seq=%d tool=%s reason=upstream-closed", seq, audits[0].Tool)
+		}
+
+		// Clean up
+		delete(p.auditTodo, seq)
+		delete(p.auditResolved, seq)
+	}
+}
+
 func (p *StdioProxy) Run() error {
+
 	cmd := exec.Command(p.upstream[0], p.upstream[1:]...)
 	cmd.Stderr = os.Stderr
 	// Isolate proxy-only secrets from the policed agent. The upstream child would
@@ -441,6 +494,9 @@ func (p *StdioProxy) Run() error {
 	wg.Wait()
 	close(errCh)
 
+	// Drain any unresolved audits before checking upstream exit
+	p.drainAudits()
+
 	if waitErr := cmd.Wait(); waitErr != nil {
 		return fmt.Errorf("upstream exit: %w", waitErr)
 	}
@@ -467,17 +523,15 @@ type deferredAudit struct {
 
 type pendingCard struct {
 	tool          string
-	refs          extract.References                // for card state updates (claim/release only) - COPY, not pointer
-	audits        []deferredAudit                   // audit decisions to emit after response is verified
-	auditToolName string                            // tool name for auditing
-	auditRefs     *extract.References               // extracted refs for auditing (all tools) - NOTE: used immediately in response processing
-	auditSeq      uint64                            // sequence number for audit ordering
+	refs          extract.References  // for card state updates (claim/release only) - COPY, not pointer
+	audits        []deferredAudit     // audit decisions to emit after response is verified
+	auditToolName string              // tool name for auditing
+	auditRefs     *extract.References // extracted refs for auditing (all tools) - NOTE: used immediately in response processing
+	auditSeq      uint64              // sequence number for audit ordering
 }
 type toolsListSeq struct {
 	seq uint64
 }
-
-
 
 type mcpDecision struct {
 	// forward, when non-nil, is the canonical bytes to send upstream (a cleared
@@ -522,7 +576,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 		// Assign sequence number to this request for audit ordering
 		seq := atomic.AddUint64(&p.auditSeq, 1) - 1
 		deferred := false
-		
+
 		d := p.decide(scanner.Bytes(), seq)
 		if d.toolsListID != nil {
 			// tools/list (always a request) — track the id so the response can be
@@ -554,13 +608,15 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 					tool:          d.toolForState,
 					refs:          refsCopy,
 					audits:        d.deferredAudits,
-					auditToolName: d.tool,     // tool name for auditing
+					auditToolName: d.tool,         // tool name for auditing
 					auditRefs:     d.refsForAudit, // extracted refs for auditing
-					auditSeq:      seq, // sequence number for audit ordering
+					auditSeq:      seq,            // sequence number for audit ordering
 				})
 			}
 		}
-		if !deferred {
+		// Only resolve immediately for rejected calls, non-forwarded calls, or forwarded notifications (no id).
+		// Forwarded requests with responses defer resolution to the response path.
+		if !deferred && (d.reject || d.forward == nil || d.forwardID == nil) {
 			p.resolveAudit(seq)
 		}
 	}
@@ -637,7 +693,8 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 			return mcpDecision{forward: canonicalLine}
 		}
 		p.logger.Printf("DENY agent=%s reason=unextractable-name", p.agent)
-		p.appendAudit(seq, "", "deny", "unextractable-name", nil); p.resolveAudit(seq)
+		p.appendAudit(seq, "", "deny", "unextractable-name", nil)
+		p.resolveAudit(seq)
 		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600,
 			rejectMsg: "nockguard: tools/call rejected — tool name could not be extracted"}
 	}
@@ -650,7 +707,8 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 	dec := p.engine.Evaluate(p.agent, toolName)
 	if dec.Verdict == policy.Deny {
 		p.logger.Printf("DENY agent=%s tool=%s reason=%q", p.agent, toolName, dec.Reason)
-		p.appendAudit(seq, toolName, "deny", dec.Reason, &refs); p.resolveAudit(seq)
+		p.appendAudit(seq, toolName, "deny", dec.Reason, &refs)
+		p.resolveAudit(seq)
 		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
 			rejectMsg: fmt.Sprintf("nockguard: tool %q denied by policy", toolName)}
 	}
@@ -669,7 +727,8 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 	if p.validator.Enabled() {
 		if hit := p.validator.CheckParams(canonicalParams); hit != "" {
 			p.logger.Printf("BLOCK agent=%s tool=%s rule=%s", p.agent, toolName, hit)
-			p.appendAudit(seq, toolName, "block", hit, &refs); p.resolveAudit(seq)
+			p.appendAudit(seq, toolName, "block", hit, &refs)
+			p.resolveAudit(seq)
 			return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
 				rejectMsg: fmt.Sprintf("nockguard: tool %q arguments blocked by input validation (%s)", toolName, hit)}
 		}
@@ -681,7 +740,8 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 	if p.limiter.Enabled() {
 		if reason, ok := p.limiter.Allow(); !ok {
 			p.logger.Printf("RATELIMIT agent=%s tool=%s reason=%s", p.agent, toolName, reason)
-			p.appendAudit(seq, toolName, "ratelimit", reason, &refs); p.resolveAudit(seq)
+			p.appendAudit(seq, toolName, "ratelimit", reason, &refs)
+			p.resolveAudit(seq)
 			return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
 				rejectMsg: fmt.Sprintf("nockguard: tool %q blocked: %s exceeded", toolName, limitLabel(reason))}
 		}
@@ -720,12 +780,13 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 	if mErr != nil {
 		p.handleFailModeAsk(toolName, canonicalParams, "canonical-marshal-failed", seq)
 		p.logger.Printf("DENY agent=%s tool=%s reason=canonical-marshal-failed", p.agent, toolName)
-		p.appendAudit(seq, toolName, "deny", "canonical-marshal-failed", &refs); p.resolveAudit(seq)
+		p.appendAudit(seq, toolName, "deny", "canonical-marshal-failed", &refs)
+		p.resolveAudit(seq)
 		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32603, tool: toolName,
 			rejectMsg: "nockguard: tools/call rejected — could not canonicalize message"}
 	}
 	p.logger.Printf("ALLOW agent=%s tool=%s", p.agent, toolName)
-	
+
 	// Collect audits to be emitted after response verification (in response path).
 	// This defers audit stamping until after card state is committed, ensuring
 	// that generic tools see the current card from a preceding claim's response.
@@ -756,13 +817,15 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 func (p *StdioProxy) approveAsk(tool string, params json.RawMessage, refs *extract.References, dec policy.Decision, seq uint64) bool {
 	if p.approver == nil {
 		p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=no-approver-configured (fail-closed)", p.agent, tool)
-		p.appendAudit(seq, tool, "approval-denied", "no-approver-configured", refs); p.resolveAudit(seq)
+		p.appendAudit(seq, tool, "approval-denied", "no-approver-configured", refs)
+		p.resolveAudit(seq)
 		return false
 	}
 	v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: tool, Params: params})
 	if !v.Approved {
 		p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)
-		p.appendAudit(seq, tool, "approval-denied", v.Reason, refs); p.resolveAudit(seq)
+		p.appendAudit(seq, tool, "approval-denied", v.Reason, refs)
+		p.resolveAudit(seq)
 		return false
 	}
 	p.logger.Printf("APPROVAL-GRANTED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)

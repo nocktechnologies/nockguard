@@ -266,6 +266,8 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 				if _, werr := w.Write(respBody); werr != nil {
 					return
 				}
+				// Resolve audits unconditionally to ensure the queue doesn't stall.
+				l.gate.resolveAudit(seq)
 			} else {
 				// Parse response to check for JSON-RPC error.
 				shouldCommit := true
@@ -302,6 +304,8 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 		// SSE and other streaming responses: pass through byte-faithful without buffering.
 		// No card state is committed over streaming responses (design limitation: N/A for
 		// tool calls which return JSON responses, not SSE).
+		// Resolve audits unconditionally to ensure the queue doesn't stall.
+		l.gate.resolveAudit(seq)
 	}
 
 	l.streamBody(w, resp.Body)
