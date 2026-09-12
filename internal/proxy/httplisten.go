@@ -287,11 +287,15 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 				*resolved = true
 				l.gate.resolveAudit(seq)
 			} else {
-				// Parse response to check for JSON-RPC error.
-				shouldCommit := true
+				// Only a genuine JSON-RPC success commits card state: the body must
+				// parse cleanly, carry no error field, and carry no tool-level isError.
+				// A malformed or unparseable 2xx body must NOT commit — a truncated
+				// response would otherwise corrupt currentCard as a false success.
+				shouldCommit := false
 				var msg jsonrpc.Message
 				if err := json.Unmarshal(respBody, &msg); err == nil {
-					// Parsed successfully; check for JSON-RPC error.
+					// Parsed successfully; commit unless it carries an error.
+					shouldCommit = true
 					if msg.Error != nil {
 						shouldCommit = false
 					}

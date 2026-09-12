@@ -233,6 +233,16 @@ func (p *StdioProxy) resolveAudit(seq uint64) {
 	p.auditMutex.Lock()
 	defer p.auditMutex.Unlock()
 
+	// Idempotent: a seq below the flush frontier has already been emitted and its
+	// auditResolved entry deleted. Re-marking it would reinsert a key that
+	// flushAuditsLocked never revisits (it only deletes at p.auditNext), leaking one
+	// entry per repeat. Callers legitimately resolve the same seq twice — decide()
+	// resolves a policy-denied call and the HTTP/stdio handler resolves it again — so
+	// a repeat of an already-flushed seq is a no-op, not an error.
+	if seq < p.auditNext {
+		return
+	}
+
 	// Mark this sequence as resolved.
 	p.auditResolved[seq] = struct{}{}
 
@@ -257,12 +267,18 @@ func (p *StdioProxy) flushAuditsLocked() {
 			continue
 		}
 
-		// Stamp audits that don't have an extracted NockID using the latest
-		// card state from commits whose seq <= p.auditNext.
+		// Stamp audits that don't have an extracted NockID with the card state from
+		// the highest committed seq <= p.auditNext. Iterate the (pruned, small) map
+		// rather than scanning 0..p.auditNext, which is O(auditNext) per flush and
+		// O(N^2) over a long-lived session.
 		var latestCard int
-		for seq := uint64(0); seq <= p.auditNext; seq++ {
-			if card, exists := p.cardAfterSeq[seq]; exists {
+		var latestCardSeq uint64
+		haveLatest := false
+		for s, card := range p.cardAfterSeq {
+			if s <= p.auditNext && (!haveLatest || s > latestCardSeq) {
+				latestCardSeq = s
 				latestCard = card
+				haveLatest = true
 			}
 		}
 		for _, ev := range audits {
@@ -388,14 +404,19 @@ func (p *StdioProxy) updateCardState(seq uint64, tool string, refs *extract.Refe
 	// If this is a forwarded nockcc_nock_release for the current card, clear it.
 	if tool == "nockcc_nock_release" {
 		p.cardMu.Lock()
-		if p.currentCard == refs.NockID {
+		matched := p.currentCard == refs.NockID
+		if matched {
 			p.currentCard = 0
 		}
 		p.cardMu.Unlock()
-		// Record this card state for flush-time stamping
-		p.auditMutex.Lock()
-		p.cardAfterSeq[seq] = 0
-		p.auditMutex.Unlock()
+		// Record the cleared state for flush-time stamping ONLY when the release
+		// matched the current card. A mismatched release leaves the card claimed, so
+		// recording 0 would drop the still-active stamp from later audit rows.
+		if matched {
+			p.auditMutex.Lock()
+			p.cardAfterSeq[seq] = 0
+			p.auditMutex.Unlock()
+		}
 	}
 }
 

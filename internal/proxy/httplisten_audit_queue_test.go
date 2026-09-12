@@ -173,3 +173,40 @@ func TestHTTPListener_CardAfterSeqPruningKeepsBoundary(t *testing.T) {
 		t.Errorf("cardAfterSeq has %d entries after 5 requests, want <= %d (pruning not working)", cardAfterSeqLen, maxExpected)
 	}
 }
+
+// TestHTTPListener_MalformedSuccessDoesNotCommitCard verifies that a 2xx
+// application/json response that cannot be decoded as a JSON-RPC message does
+// NOT commit card state: a truncated or garbage body must not be treated as a
+// successful claim and set currentCard.
+func TestHTTPListener_MalformedSuccessDoesNotCommitCard(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Truncated/malformed JSON — cannot decode as jsonrpc.Message.
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{`))
+	}))
+	defer upstream.Close()
+
+	auditor, _, _ := newEd25519Auditor(t)
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    allow:\n      - nockcc_nock_claim\n", nil, auditor)
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	defer lsrv.Close()
+
+	// A claim carrying a real nock_id whose upstream response is malformed must
+	// not set the current card.
+	status, _, _ := post(t, lsrv.URL, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":12345}}}`)
+	if status != http.StatusOK {
+		t.Errorf("status = %d, want 200 (body forwarded as-is)", status)
+	}
+
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	gate.cardMu.Lock()
+	card := gate.currentCard
+	gate.cardMu.Unlock()
+	if card != 0 {
+		t.Errorf("currentCard = %d after malformed claim response, want 0 (not committed)", card)
+	}
+}
