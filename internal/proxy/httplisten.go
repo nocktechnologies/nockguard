@@ -201,11 +201,23 @@ func jsonRPCIDMatches(reqBody []byte, respID json.RawMessage) bool {
 	if err := json.Unmarshal(reqBody, &req); err != nil || req.ID == nil {
 		return false
 	}
-	var reqID, respIDVal interface{}
-	if json.Unmarshal(req.ID, &reqID) != nil || json.Unmarshal(respID, &respIDVal) != nil {
-		return false
+	reqID, ok1 := decodeIDNumberAware(req.ID)
+	respIDVal, ok2 := decodeIDNumberAware(respID)
+	return ok1 && ok2 && reflect.DeepEqual(reqID, respIDVal)
+}
+
+// decodeIDNumberAware decodes a JSON-RPC id with UseNumber so a large integer id
+// keeps its exact literal (json.Number) instead of collapsing to float64, where
+// distinct ids above 2^53 would compare equal. String and null ids keep their own
+// types, so a numeric id never matches a string id of the same text.
+func decodeIDNumberAware(raw json.RawMessage) (interface{}, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v interface{}
+	if err := dec.Decode(&v); err != nil {
+		return nil, false
 	}
-	return reflect.DeepEqual(reqID, respIDVal)
+	return v, true
 }
 
 // writeJSONRPCError returns a JSON-RPC error object as a 200 response body. See
@@ -307,15 +319,15 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 				*resolved = true
 				l.gate.resolveAudit(seq)
 			} else {
-				// Commit card state only on a genuine JSON-RPC success response for
-				// THIS request: a response shape (no method), an id that matches the
-				// forwarded request, a present result, and no error. A 2xx body such
-				// as {} or null unmarshals cleanly but carries no result/id and must
-				// NOT commit — it would corrupt currentCard as a false success.
+				// Commit card state only on a genuine JSON-RPC 2.0 success response for
+				// THIS request: version "2.0", a response shape (no method), an id that
+				// matches the forwarded request, a present result, and no error. A 2xx
+				// body such as {} or null unmarshals cleanly but carries no result/id
+				// and must NOT commit — it would corrupt currentCard as a false success.
 				shouldCommit := false
 				var msg jsonrpc.Message
 				if err := json.Unmarshal(respBody, &msg); err == nil {
-					if msg.Method == "" && msg.Error == nil && msg.Result != nil && jsonRPCIDMatches(body, msg.ID) {
+					if msg.JSONRPC == "2.0" && msg.Method == "" && msg.Error == nil && msg.Result != nil && jsonRPCIDMatches(body, msg.ID) {
 						shouldCommit = true
 						// A tool-level failure (MCP result.isError=true) is a success
 						// envelope but a failed tool call — do not commit.

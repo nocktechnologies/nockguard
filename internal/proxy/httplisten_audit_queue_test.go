@@ -215,7 +215,14 @@ func TestHTTPListener_MalformedSuccessDoesNotCommitCard(t *testing.T) {
 // 2xx body that parses cleanly but is not a JSON-RPC response (no result, no
 // matching id) — e.g. {} or null — does NOT commit card state.
 func TestHTTPListener_StructurallyInvalidSuccessDoesNotCommitCard(t *testing.T) {
-	for _, body := range []string{`{}`, `null`, `{"jsonrpc":"2.0","id":1}`, `{"jsonrpc":"2.0","id":999,"result":{}}`} {
+	for _, body := range []string{
+		`{}`,
+		`null`,
+		`{"jsonrpc":"2.0","id":1}`,               // matching version, no result, wrong id
+		`{"jsonrpc":"2.0","id":999,"result":{}}`, // right shape, wrong id
+		`{"jsonrpc":"1.0","id":12345,"result":{}}`, // matching id+result, wrong protocol version
+		`{"id":12345,"result":{}}`,                 // matching id+result, missing version
+	} {
 		body := body
 		t.Run(body, func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -246,5 +253,40 @@ func TestHTTPListener_StructurallyInvalidSuccessDoesNotCommitCard(t *testing.T) 
 				t.Errorf("currentCard = %d after non-response body %q, want 0 (not committed)", card, body)
 			}
 		})
+	}
+}
+
+// TestHTTPListener_LargeNumericIDDoesNotFalselyMatch verifies that two distinct
+// integer ids above 2^53 are NOT treated as equal (float64 rounding would
+// collapse them), so a claim whose response carries a different large id does
+// not falsely commit card state.
+func TestHTTPListener_LargeNumericIDDoesNotFalselyMatch(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Response id differs from the request id by 1, but both collapse to the
+		// same float64 — a valid JSON-RPC 2.0 success shape otherwise.
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":9007199254740993,"result":{"content":[{"type":"text","text":"ok"}]}}`))
+	}))
+	defer upstream.Close()
+
+	auditor, _, _ := newEd25519Auditor(t)
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	defer lsrv.Close()
+
+	// Claim with request id 9007199254740992 (differs from the response id 993).
+	status, _, _ := post(t, lsrv.URL, `{"jsonrpc":"2.0","id":9007199254740992,"method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":12345}}}`)
+	if status != http.StatusOK {
+		t.Errorf("status = %d, want 200", status)
+	}
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	gate.cardMu.Lock()
+	card := gate.currentCard
+	gate.cardMu.Unlock()
+	if card != 0 {
+		t.Errorf("currentCard = %d after response with a different large id, want 0 (ids must not falsely match)", card)
 	}
 }
