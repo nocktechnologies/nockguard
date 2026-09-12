@@ -9,8 +9,10 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
@@ -59,6 +61,14 @@ type StdioProxy struct {
 	// do not name it explicitly. Protected by mu (shared with the two proxy goroutines).
 	currentCard int        // 0 = no card claimed yet
 	cardMu      sync.Mutex // serializes currentCard updates
+
+	// Audit ordering: track request sequence to ensure audits are emitted in request order
+	auditSeq      uint64                    // atomic: incremented for each request to assign sequence numbers
+	auditTodo     map[uint64][]*audit.Event // buffered audits awaiting emission in sequence order
+	auditMutex    sync.Mutex
+	auditNext     uint64              // next sequence number ready to emit
+	auditResolved map[uint64]struct{} // tracks which sequences are ready to flush
+	cardAfterSeq  map[uint64]int      // seq -> card state after that commit
 }
 
 // writeAgentLine writes one newline-terminated line to the agent-facing channel
@@ -98,14 +108,33 @@ func (p *StdioProxy) agentWriter() io.Writer {
 //
 // Probe swaps agentOut without holding agentMu, so it must NOT run concurrently
 // with Run() (the selftest builds single-use proxies with no live goroutines).
+//
+// For Probe, deferred audits (would-deny, allow for forwarded calls) are emitted
+// immediately after agentToUpstream returns, since there's no upstream response path.
 func (p *StdioProxy) Probe(line []byte) (forwarded bool, reply []byte, err error) {
 	var upstream, agentReply bytes.Buffer
 	prev := p.agentOut
 	p.agentOut = &agentReply
 	defer func() { p.agentOut = prev }()
+
+	// Use a map to capture pending data (audits, state updates)
+	pending := &sync.Map{}
+
 	// agentToUpstream reads with a bufio.Scanner, which yields the final line
 	// even without a trailing newline — so the raw bytes need no terminator.
-	perr := p.agentToUpstream(bytes.NewReader(line), &upstream, &sync.Map{})
+	perr := p.agentToUpstream(bytes.NewReader(line), &upstream, pending)
+
+	// For Probe, emit any deferred audits immediately since there's no response path
+	pending.Range(func(key, val interface{}) bool {
+		if cardVal, ok := val.(pendingCard); ok {
+			// Emit deferred audits (assume success since this is a probe)
+			for _, aud := range cardVal.audits {
+				p.audit(cardVal.auditToolName, aud.decision, aud.reason, cardVal.auditRefs)
+			}
+		}
+		return true
+	})
+
 	return upstream.Len() > 0, agentReply.Bytes(), perr
 }
 
@@ -135,16 +164,161 @@ func (p *StdioProxy) WithResolver(r secrets.Resolver) *StdioProxy {
 func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, validator *validate.Validator, limiter *ratelimit.Limiter, auditor *audit.Auditor, forwarder *forward.Forwarder, logger *log.Logger) *StdioProxy {
 	resolver := secrets.Chain()
 	return &StdioProxy{
-		upstream:  upstream,
-		agent:     agent,
-		engine:    engine,
-		validator: validator,
-		limiter:   limiter,
-		auditor:   auditor,
-		forwarder: forwarder,
-		logger:    logger,
-		resolver:  resolver,
-		scrubber:  newScrubSet(256), // LRU capped at 256 secret values
+		upstream:      upstream,
+		agent:         agent,
+		engine:        engine,
+		validator:     validator,
+		limiter:       limiter,
+		auditor:       auditor,
+		forwarder:     forwarder,
+		logger:        logger,
+		resolver:      resolver,
+		scrubber:      newScrubSet(256), // LRU capped at 256 secret values
+		auditTodo:     make(map[uint64][]*audit.Event),
+		auditResolved: make(map[uint64]struct{}),
+		cardAfterSeq:  make(map[uint64]int),
+	}
+}
+
+// appendAudit queues an audit event for later emission in request-order.
+// The event is queued but NOT stamped with currentCard yet; stamping happens
+// at flush time to ensure deferred audits see card state from a preceding claim.
+func (p *StdioProxy) appendAudit(seq uint64, tool, decision, reason string, refs *extract.References) {
+	p.auditMutex.Lock()
+	defer p.auditMutex.Unlock()
+
+	// Build the audit event (no card stamp yet — that happens at flush time).
+	// Allocate on the heap so the pointer remains valid after this function returns
+	ev := &audit.Event{
+		Agent:    p.agent,
+		Tool:     tool,
+		Decision: decision,
+		Reason:   reason,
+	}
+
+	// Set extracted references if provided.
+	if refs != nil {
+		if refs.NockID > 0 {
+			ev.NockID = refs.NockID
+		}
+		if refs.PR != "" {
+			ev.PR = refs.PR
+		}
+		if refs.ReviewID != "" {
+			ev.ReviewID = refs.ReviewID
+		}
+	}
+
+	// Queue the event for later emission.
+	if p.auditTodo[seq] == nil {
+		p.auditTodo[seq] = make([]*audit.Event, 0, 1)
+	}
+	p.auditTodo[seq] = append(p.auditTodo[seq], ev)
+
+	// Apply trust outcome and forward to ops-log immediately (not deferred).
+	if p.trust.Enabled() {
+		if outcome, ok := trust.DecisionToOutcome(decision); ok {
+			p.trust.ApplyOutcome(outcome)
+		}
+	}
+	if p.forwarder.Enabled() && isEnforcement(decision) {
+		p.forwarder.Enqueue(forward.Event{Agent: p.agent, Tool: tool, Decision: decision, Reason: reason})
+	}
+}
+
+// resolveAudit marks a sequence as ready to flush. Stamping of currentCard
+// happens later at flush time to ensure deferred audits see card state from
+// preceding claim/release commits.
+func (p *StdioProxy) resolveAudit(seq uint64) {
+	p.auditMutex.Lock()
+	defer p.auditMutex.Unlock()
+
+	// Idempotent: a seq below the flush frontier has already been emitted and its
+	// auditResolved entry deleted. Re-marking it would reinsert a key that
+	// flushAuditsLocked never revisits (it only deletes at p.auditNext), leaking one
+	// entry per repeat. Callers legitimately resolve the same seq twice — decide()
+	// resolves a policy-denied call and the HTTP/stdio handler resolves it again — so
+	// a repeat of an already-flushed seq is a no-op, not an error.
+	if seq < p.auditNext {
+		return
+	}
+
+	// Mark this sequence as resolved.
+	p.auditResolved[seq] = struct{}{}
+
+	// Flush any consecutive sequences that are resolved.
+	p.flushAuditsLocked()
+}
+
+// flushAuditsLocked emits queued audits in sequence order, stamping currentCard
+// at flush time using the card state recorded by preceding commits.
+// Must be called under auditMutex.
+func (p *StdioProxy) flushAuditsLocked() {
+	for {
+		if _, resolved := p.auditResolved[p.auditNext]; !resolved {
+			break // No more consecutive resolved sequences
+		}
+
+		audits, exists := p.auditTodo[p.auditNext]
+		if !exists || audits == nil {
+			// Shouldn't happen, but handle it gracefully
+			delete(p.auditResolved, p.auditNext)
+			p.auditNext++
+			continue
+		}
+
+		// Stamp audits that don't have an extracted NockID with the card state from
+		// the highest committed seq <= p.auditNext. Iterate the (pruned, small) map
+		// rather than scanning 0..p.auditNext, which is O(auditNext) per flush and
+		// O(N^2) over a long-lived session.
+		var latestCard int
+		var latestCardSeq uint64
+		haveLatest := false
+		for s, card := range p.cardAfterSeq {
+			if s <= p.auditNext && (!haveLatest || s > latestCardSeq) {
+				latestCardSeq = s
+				latestCard = card
+				haveLatest = true
+			}
+		}
+		for _, ev := range audits {
+			if ev.NockID == 0 && latestCard > 0 {
+				ev.NockID = latestCard
+			}
+		}
+
+		// Emit all audits for this sequence.
+		for _, ev := range audits {
+			// Record to audit trail
+			if p.auditor.Enabled() {
+				if err := p.auditor.Record(*ev); err != nil {
+					p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, ev.Tool, err)
+				}
+			}
+		}
+
+		// Clean up and move to next sequence.
+		// NOTE: Do NOT delete cardAfterSeq entries here - they are kept for the entire session
+		// because later seqs need to reference earlier card state updates.
+		// Prune cardAfterSeq to avoid unbounded growth: keep only the single
+		// latest entry with key < p.auditNext, which allows later seqs to still
+		// reference the card state in effect at that point.
+		var latestSeq uint64
+		for seq := range p.cardAfterSeq {
+			if seq < p.auditNext && seq > latestSeq {
+				latestSeq = seq
+			}
+		}
+		// Delete all entries with key < p.auditNext except the latest one
+		for seq := range p.cardAfterSeq {
+			if seq < p.auditNext && seq != latestSeq {
+				delete(p.cardAfterSeq, seq)
+			}
+		}
+
+		delete(p.auditTodo, p.auditNext)
+		delete(p.auditResolved, p.auditNext)
+		p.auditNext++
 	}
 }
 
@@ -152,6 +326,9 @@ func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, valid
 // and for enforcement decisions, forwards it to the NockCC ops-log. Both sinks are
 // independent and fail-open: a write or forward problem is logged but never blocks or
 // fails the tool call. refs may be nil (non-tools/call traffic or unknown tools).
+//
+// For request-path audits (denied, blocked, ratelimited), we track sequence order
+// to ensure they're emitted after any preceding deferred audits.
 func (p *StdioProxy) audit(tool, decision, reason string, refs *extract.References) {
 	if p.trust.Enabled() {
 		if outcome, ok := trust.DecisionToOutcome(decision); ok {
@@ -206,7 +383,8 @@ func (p *StdioProxy) audit(tool, decision, reason string, refs *extract.Referenc
 // updateCardState updates the session-scoped current card based on a forwarded claim or release.
 // This is called only after the transport has confirmed the forward succeeded, ensuring
 // state commits don't happen for failed forwards. tool and refs must match what was audited.
-func (p *StdioProxy) updateCardState(tool string, refs *extract.References) {
+// Also records the new card state in cardAfterSeq for use at flush time.
+func (p *StdioProxy) updateCardState(seq uint64, tool string, refs *extract.References) {
 	if refs == nil || refs.NockID == 0 {
 		return
 	}
@@ -216,16 +394,29 @@ func (p *StdioProxy) updateCardState(tool string, refs *extract.References) {
 		p.cardMu.Lock()
 		p.currentCard = refs.NockID
 		p.cardMu.Unlock()
+		// Record this card state for flush-time stamping
+		p.auditMutex.Lock()
+		p.cardAfterSeq[seq] = refs.NockID
+		p.auditMutex.Unlock()
 		return
 	}
 
 	// If this is a forwarded nockcc_nock_release for the current card, clear it.
 	if tool == "nockcc_nock_release" {
 		p.cardMu.Lock()
-		if p.currentCard == refs.NockID {
+		matched := p.currentCard == refs.NockID
+		if matched {
 			p.currentCard = 0
 		}
 		p.cardMu.Unlock()
+		// Record the cleared state for flush-time stamping ONLY when the release
+		// matched the current card. A mismatched release leaves the card claimed, so
+		// recording 0 would drop the still-active stamp from later audit rows.
+		if matched {
+			p.auditMutex.Lock()
+			p.cardAfterSeq[seq] = 0
+			p.auditMutex.Unlock()
+		}
 	}
 }
 
@@ -243,7 +434,43 @@ func isEnforcement(decision string) bool {
 	}
 }
 
+// drainAudits flushes all buffered audits whose responses never arrived.
+// Called when the response loop exits (upstream closed or crashed).
+// Marks all still-pending sequences as resolved and calls flushAuditsLocked
+// to emit everything in order, stamped with card state at flush time.
+func (p *StdioProxy) drainAudits() {
+	p.auditMutex.Lock()
+	defer p.auditMutex.Unlock()
+
+	// Collect unresolved sequences for logging
+	var unresolved []uint64
+	for seq := range p.auditTodo {
+		if _, isResolved := p.auditResolved[seq]; !isResolved {
+			unresolved = append(unresolved, seq)
+		}
+	}
+	sort.Slice(unresolved, func(i, j int) bool { return unresolved[i] < unresolved[j] })
+
+	// Mark all pending sequences as resolved so flushAuditsLocked can emit them
+	for seq := range p.auditTodo {
+		if _, isResolved := p.auditResolved[seq]; !isResolved {
+			p.auditResolved[seq] = struct{}{}
+		}
+	}
+
+	// Log the drain for unresolved sequences only
+	for _, seq := range unresolved {
+		if audits, exists := p.auditTodo[seq]; exists && len(audits) > 0 {
+			p.logger.Printf("AUDIT-DRAIN seq=%d tool=%s reason=upstream-closed", seq, audits[0].Tool)
+		}
+	}
+
+	// Flush everything now that all sequences are marked resolved
+	p.flushAuditsLocked()
+}
+
 func (p *StdioProxy) Run() error {
+
 	cmd := exec.Command(p.upstream[0], p.upstream[1:]...)
 	cmd.Stderr = os.Stderr
 	// Isolate proxy-only secrets from the policed agent. The upstream child would
@@ -300,6 +527,9 @@ func (p *StdioProxy) Run() error {
 	wg.Wait()
 	close(errCh)
 
+	// Drain any unresolved audits before checking upstream exit
+	p.drainAudits()
+
 	if waitErr := cmd.Wait(); waitErr != nil {
 		return fmt.Errorf("upstream exit: %w", waitErr)
 	}
@@ -317,6 +547,25 @@ func (p *StdioProxy) Run() error {
 // Producing an mcpDecision (via decide) performs the gate's side effects —
 // audit append, ops-log forward, approval prompt, logging — exactly once; it
 // writes no transport bytes itself.
+// pendingCard holds tool name and extracted references for a forwarded call
+// waiting for its JSON-RPC response to decide whether to commit card state.
+type deferredAudit struct {
+	decision string
+	reason   string
+}
+
+type pendingCard struct {
+	tool          string
+	refs          extract.References  // for card state updates (claim/release only) - COPY, not pointer
+	audits        []deferredAudit     // audit decisions to emit after response is verified
+	auditToolName string              // tool name for auditing
+	auditRefs     *extract.References // extracted refs for auditing (all tools) - NOTE: used immediately in response processing
+	auditSeq      uint64              // sequence number for audit ordering
+}
+type toolsListSeq struct {
+	seq uint64
+}
+
 type mcpDecision struct {
 	// forward, when non-nil, is the canonical bytes to send upstream (a cleared
 	// tools/call, or non-gated traffic like initialize/tools/list). Mutually
@@ -337,21 +586,37 @@ type mcpDecision struct {
 	// a tools/call (informational; empty otherwise).
 	toolsListID json.RawMessage
 	tool        string
+	// forwardID is the JSON-RPC request id (for requests only). Set for tool calls
+	// that forward, so upstreamToAgent can correlate the response.
+	forwardID json.RawMessage
 	// cardStateUpdate stores tool name and extracted refs for updateCardState()
-	// after a successful forward. nil means no state update needed.
+	// after the JSON-RPC response is verified as successful. nil means no state update needed.
 	toolForState string              // tool name, empty if no state update needed
 	refsForState *extract.References // extracted references, nil if no state update needed
+
+	// deferredAudits holds audit decisions (would-deny, allow) that are emitted
+	// in the response path after JSON-RPC success is confirmed. This ensures
+	// audit stamping happens after card state is committed.
+	deferredAudits []deferredAudit
+	// refsForAudit holds extracted references for deferred audits (same as refsForState for card-state tools)
+	refsForAudit *extract.References
 }
 
 func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 	for scanner.Scan() {
-		d := p.decide(scanner.Bytes())
+		// Assign sequence number to this request for audit ordering
+		seq := atomic.AddUint64(&p.auditSeq, 1) - 1
+		deferred := false
+
+		d := p.decide(scanner.Bytes(), seq)
 		if d.toolsListID != nil {
 			// tools/list (always a request) — track the id so the response can be
-			// filtered by upstreamToAgent.
-			pending.Store(string(d.toolsListID), true)
+			// filtered by upstreamToAgent. Mark as deferred so we don't resolve
+			// until after filtering and appending hide audits.
+			pending.Store(string(d.toolsListID), toolsListSeq{seq: seq})
+			deferred = true
 		}
 		if d.reject {
 			// A denied REQUEST returns a JSON-RPC error; a denied NOTIFICATION
@@ -364,10 +629,28 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			if _, writeErr := fmt.Fprintf(w, "%s\n", d.forward); writeErr != nil {
 				return writeErr
 			}
-			// After successful forward, update card state if needed
-			if d.toolForState != "" {
-				p.updateCardState(d.toolForState, d.refsForState)
+			// Store pending data (state update + audits) to be processed after verifying the JSON-RPC response.
+			// Notifications (no id) have no response to correlate, so don't store them.
+			if d.forwardID != nil {
+				// Copy refs to avoid storing pointer to local variable in decideToolCall
+				var refsCopy extract.References
+				if d.refsForState != nil {
+					refsCopy = *d.refsForState
+				}
+				pending.Store(string(d.forwardID), pendingCard{
+					tool:          d.toolForState,
+					refs:          refsCopy,
+					audits:        d.deferredAudits,
+					auditToolName: d.tool,         // tool name for auditing
+					auditRefs:     d.refsForAudit, // extracted refs for auditing
+					auditSeq:      seq,            // sequence number for audit ordering
+				})
 			}
+		}
+		// Only resolve immediately for rejected calls, non-forwarded calls, or forwarded notifications (no id).
+		// Forwarded requests with responses defer resolution to the response path.
+		if !deferred && (d.reject || d.forward == nil || d.forwardID == nil) {
+			p.resolveAudit(seq)
 		}
 	}
 	return scanner.Err()
@@ -379,7 +662,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 // (HTTPListener.ServeHTTP) — the ordering deny → require_approval → validate →
 // rate-limit → approval and every audit/log side effect live here once, so the
 // two transports can never drift.
-func (p *StdioProxy) decide(line []byte) mcpDecision {
+func (p *StdioProxy) decide(line []byte, seq uint64) mcpDecision {
 	// Canonicalize the TOP-LEVEL message before doing anything else. Unmarshal
 	// into a map so any duplicate top-level keys (method, id, params, ...)
 	// collapse to Go's last-wins value, then re-marshal: the bytes the proxy
@@ -395,7 +678,7 @@ func (p *StdioProxy) decide(line []byte) mcpDecision {
 	}
 	canonicalLine, err := json.Marshal(topLevel)
 	if err != nil {
-		p.handleFailModeAsk("", nil, "canonical-marshal-failed")
+		p.handleFailModeAsk("", nil, "canonical-marshal-failed", seq)
 		p.logger.Printf("REJECT agent=%s reason=canonical-marshal-failed", p.agent)
 		return mcpDecision{reject: true, rejectID: json.RawMessage("null"), rejectCode: -32603,
 			rejectMsg: "nockguard: rejected — message could not be canonicalized"}
@@ -414,7 +697,7 @@ func (p *StdioProxy) decide(line []byte) mcpDecision {
 	// what we gate is exactly what we forward — closing duplicate-key and
 	// other parser-differential bypasses at both the top level and in params.
 	if msg.Method == "tools/call" {
-		return p.decideToolCall(msg, topLevel, canonicalLine)
+		return p.decideToolCall(msg, topLevel, canonicalLine, seq)
 	}
 
 	// Non-tools/call traffic (initialize, tools/list, responses, other
@@ -431,7 +714,7 @@ func (p *StdioProxy) decide(line []byte) mcpDecision {
 // decideToolCall runs the enforcement gate for a tools/call message. topLevel is
 // the already-top-level-canonicalized message map and canonicalLine its
 // re-marshaled bytes (used verbatim on the fail-closed unextractable-name path).
-func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]json.RawMessage, canonicalLine []byte) mcpDecision {
+func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]json.RawMessage, canonicalLine []byte, seq uint64) mcpDecision {
 	toolName, canonicalParams, ok := canonicalToolCall(msg.Params)
 	// Extract auditable references from tool arguments.
 	refs := extract.FromToolCall(toolName, canonicalParams)
@@ -439,11 +722,12 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 		// A tools/call whose name we cannot extract fails CLOSED — the
 		// upstream might still resolve a name the proxy could not see.
 		dec := p.engine.FailModeVerdict(p.agent, "unextractable-name")
-		if dec.Verdict == policy.Ask && p.approveAsk("", canonicalLine, nil, dec) {
+		if dec.Verdict == policy.Ask && p.approveAsk("", canonicalLine, nil, dec, seq) {
 			return mcpDecision{forward: canonicalLine}
 		}
 		p.logger.Printf("DENY agent=%s reason=unextractable-name", p.agent)
-		p.audit("", "deny", "unextractable-name", nil)
+		p.appendAudit(seq, "", "deny", "unextractable-name", nil)
+		p.resolveAudit(seq)
 		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600,
 			rejectMsg: "nockguard: tools/call rejected — tool name could not be extracted"}
 	}
@@ -456,7 +740,8 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 	dec := p.engine.Evaluate(p.agent, toolName)
 	if dec.Verdict == policy.Deny {
 		p.logger.Printf("DENY agent=%s tool=%s reason=%q", p.agent, toolName, dec.Reason)
-		p.audit(toolName, "deny", dec.Reason, &refs)
+		p.appendAudit(seq, toolName, "deny", dec.Reason, &refs)
+		p.resolveAudit(seq)
 		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
 			rejectMsg: fmt.Sprintf("nockguard: tool %q denied by policy", toolName)}
 	}
@@ -475,7 +760,8 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 	if p.validator.Enabled() {
 		if hit := p.validator.CheckParams(canonicalParams); hit != "" {
 			p.logger.Printf("BLOCK agent=%s tool=%s rule=%s", p.agent, toolName, hit)
-			p.audit(toolName, "block", hit, &refs)
+			p.appendAudit(seq, toolName, "block", hit, &refs)
+			p.resolveAudit(seq)
 			return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
 				rejectMsg: fmt.Sprintf("nockguard: tool %q arguments blocked by input validation (%s)", toolName, hit)}
 		}
@@ -487,13 +773,14 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 	if p.limiter.Enabled() {
 		if reason, ok := p.limiter.Allow(); !ok {
 			p.logger.Printf("RATELIMIT agent=%s tool=%s reason=%s", p.agent, toolName, reason)
-			p.audit(toolName, "ratelimit", reason, &refs)
+			p.appendAudit(seq, toolName, "ratelimit", reason, &refs)
+			p.resolveAudit(seq)
 			return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
 				rejectMsg: fmt.Sprintf("nockguard: tool %q blocked: %s exceeded", toolName, limitLabel(reason))}
 		}
 	}
 
-	if dec.Verdict == policy.Ask && !p.approveAsk(toolName, canonicalParams, &refs, dec) {
+	if dec.Verdict == policy.Ask && !p.approveAsk(toolName, canonicalParams, &refs, dec, seq) {
 		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
 			rejectMsg: fmt.Sprintf("nockguard: tool %q denied by approval gate", toolName)}
 	}
@@ -507,7 +794,7 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 	if len(injectRules) > 0 {
 		var rejectReason string
 		var ok bool
-		injectedParams, rejectReason, ok = p.applyInject(toolName, canonicalParams, injectRules)
+		injectedParams, rejectReason, ok = p.applyInject(toolName, canonicalParams, injectRules, seq)
 		if !ok {
 			p.logger.Printf("DENY agent=%s tool=%s reason=%s", p.agent, toolName, rejectReason)
 			return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
@@ -524,18 +811,35 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 	topLevel["params"] = injectedParams
 	out, mErr := json.Marshal(topLevel)
 	if mErr != nil {
-		p.handleFailModeAsk(toolName, canonicalParams, "canonical-marshal-failed")
+		p.handleFailModeAsk(toolName, canonicalParams, "canonical-marshal-failed", seq)
 		p.logger.Printf("DENY agent=%s tool=%s reason=canonical-marshal-failed", p.agent, toolName)
-		p.audit(toolName, "deny", "canonical-marshal-failed", &refs)
+		p.appendAudit(seq, toolName, "deny", "canonical-marshal-failed", &refs)
+		p.resolveAudit(seq)
 		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32603, tool: toolName,
 			rejectMsg: "nockguard: tools/call rejected — could not canonicalize message"}
 	}
 	p.logger.Printf("ALLOW agent=%s tool=%s", p.agent, toolName)
+
+	// Collect audits to be emitted after response verification (in response path).
+	// This defers audit stamping until after card state is committed, ensuring
+	// that generic tools see the current card from a preceding claim's response.
+	audits := []deferredAudit{}
 	if dec.ShadowWouldDeny {
-		p.audit(toolName, "would-deny", dec.Reason, &refs)
+		audits = append(audits, deferredAudit{"would-deny", dec.Reason})
+		p.appendAudit(seq, toolName, "would-deny", dec.Reason, &refs)
 	}
-	p.audit(toolName, "allow", dec.Reason, &refs)
-	return mcpDecision{forward: out, tool: toolName, toolForState: toolName, refsForState: &refs}
+	audits = append(audits, deferredAudit{"allow", dec.Reason})
+	p.appendAudit(seq, toolName, "allow", dec.Reason, &refs)
+
+	// Only set card state for tools that actually update card state (claim/release).
+	// This ensures updateCardState is only called on JSON-RPC success.
+	var toolForState string
+	var refsForState *extract.References
+	if toolName == "nockcc_nock_claim" || toolName == "nockcc_nock_release" {
+		toolForState, refsForState = toolName, &refs
+	}
+
+	return mcpDecision{forward: out, tool: toolName, forwardID: msg.ID, toolForState: toolForState, refsForState: refsForState, deferredAudits: audits, refsForAudit: &refs}
 }
 
 // approveAsk holds an `ask`-verdict call (native ask rules AND legacy
@@ -543,38 +847,44 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 // CLOSED: with no approver wired (p.approver == nil) the call is denied, never
 // forwarded. N8328 removed the prior allowWithoutApprover escape hatch that made
 // legacy require_approval fail OPEN.
-func (p *StdioProxy) approveAsk(tool string, params json.RawMessage, refs *extract.References, dec policy.Decision) bool {
+func (p *StdioProxy) approveAsk(tool string, params json.RawMessage, refs *extract.References, dec policy.Decision, seq uint64) bool {
 	if p.approver == nil {
 		p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=no-approver-configured (fail-closed)", p.agent, tool)
-		p.audit(tool, "approval-denied", "no-approver-configured", refs)
+		p.appendAudit(seq, tool, "approval-denied", "no-approver-configured", refs)
+		p.resolveAudit(seq)
 		return false
 	}
 	v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: tool, Params: params})
 	if !v.Approved {
 		p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)
-		p.audit(tool, "approval-denied", v.Reason, refs)
+		p.appendAudit(seq, tool, "approval-denied", v.Reason, refs)
+		p.resolveAudit(seq)
 		return false
 	}
 	p.logger.Printf("APPROVAL-GRANTED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)
-	p.audit(tool, "approval-granted", v.Reason, refs)
-	p.applyWithheld(tool, dec.Withheld)
+	p.appendAudit(seq, tool, "approval-granted", v.Reason, refs)
+	p.applyWithheld(tool, dec.Withheld, seq)
 	return true
 }
 
-func (p *StdioProxy) handleFailModeAsk(tool string, params json.RawMessage, reason string) bool {
+func (p *StdioProxy) handleFailModeAsk(tool string, params json.RawMessage, reason string, seq uint64) bool {
 	dec := p.engine.FailModeVerdict(p.agent, reason)
 	if dec.Verdict != policy.Ask {
 		return false
 	}
-	return p.approveAsk(tool, params, nil, dec)
+	return p.approveAsk(tool, params, nil, dec, seq)
 }
 
-func (p *StdioProxy) applyWithheld(tool string, writes []policy.StateWrite) {
+func (p *StdioProxy) applyWithheld(tool string, writes []policy.StateWrite, seq uint64) {
+	if len(writes) == 0 {
+		return
+	}
 	for _, write := range writes {
 		reason := write.Reason()
 		p.logger.Printf("STATE-WRITE agent=%s tool=%s reason=%q", p.agent, tool, reason)
-		p.audit(tool, "state-write", reason, nil)
+		p.appendAudit(seq, tool, "state-write", reason, nil)
 	}
+	p.resolveAudit(seq)
 }
 
 // rejectToAgent returns a JSON-RPC error to the agent for a denied REQUEST
@@ -603,10 +913,41 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 		}
 
 		if msg.IsResponse() && msg.ID != nil {
-			if _, loaded := pending.LoadAndDelete(string(msg.ID)); loaded {
-				filtered := p.filterToolListResponse(line)
-				if filtered != nil {
-					line = filtered
+			val, loaded := pending.LoadAndDelete(string(msg.ID))
+			if loaded {
+				// Check if this is a tools/list filter or a pending card state update.
+				if toolListVal, ok := val.(toolsListSeq); ok {
+					// tools/list response — filter it
+					filtered := p.filterToolListResponse(line, toolListVal.seq)
+					// Resolve the tools/list audits
+					p.resolveAudit(toolListVal.seq)
+					if filtered != nil {
+						line = filtered
+					}
+				} else if cardVal, ok := val.(pendingCard); ok {
+					// Pending forward — check JSON-RPC success before committing state or auditing
+					shouldCommit := true
+					if msg.Error != nil {
+						// JSON-RPC error — don't commit state or audit
+						shouldCommit = false
+					} else if msg.Result != nil {
+						// Check for tool-level isError (MCP tool result failure).
+						// Tool errors travel as successful JSON-RPC responses with result.isError=true.
+						var result map[string]interface{}
+						if err := json.Unmarshal(msg.Result, &result); err == nil {
+							if toolErr, ok := result["isError"].(bool); ok && toolErr {
+								shouldCommit = false
+							}
+						}
+					}
+					// Only commit state if JSON-RPC succeeded.
+					// Audits are resolved unconditionally to ensure the queue doesn't stall.
+					if shouldCommit {
+						p.updateCardState(cardVal.auditSeq, cardVal.tool, &cardVal.refs)
+					}
+					// Resolve audits unconditionally - even if shouldCommit is false.
+					// Appended audits will be emitted in order by flushAuditsLocked.
+					p.resolveAudit(cardVal.auditSeq)
 				}
 			}
 		}
@@ -618,7 +959,7 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 	return scanner.Err()
 }
 
-func (p *StdioProxy) filterToolListResponse(line []byte) []byte {
+func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64) []byte {
 	var resp struct {
 		JSONRPC string          `json:"jsonrpc"`
 		ID      json.RawMessage `json:"id"`
@@ -644,7 +985,7 @@ func (p *StdioProxy) filterToolListResponse(line []byte) []byte {
 			filtered = append(filtered, t)
 		} else {
 			p.logger.Printf("HIDE agent=%s tool=%s reason=%q", p.agent, t.Name, dec.Reason)
-			p.audit(t.Name, "hide", dec.Reason, nil)
+			p.appendAudit(seq, t.Name, "hide", dec.Reason, nil)
 		}
 	}
 
