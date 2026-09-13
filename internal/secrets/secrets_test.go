@@ -1,6 +1,8 @@
 package secrets
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -136,6 +138,167 @@ func TestKnownScheme(t *testing.T) {
 	}{
 		{"env:GITHUB_TOKEN", true},
 		{"file:/etc/secret", true},
+		{"vault:mysecret", false},
+		{"http://example.com", false},
+	}
+	for _, tt := range tests {
+		got := KnownScheme(tt.ref)
+		if got != tt.want {
+			t.Errorf("KnownScheme(%q) = %v, want %v", tt.ref, got, tt.want)
+		}
+	}
+}
+
+// Nockcc tests with mock server
+
+func TestNockccResolverSuccess(t *testing.T) {
+	// Create a fake vault server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/vault/read" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer test-api-key" {
+			t.Errorf("unexpected auth: %s", r.Header.Get("Authorization"))
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success": true, "data": {"value": "nockcc-secret-test-0001"}}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("NOCKCC_BASE_URL", server.URL)
+	t.Setenv("NOCKCC_API_KEY", "test-api-key")
+
+	r := Chain()
+	val, err := r.Resolve("nockcc:TEST_SECRET")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if val != "nockcc-secret-test-0001" {
+		t.Errorf("got %q, want nockcc-secret-test-0001", val)
+	}
+}
+
+func TestNockccResolverMissingBaseURL(t *testing.T) {
+	t.Setenv("NOCKCC_BASE_URL", "")
+	t.Setenv("NOCKCC_API_KEY", "test-api-key")
+
+	r := Chain()
+	_, err := r.Resolve("nockcc:TEST_SECRET")
+	if err == nil {
+		t.Fatal("expected error when NOCKCC_BASE_URL is unset")
+	}
+}
+
+func TestNockccResolverMissingAPIKey(t *testing.T) {
+	t.Setenv("NOCKCC_BASE_URL", "http://localhost:8000")
+	t.Setenv("NOCKCC_API_KEY", "")
+
+	r := Chain()
+	_, err := r.Resolve("nockcc:TEST_SECRET")
+	if err == nil {
+		t.Fatal("expected error when NOCKCC_API_KEY is unset")
+	}
+}
+
+func TestNockccResolverHTTP404(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	t.Setenv("NOCKCC_BASE_URL", server.URL)
+	t.Setenv("NOCKCC_API_KEY", "test-api-key")
+
+	r := Chain()
+	_, err := r.Resolve("nockcc:TEST_SECRET")
+	if err == nil {
+		t.Fatal("expected error on 404")
+	}
+}
+
+func TestNockccResolverHTTP500(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	t.Setenv("NOCKCC_BASE_URL", server.URL)
+	t.Setenv("NOCKCC_API_KEY", "test-api-key")
+
+	r := Chain()
+	_, err := r.Resolve("nockcc:TEST_SECRET")
+	if err == nil {
+		t.Fatal("expected error on 500")
+	}
+}
+
+func TestNockccResolverEmptyResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success": true, "data": {"value": ""}}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("NOCKCC_BASE_URL", server.URL)
+	t.Setenv("NOCKCC_API_KEY", "test-api-key")
+
+	r := Chain()
+	_, err := r.Resolve("nockcc:TEST_SECRET")
+	if err == nil {
+		t.Fatal("expected error on empty value")
+	}
+}
+
+func TestNockccResolverMalformedJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{invalid json}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("NOCKCC_BASE_URL", server.URL)
+	t.Setenv("NOCKCC_API_KEY", "test-api-key")
+
+	r := Chain()
+	_, err := r.Resolve("nockcc:TEST_SECRET")
+	if err == nil {
+		t.Fatal("expected error on malformed JSON")
+	}
+}
+
+func TestNockccResolverUnsuccessfulResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success": false, "data": {"value": ""}}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("NOCKCC_BASE_URL", server.URL)
+	t.Setenv("NOCKCC_API_KEY", "test-api-key")
+
+	r := Chain()
+	_, err := r.Resolve("nockcc:TEST_SECRET")
+	if err == nil {
+		t.Fatal("expected error on unsuccessful response")
+	}
+}
+
+func TestKnownSchemeNockcc(t *testing.T) {
+	tests := []struct {
+		ref  string
+		want bool
+	}{
+		{"env:GITHUB_TOKEN", true},
+		{"file:/etc/secret", true},
+		{"nockcc:GITHUB_TOKEN", true},
 		{"vault:mysecret", false},
 		{"http://example.com", false},
 	}

@@ -1,11 +1,15 @@
 package secrets
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Resolver resolves a secret reference string (e.g. "env:GITHUB_TOKEN" or
@@ -18,12 +22,16 @@ type Resolver interface {
 }
 
 // Chain creates a resolver that tries multiple schemes: env: then file:,
-// then any future schemes. Unknown schemes return unresolved.
+// then nockcc:, then any future schemes. Unknown schemes return unresolved.
 func Chain() Resolver {
-	return &chainResolver{}
+	return &chainResolver{
+		client: &http.Client{Timeout: 10 * time.Second},
+	}
 }
 
-type chainResolver struct{}
+type chainResolver struct {
+	client *http.Client
+}
 
 func (c *chainResolver) Resolve(ref string) (string, error) {
 	if strings.HasPrefix(ref, "env:") {
@@ -37,6 +45,10 @@ func (c *chainResolver) Resolve(ref string) (string, error) {
 	if strings.HasPrefix(ref, "file:") {
 		path := strings.TrimPrefix(ref, "file:")
 		return resolveFile(path)
+	}
+	if strings.HasPrefix(ref, "nockcc:") {
+		name := strings.TrimPrefix(ref, "nockcc:")
+		return resolveNockcc(c.client, name)
 	}
 	// Unknown scheme
 	return "", fmt.Errorf("unknown secret scheme in %q", ref)
@@ -92,6 +104,81 @@ func resolveFile(path string) (string, error) {
 	return val, nil
 }
 
+// resolveNockcc reads a secret from the NockCC credential vault using the vault
+// read endpoint. The vault key name is never included in error messages exposed
+// to the agent (audit only). Configuration comes from the proxy's own environment
+// (NOCKCC_BASE_URL and NOCKCC_API_KEY), never from the agent.
+// Fail-closed: 404, 5xx, timeout, empty body all return an error.
+func resolveNockcc(client *http.Client, keyName string) (string, error) {
+	baseURL := os.Getenv("NOCKCC_BASE_URL")
+	apiKey := os.Getenv("NOCKCC_API_KEY")
+
+	if baseURL == "" {
+		return "", fmt.Errorf("nockcc vault read failed")
+	}
+	if apiKey == "" {
+		return "", fmt.Errorf("nockcc vault read failed")
+	}
+
+	// Build the request to the vault read endpoint
+	// The endpoint matches what nockcc_vault_get uses
+	url := fmt.Sprintf("%s/api/vault/read", strings.TrimSuffix(baseURL, "/"))
+
+	// Create request body
+	reqBody := map[string]string{"name": keyName}
+	bodyBytes, _ := json.Marshal(reqBody)
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("nockcc vault read failed")
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("nockcc vault read failed")
+	}
+	defer resp.Body.Close()
+
+	// Check for HTTP errors
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("nockcc vault read failed")
+	}
+
+	// Read the response body (limited to 64 KiB for safety)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024+1))
+	if err != nil {
+		return "", fmt.Errorf("nockcc vault read failed")
+	}
+
+	if len(data) == 0 {
+		return "", fmt.Errorf("nockcc vault read failed")
+	}
+	if len(data) > 64*1024 {
+		return "", fmt.Errorf("nockcc vault read failed")
+	}
+
+	// Parse the response
+	var respData struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Value string `json:"value"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(data, &respData); err != nil {
+		return "", fmt.Errorf("nockcc vault read failed")
+	}
+
+	if !respData.Success || respData.Data.Value == "" {
+		return "", fmt.Errorf("nockcc vault read failed")
+	}
+
+	return respData.Data.Value, nil
+}
+
 // validateFileStats checks that a file's mode and type are appropriate for a secret.
 // The file must be regular with mode no more permissive than 0600.
 func validateFileStats(mode os.FileMode, isDir bool) error {
@@ -113,5 +200,7 @@ func validateFileStats(mode os.FileMode, isDir bool) error {
 // KnownScheme reports whether ref starts with a supported secret scheme prefix.
 // Used at policy load time to validate inject rules early.
 func KnownScheme(ref string) bool {
-	return strings.HasPrefix(ref, "env:") || strings.HasPrefix(ref, "file:")
+	return strings.HasPrefix(ref, "env:") ||
+		strings.HasPrefix(ref, "file:") ||
+		strings.HasPrefix(ref, "nockcc:")
 }

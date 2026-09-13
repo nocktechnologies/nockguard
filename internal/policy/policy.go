@@ -586,12 +586,14 @@ func (e *Engine) Warnings() []string {
 }
 
 // InjectEnvNames returns all environment variable names referenced by inject
-// rules across all agents (prefixed with "env:"). The proxy must strip these
+// rules across all agents (prefixed with "env:"), plus the proxy's own
+// NOCKCC_API_KEY if any rules use the nockcc: scheme. The proxy must strip these
 // from the upstream child's environment so a policed agent cannot read the
 // secret value from its own /proc/self/environ. Duplicates are removed.
 func (e *Engine) InjectEnvNames() []string {
 	var names []string
 	seen := make(map[string]bool)
+	hasNockccRules := false
 	for _, pol := range e.config.Agents {
 		for _, rule := range pol.Inject {
 			if strings.HasPrefix(rule.Ref, "env:") {
@@ -601,6 +603,16 @@ func (e *Engine) InjectEnvNames() []string {
 					seen[name] = true
 				}
 			}
+			if strings.HasPrefix(rule.Ref, "nockcc:") {
+				hasNockccRules = true
+			}
+		}
+	}
+	// Strip the proxy's own NOCKCC_API_KEY if any nockcc: rules exist
+	if hasNockccRules {
+		if !seen["NOCKCC_API_KEY"] {
+			names = append(names, "NOCKCC_API_KEY")
+			seen["NOCKCC_API_KEY"] = true
 		}
 	}
 	return names
