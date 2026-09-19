@@ -26,6 +26,7 @@ The starter policy ships with auditing commented out. Open `~/.nockguard/policy.
 
 ```bash
 nockguard keygen --agent coder                   # prints NOCKGUARD_AGENT_CODER_ED25519_KEY (private — export it, never commit) and _PUB (share it)
+export NOCKGUARD_AGENT_CODER_ED25519_KEY=<paste the private seed keygen just printed>   # the seed never gets committed; proxy needs it in its own environment to sign
 nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project" --agent coder
 ```
 
@@ -45,6 +46,7 @@ Point your agent at `nockguard` instead of the server:
 From here every `tools/call` flows through the policy engine and lands in a signed audit trail. Then:
 
 ```bash
+export NOCKGUARD_AGENT_CODER_ED25519_PUB=<paste the public key keygen printed>         # the verifier needs the public key, not the private seed
 nockguard verify --agent coder        # prove the trail is intact and authentic (exit 0), or tampered (exit 2)
 nockguard policy propose --agent coder # turn what the agent actually used into a starter allowlist
 nockguard selftest                     # prove the firewall really BLOCKS — a denied tool and a leaked secret, through the live gate
