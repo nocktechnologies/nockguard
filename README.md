@@ -20,6 +20,12 @@ MCP server (filesystem, GitHub, your own)
 brew install nocktechnologies/tap/nockguard      # or: go install github.com/nocktechnologies/nockguard/cmd/nockguard@latest
 
 nockguard init                                   # writes ~/.nockguard/policy.yaml (default-deny starter; never clobbers an existing one)
+```
+
+The starter policy ships with auditing commented out. Open `~/.nockguard/policy.yaml` and uncomment the `audit:` block (`enabled: true` is the one line that matters here), then generate a per-agent signing key:
+
+```bash
+nockguard keygen --agent coder                   # prints NOCKGUARD_AGENT_CODER_ED25519_KEY (private — export it, never commit) and _PUB (share it)
 nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project" --agent coder
 ```
 
@@ -36,7 +42,7 @@ Point your agent at `nockguard` instead of the server:
 }
 ```
 
-From here every `tools/call` flows through the policy engine and lands in the audit trail. Then:
+From here every `tools/call` flows through the policy engine and lands in a signed audit trail. Then:
 
 ```bash
 nockguard verify --agent coder        # prove the trail is intact and authentic (exit 0), or tampered (exit 2)
