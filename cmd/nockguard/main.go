@@ -128,9 +128,10 @@ func runCLI(args []string) int {
 	}
 
 	var (
-		upstreamCmd string
-		agent       string
-		policyPath  string
+		upstreamCmd    string
+		agent          string
+		policyPath     string
+		policyProvided bool
 	)
 
 	for i := 1; i < len(args); i++ {
@@ -146,6 +147,11 @@ func runCLI(args []string) int {
 				agent = args[i]
 			}
 		case "--policy":
+			// Mark provided the moment the flag is SEEN, before consuming its value:
+			// a dangling `--policy` (no path) still means "the user named a policy",
+			// so it must fall through to load-or-error, never be reinterpreted as
+			// zero-config observe. An explicit --policy is never bypassed.
+			policyProvided = true
 			if i+1 < len(args) {
 				i++
 				policyPath = args[i]
@@ -157,10 +163,6 @@ func runCLI(args []string) int {
 		fmt.Fprintln(os.Stderr, "error: --upstream is required")
 		return 1
 	}
-	if agent == "" {
-		fmt.Fprintln(os.Stderr, "error: --agent is required")
-		return 1
-	}
 	if policyPath == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -170,22 +172,67 @@ func runCLI(args []string) int {
 		policyPath = home + "/.nockguard/policy.yaml"
 	}
 
-	engine, err := policy.Load(policyPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error loading policy %s: %v\n", policyPath, err)
-		return 1
+	// Zero-config OBSERVE mode. When the user named no --policy AND the default
+	// policy file does not exist, start in observe mode (allow all, deny nothing,
+	// signed audit trail) instead of erroring — the 30-second try-it path.
+	// INVARIANTS, both preserved below: a policy file present at the default path
+	// is NEVER bypassed, and an explicit --policy is NEVER bypassed. Only
+	// os.IsNotExist triggers observe; any other stat error falls through to
+	// policy.Load, which reports it exactly as before.
+	var (
+		engine  *policy.Engine
+		auditor *audit.Auditor
+		err     error
+	)
+	zeroConfig := false
+	if !policyProvided {
+		if _, statErr := os.Stat(policyPath); os.IsNotExist(statErr) {
+			zeroConfig = true
+		}
 	}
 
-	// Log any policy load-time warnings (e.g., tools in multiple inject rules)
-	for _, warn := range engine.Warnings() {
-		fmt.Fprintf(os.Stderr, "warning policy: %s\n", warn)
-	}
+	if zeroConfig {
+		if agent == "" {
+			agent = defaultObserveAgent
+		}
+		var auditPath, pubHex string
+		engine, auditor, auditPath, pubHex, err = observeSetup(agent)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: zero-config observe setup failed: %v\n", err)
+			return 1
+		}
+		defer auditor.Close()
+		printObserveBanner(os.Stderr, agent, auditPath, pubHex, policyPath)
+	} else {
+		// A policy file is present or was explicitly named: load-or-error, unchanged.
+		if agent == "" {
+			fmt.Fprintln(os.Stderr, "error: --agent is required")
+			return 1
+		}
+		engine, err = policy.Load(policyPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error loading policy %s: %v\n", policyPath, err)
+			return 1
+		}
 
-	// Fail-closed is correct but should never be a silent surprise: if the named
-	// agent has neither its own policy nor a "default", every tool will be denied.
-	// Warn loudly so the operator fixes the policy instead of debugging a deny-all.
-	if !engine.HasPolicyFor(agent) {
-		fmt.Fprintf(os.Stderr, "warning: no policy for agent %q and no \"default\" — ALL tools will be DENIED (fail-closed). Add an agent or \"default\" policy in %s.\n", agent, policyPath)
+		// Log any policy load-time warnings (e.g., tools in multiple inject rules)
+		for _, warn := range engine.Warnings() {
+			fmt.Fprintf(os.Stderr, "warning policy: %s\n", warn)
+		}
+
+		// Fail-closed is correct but should never be a silent surprise: if the named
+		// agent has neither its own policy nor a "default", every tool will be denied.
+		// Warn loudly so the operator fixes the policy instead of debugging a deny-all.
+		if !engine.HasPolicyFor(agent) {
+			fmt.Fprintf(os.Stderr, "warning: no policy for agent %q and no \"default\" — ALL tools will be DENIED (fail-closed). Add an agent or \"default\" policy in %s.\n", agent, policyPath)
+		}
+
+		auditor, err = engine.AuditorFor(agent)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error opening audit trail: %v\n", err)
+			return 1
+		}
+		defer auditor.Close()
 	}
 
 	validator, err := engine.ValidatorFor(agent)
@@ -205,12 +252,8 @@ func runCLI(args []string) int {
 		return 1
 	}
 
-	auditor, err := engine.AuditorFor(agent)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error opening audit trail: %v\n", err)
-		return 1
-	}
-	defer auditor.Close()
+	// auditor was built above: signed observe trail in zero-config mode, or
+	// engine.AuditorFor(agent) when a policy file governs this run.
 
 	forwarder, err := engine.Forwarder()
 	if err != nil {
@@ -1393,6 +1436,7 @@ Evidence packs:
 
 Examples:
   nockguard init                                        # scaffold a default-deny starter policy
+  nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project"   # zero-config: OBSERVE mode + signed audit trail, no policy file needed
   nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project" --agent coder --policy policy.yaml
   nockguard mcp-http --upstream https://mcp.example.com/mcp --agent coder --auth-env MCP_AUTH
   nockguard mcp-listen --listen 127.0.0.1:8790 --upstream https://mcp.example.com/mcp --agent coder --policy policy.yaml
