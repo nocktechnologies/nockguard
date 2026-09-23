@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
@@ -114,6 +115,67 @@ func TestObserveSetupHonorsExplicitPerAgentKeyEnv(t *testing.T) {
 	// No key file should have been written when the env key is honored.
 	if _, statErr := os.Stat(filepath.Join(home, ".nockguard", "keys", defaultObserveAgent+".ed25519")); !os.IsNotExist(statErr) {
 		t.Fatalf("a key file was persisted despite an explicit env key (stat err = %v)", statErr)
+	}
+}
+
+func TestObserveSetupRejectsInvalidAgentBeforeWriting(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	outside := filepath.Join(home, "outside")
+	agent := filepath.Join("..", "..", "outside")
+
+	if _, _, _, _, err := observeSetup(agent); err == nil {
+		t.Fatal("observeSetup accepted a path-traversing agent name")
+	}
+	if _, err := os.Stat(outside + ".ed25519"); !os.IsNotExist(err) {
+		t.Fatalf("invalid agent wrote outside the key directory (stat err = %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".nockguard")); !os.IsNotExist(err) {
+		t.Fatalf("invalid agent created nockguard state before rejection (stat err = %v)", err)
+	}
+}
+
+func TestEnsureObserveKeyConcurrentFirstStart(t *testing.T) {
+	home := t.TempDir()
+	const starters = 16
+
+	pubs := make(chan string, starters)
+	errs := make(chan error, starters)
+	var wg sync.WaitGroup
+	for range starters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, pub, err := ensureObserveKey(home, defaultObserveAgent)
+			if err != nil {
+				errs <- err
+				return
+			}
+			pubs <- hex.EncodeToString(pub)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	close(pubs)
+
+	for err := range errs {
+		t.Errorf("concurrent ensureObserveKey: %v", err)
+	}
+	var want string
+	for got := range pubs {
+		if want == "" {
+			want = got
+		} else if got != want {
+			t.Errorf("concurrent starters used different keys: got %q, want %q", got, want)
+		}
+	}
+	seedPath := filepath.Join(home, ".nockguard", "keys", defaultObserveAgent+".ed25519")
+	seed, err := os.ReadFile(seedPath)
+	if err != nil {
+		t.Fatalf("read published seed: %v", err)
+	}
+	if _, _, err := loadSeedHex(seedPath, string(seed)); err != nil {
+		t.Fatalf("published seed is incomplete or invalid: %v", err)
 	}
 }
 

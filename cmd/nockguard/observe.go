@@ -39,6 +39,10 @@ const observePolicyYAML = `agents:
 // (or an explicitly-set per-agent key env is honored) so the trail stays
 // verifiable across runs — see ensureObserveKey.
 func observeSetup(agent string) (engine *policy.Engine, auditor *audit.Auditor, auditPath, pubHex string, err error) {
+	if !policy.ValidAgentName(agent) {
+		return nil, nil, "", "", fmt.Errorf("invalid agent name %q", agent)
+	}
+
 	engine, err = policy.LoadBytes([]byte(observePolicyYAML))
 	if err != nil {
 		return nil, nil, "", "", fmt.Errorf("building observe policy: %w", err)
@@ -106,30 +110,40 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 		return nil, nil, fmt.Errorf("reading persisted key %s: %w", keyPath, rerr)
 	}
 
-	// Generate and persist once. O_EXCL guards two proxies racing to create it;
-	// on EEXIST the loser re-reads the winner's key so both sign with one identity.
+	// Generate and persist once. Write the complete seed to a same-directory temp
+	// file, then atomically link it into place without replacing an existing key.
+	// A racing loser can therefore only observe the winner's complete seed.
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, fmt.Errorf("generating observe key: %w", err)
 	}
 	seedHex := hex.EncodeToString(priv.Seed())
-	f, err := os.OpenFile(keyPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	f, err := os.CreateTemp(keyDir, ".observe-key-*")
 	if err != nil {
-		if os.IsExist(err) {
+		return nil, nil, fmt.Errorf("creating temporary key in %s: %w", keyDir, err)
+	}
+	tempPath := f.Name()
+	defer os.Remove(tempPath)
+	if _, werr := f.WriteString(seedHex); werr != nil {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("writing temporary key %s: %w", tempPath, werr)
+	}
+	if serr := f.Sync(); serr != nil {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("syncing temporary key %s: %w", tempPath, serr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		return nil, nil, fmt.Errorf("closing temporary key %s: %w", tempPath, cerr)
+	}
+	if lerr := os.Link(tempPath, keyPath); lerr != nil {
+		if os.IsExist(lerr) {
 			winner, rerr := os.ReadFile(keyPath)
 			if rerr != nil {
 				return nil, nil, fmt.Errorf("reading raced key %s: %w", keyPath, rerr)
 			}
 			return loadSeedHex(keyPath, string(winner))
 		}
-		return nil, nil, fmt.Errorf("creating key file %s: %w", keyPath, err)
-	}
-	if _, werr := f.WriteString(seedHex); werr != nil {
-		_ = f.Close()
-		return nil, nil, fmt.Errorf("writing key file %s: %w", keyPath, werr)
-	}
-	if cerr := f.Close(); cerr != nil {
-		return nil, nil, fmt.Errorf("closing key file %s: %w", keyPath, cerr)
+		return nil, nil, fmt.Errorf("publishing key file %s: %w", keyPath, lerr)
 	}
 	// Best-effort: the public half alongside the seed, for convenience. Its
 	// absence is not fatal — the banner already prints the hex public key.
