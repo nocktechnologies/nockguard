@@ -145,6 +145,20 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 		}
 		return nil, nil, fmt.Errorf("publishing key file %s: %w", keyPath, lerr)
 	}
+	// os.Link added a new entry to keyDir; the entry itself is only durable once
+	// the directory is fsync'd. Without this, a crash after the trail is written
+	// can discard the key file while the trail it signed survives — and the next
+	// run's freshly generated key makes audit.New reject the existing chain,
+	// permanently bricking observe. Fail loudly rather than persist a key whose
+	// directory entry is not durable (matches the temp-file Sync above).
+	if dirFile, derr := os.Open(keyDir); derr != nil {
+		return nil, nil, fmt.Errorf("opening key dir %s to sync: %w", keyDir, derr)
+	} else if serr := dirFile.Sync(); serr != nil {
+		_ = dirFile.Close()
+		return nil, nil, fmt.Errorf("syncing key dir %s: %w", keyDir, serr)
+	} else if cerr := dirFile.Close(); cerr != nil {
+		return nil, nil, fmt.Errorf("closing key dir %s: %w", keyDir, cerr)
+	}
 	// Best-effort: the public half alongside the seed, for convenience. Its
 	// absence is not fatal — the banner already prints the hex public key.
 	_ = os.WriteFile(pubPath, []byte(hex.EncodeToString(pub)), 0o644)
