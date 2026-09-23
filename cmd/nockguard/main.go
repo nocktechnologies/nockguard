@@ -147,10 +147,14 @@ func runCLI(args []string) int {
 				agent = args[i]
 			}
 		case "--policy":
+			// Mark provided the moment the flag is SEEN, before consuming its value:
+			// a dangling `--policy` (no path) still means "the user named a policy",
+			// so it must fall through to load-or-error, never be reinterpreted as
+			// zero-config observe. An explicit --policy is never bypassed.
+			policyProvided = true
 			if i+1 < len(args) {
 				i++
 				policyPath = args[i]
-				policyProvided = true
 			}
 		}
 	}

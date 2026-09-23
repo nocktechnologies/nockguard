@@ -158,6 +158,26 @@ func TestProxyExplicitMissingPolicyStillErrors(t *testing.T) {
 	}
 }
 
+// TestProxyDanglingPolicyFlagDoesNotObserve proves that naming --policy without a
+// value still means "the user named a policy": it must load-or-error, never be
+// reinterpreted as zero-config observe (allow-all). Guards the invariant that an
+// explicit --policy is never bypassed.
+func TestProxyDanglingPolicyFlagDoesNotObserve(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no policy file anywhere
+
+	code, _, stderr := runCommandForTest(t, "proxy", "--upstream", "true", "--agent", "coder", "--policy")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\nstderr:\n%s", code, stderr)
+	}
+	if strings.Contains(stderr, "OBSERVE MODE") {
+		t.Fatalf("dangling --policy must not enter observe mode, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "error loading policy") {
+		t.Fatalf("dangling --policy must load-or-error, got:\n%s", stderr)
+	}
+}
+
 // TestProxyPolicyPresentRequiresAgent proves the existing "--agent is required"
 // error is preserved whenever a policy file governs the run.
 func TestProxyPolicyPresentRequiresAgent(t *testing.T) {
