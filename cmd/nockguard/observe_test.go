@@ -316,3 +316,46 @@ func freshEd25519(t *testing.T) (privSeedHex, pubHex string) {
 	}
 	return hex.EncodeToString(priv.Seed()), hex.EncodeToString(pub)
 }
+
+// TestDurableMkdirAll covers the directory-durability helper behind the
+// zero-config observe key path: it creates a missing nested hierarchy, is a
+// no-op error-free on an already-existing directory, and respects perms. The
+// crash-durability the fsyncs provide is not unit-testable without fault
+// injection; this asserts the helper's observable happy-path behavior so a
+// regression in the create/idempotency logic is caught.
+func TestDurableMkdirAll(t *testing.T) {
+	root := t.TempDir()
+
+	// Missing nested hierarchy is fully created.
+	nested := filepath.Join(root, ".nockguard", "keys")
+	if err := durableMkdirAll(nested, 0o700); err != nil {
+		t.Fatalf("durableMkdirAll(missing) = %v, want nil", err)
+	}
+	info, err := os.Stat(nested)
+	if err != nil {
+		t.Fatalf("stat after create: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("%s is not a directory", nested)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("perm = %o, want 700", perm)
+	}
+
+	// Idempotent: calling again on an existing hierarchy succeeds and preserves it.
+	if err := durableMkdirAll(nested, 0o700); err != nil {
+		t.Fatalf("durableMkdirAll(existing) = %v, want nil", err)
+	}
+	if _, err := os.Stat(nested); err != nil {
+		t.Fatalf("stat after idempotent call: %v", err)
+	}
+
+	// A file where a directory is expected surfaces an error rather than a panic.
+	filePath := filepath.Join(root, "afile")
+	if werr := os.WriteFile(filePath, []byte("x"), 0o600); werr != nil {
+		t.Fatalf("seeding file: %v", werr)
+	}
+	if err := durableMkdirAll(filepath.Join(filePath, "child"), 0o700); err == nil {
+		t.Fatalf("durableMkdirAll under a regular file = nil, want error")
+	}
+}

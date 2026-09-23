@@ -97,7 +97,12 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 
 	// (2) Persisted per-agent key.
 	keyDir := filepath.Join(home, ".nockguard", "keys")
-	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+	// Create the key directory hierarchy durably: os.MkdirAll may create both
+	// ~/.nockguard and ~/.nockguard/keys, and their new directory entries are
+	// only durable once each newly-created directory's parent is fsync'd. Without
+	// this a crash can lose the whole keys directory while the signed trail
+	// survives, and the next run's fresh key makes audit.New reject the chain.
+	if err := durableMkdirAll(keyDir, 0o700); err != nil {
 		return nil, nil, fmt.Errorf("creating key dir %s: %w", keyDir, err)
 	}
 	keyPath := filepath.Join(keyDir, agent+".ed25519")
@@ -145,24 +150,70 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 		}
 		return nil, nil, fmt.Errorf("publishing key file %s: %w", keyPath, lerr)
 	}
-	// os.Link added a new entry to keyDir; the entry itself is only durable once
-	// the directory is fsync'd. Without this, a crash after the trail is written
-	// can discard the key file while the trail it signed survives — and the next
+	// os.Link added a new entry to keyDir; that entry is only durable once keyDir
+	// itself is fsync'd. Without this, a crash after the trail is written can
+	// discard the key file while the trail it signed survives — and the next
 	// run's freshly generated key makes audit.New reject the existing chain,
 	// permanently bricking observe. Fail loudly rather than persist a key whose
 	// directory entry is not durable (matches the temp-file Sync above).
-	if dirFile, derr := os.Open(keyDir); derr != nil {
-		return nil, nil, fmt.Errorf("opening key dir %s to sync: %w", keyDir, derr)
-	} else if serr := dirFile.Sync(); serr != nil {
-		_ = dirFile.Close()
-		return nil, nil, fmt.Errorf("syncing key dir %s: %w", keyDir, serr)
-	} else if cerr := dirFile.Close(); cerr != nil {
-		return nil, nil, fmt.Errorf("closing key dir %s: %w", keyDir, cerr)
+	if err := fsyncDir(keyDir); err != nil {
+		return nil, nil, fmt.Errorf("syncing key dir %s after publishing key: %w", keyDir, err)
 	}
 	// Best-effort: the public half alongside the seed, for convenience. Its
 	// absence is not fatal — the banner already prints the hex public key.
 	_ = os.WriteFile(pubPath, []byte(hex.EncodeToString(pub)), 0o644)
 	return priv, pub, nil
+}
+
+// fsyncDir opens dir and fsyncs it so directory-entry changes — a newly linked
+// file or a newly created subdirectory — are durable. A directory fsync persists
+// the entries (names) in that directory, not the contents of the files it holds.
+func fsyncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if serr := f.Sync(); serr != nil {
+		_ = f.Close()
+		return serr
+	}
+	return f.Close()
+}
+
+// durableMkdirAll creates dir like os.MkdirAll and then fsyncs the parent of
+// each directory it had to create, so the new directory entries survive a
+// crash. os.MkdirAll's new entries otherwise live only in the page cache; a
+// crash can lose a freshly created ~/.nockguard or ~/.nockguard/keys while a
+// later-written signed trail survives, which would brick observe on the next
+// run. Directories that already exist are left untouched (nothing to persist).
+func durableMkdirAll(dir string, perm os.FileMode) error {
+	// Collect the not-yet-existing path components, deepest first.
+	var missing []string
+	for p := filepath.Clean(dir); ; {
+		if _, err := os.Stat(p); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		missing = append(missing, p)
+		if parent := filepath.Dir(p); parent != p {
+			p = parent
+		} else {
+			break // reached the filesystem root
+		}
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	// Persist each new entry by fsyncing its parent, shallowest first so each
+	// parent (and its own entry, already persisted by the previous iteration or
+	// pre-existing) is durable before we rely on it.
+	for i := len(missing) - 1; i >= 0; i-- {
+		if err := fsyncDir(filepath.Dir(missing[i])); err != nil {
+			return fmt.Errorf("syncing parent of %s: %w", missing[i], err)
+		}
+	}
+	return nil
 }
 
 // loadSeedHex parses a persisted hex seed into a keypair.
