@@ -85,6 +85,16 @@ import (
 // tool-call arguments by declared extractors. These fields are INCLUDED in the
 // canonical payload signed by the Ed25519 chain, so they form part of the
 // tamper-evident trail. Unknown tools and calls never carry these fields.
+//
+// SessionID and KeyID (N10647) are additive, omitempty correlation fields.
+// SessionID is stamped from NOCKLOCK_SESSION_ID (the nocklock session that
+// wrapped this agent, if any) at Record time. KeyID is the signing Ed25519
+// key's fingerprint (hex(sha256(pub))), stamped only when the trail is
+// Ed25519-signed; it is never present for HMAC or unsigned trails. Both are
+// omitted when empty, so an event with neither set marshals byte-identically
+// to before this field was added, and existing signed trails still verify.
+// When present, both are part of the canonical payload and therefore covered
+// by the signature chain like every other field.
 type Event struct {
 	Time           string `json:"ts"`
 	Agent          string `json:"agent"`
@@ -95,8 +105,14 @@ type Event struct {
 	PR             string `json:"pr,omitempty"`               // GitHub PR reference owner/repo#n, extracted from gh_* tools
 	ReviewID       string `json:"review_id,omitempty"`        // NockCC review id, extracted from known tools
 	ParentAuditSeq int    `json:"parent_audit_seq,omitempty"` // Reserved for future use; never populated
+	SessionID      string `json:"session_id,omitempty"`       // nocklock session correlation, from NOCKLOCK_SESSION_ID
+	KeyID          string `json:"key_id,omitempty"`           // hex(sha256(pub)) of the Ed25519 signing key; empty for HMAC/unsigned
 	Sig            string `json:"sig,omitempty"`
 }
+
+// nocklockSessionIDEnv is the environment variable nocklock's `wrap` exports
+// into the child process carrying the session id to correlate against.
+const nocklockSessionIDEnv = "NOCKLOCK_SESSION_ID"
 
 // Auditor appends Events as JSON Lines to a file. It is safe for concurrent use
 // both within a process (the mutex) and ACROSS processes when signing is enabled
@@ -111,6 +127,7 @@ type Auditor struct {
 	path   string             // audit file path; used to re-read the on-disk chain head under the flock
 	key    []byte             // HMAC signing key; empty = unsigned trail
 	edPriv ed25519.PrivateKey // Ed25519 signing key; non-nil = non-repudiable trail (takes precedence over key)
+	keyID  string             // hex(sha256(pub)) of edPriv's public key; stamped on Events when edPriv is set
 }
 
 // Option configures an Auditor at construction.
@@ -133,7 +150,15 @@ func WithSigningKey(key []byte) Option {
 // WithSigningKey if both are supplied. The key is supplied by the caller (read
 // from an environment variable upstream), never persisted by this package.
 func WithEd25519Key(priv ed25519.PrivateKey) Option {
-	return func(a *Auditor) { a.edPriv = priv }
+	return func(a *Auditor) {
+		a.edPriv = priv
+		// key_id is computed from the PUBLIC key derived from this private key,
+		// never from any env text — see Event.KeyID.
+		if pub, ok := priv.Public().(ed25519.PublicKey); ok {
+			sum := sha256.Sum256(pub)
+			a.keyID = hex.EncodeToString(sum[:])
+		}
+	}
 }
 
 // signing reports whether any signing mode is active.
@@ -228,6 +253,18 @@ func (a *Auditor) Record(ev Event) error {
 	}
 	ev.Time = a.clock().Format(time.RFC3339)
 	ev.Sig = "" // canonical content never includes the signature itself
+
+	// N10647: stamp correlation fields before the canonical bytes are computed
+	// (below and in the final marshal) so both are part of the signed payload
+	// when signing is active. A caller-set SessionID is never overwritten.
+	// Empty/unset env -> field stays empty -> omitempty drops it, so an
+	// unsessioned event marshals exactly like before this field existed.
+	if ev.SessionID == "" {
+		ev.SessionID = os.Getenv(nocklockSessionIDEnv)
+	}
+	if a.edPriv != nil {
+		ev.KeyID = a.keyID
+	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
