@@ -566,9 +566,14 @@ func readHighWaterMark(hwmPath string) (*highWaterMark, error) {
 		}
 		return nil, err
 	}
+	return parseHighWaterMark(data, hwmPath)
+}
+
+// parseHighWaterMark decodes sidecar bytes; name labels the error only.
+func parseHighWaterMark(data []byte, name string) (*highWaterMark, error) {
 	var hwm highWaterMark
 	if err := json.Unmarshal(bytes.TrimSpace(data), &hwm); err != nil {
-		return nil, fmt.Errorf("high-water-mark %s is corrupt: %w", hwmPath, err)
+		return nil, fmt.Errorf("high-water-mark %s is corrupt: %w", name, err)
 	}
 	return &hwm, nil
 }
@@ -901,7 +906,31 @@ func VerifyEd25519(path string, pub ed25519.PublicKey) (int, error) {
 	if herr != nil {
 		return 0, herr
 	}
-	sc := bufio.NewScanner(f)
+	return verifyEd25519Stream(f, hwm, pub)
+}
+
+// VerifyEd25519Bytes is VerifyEd25519 over an in-memory snapshot: trail holds
+// the trail's bytes and hwm the bytes of its .hwm sidecar (nil when the sidecar
+// is absent). A caller that must verify and then read the SAME bytes (for
+// example to select rows from them) reads the file once and passes the bytes
+// here, so nothing can be swapped between verification and use. Checks and
+// error classification are identical to VerifyEd25519.
+func VerifyEd25519Bytes(trail, hwm []byte, pub ed25519.PublicKey) (int, error) {
+	var mark *highWaterMark
+	if hwm != nil {
+		m, err := parseHighWaterMark(hwm, "(snapshot)")
+		if err != nil {
+			return 0, err
+		}
+		mark = m
+	}
+	return verifyEd25519Stream(bytes.NewReader(trail), mark, pub)
+}
+
+// verifyEd25519Stream is the shared Ed25519 chain walk plus high-water-mark
+// check behind VerifyEd25519 and VerifyEd25519Bytes.
+func verifyEd25519Stream(r io.Reader, hwm *highWaterMark, pub ed25519.PublicKey) (int, error) {
+	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), scanBufferCap)
 	prev := ""
 	n := 0

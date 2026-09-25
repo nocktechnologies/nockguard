@@ -1,8 +1,10 @@
 package audit
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,5 +111,42 @@ func TestKeyFromHexRoundTrip(t *testing.T) {
 	}
 	if _, err := PublicKeyFromHex(hex.EncodeToString([]byte("short"))); err == nil {
 		t.Error("PublicKeyFromHex must reject a wrong-length key")
+	}
+}
+
+func TestVerifyEd25519BytesMatchesFileVerifier(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "a.audit.jsonl")
+	a, err := New(path, WithEd25519Key(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"allow", "deny", "allow"} {
+		if err := a.Record(Event{Agent: "x", Tool: "Read", Decision: d}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = a.Close()
+	trail, _ := os.ReadFile(path)
+	hwm, _ := os.ReadFile(path + hwmSuffix)
+	if n, err := VerifyEd25519Bytes(trail, hwm, pub); err != nil || n != 3 {
+		t.Fatalf("bytes verifier on a genuine snapshot: n=%d err=%v", n, err)
+	}
+	if _, err := VerifyEd25519Bytes(trail, nil, pub); !errors.Is(err, ErrTamper) {
+		t.Fatalf("snapshot without its .hwm must be tamper, got %v", err)
+	}
+	lines := bytes.SplitAfter(trail, []byte("\n"))
+	if _, err := VerifyEd25519Bytes(bytes.Join(lines[:2], nil), hwm, pub); !errors.Is(err, ErrTamper) {
+		t.Fatalf("truncated snapshot must be tamper, got %v", err)
+	}
+	mut := bytes.Replace(trail, []byte(`"decision":"deny"`), []byte(`"decision":"allow"`), 1)
+	if _, err := VerifyEd25519Bytes(mut, hwm, pub); !errors.Is(err, ErrTamper) {
+		t.Fatalf("mutated snapshot must be tamper, got %v", err)
+	}
+	if _, err := VerifyEd25519Bytes(trail, []byte("{not json"), pub); err == nil {
+		t.Fatal("corrupt .hwm bytes must fail")
 	}
 }

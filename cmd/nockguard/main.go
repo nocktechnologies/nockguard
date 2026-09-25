@@ -784,6 +784,12 @@ func runAudit(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: nockguard audit verify (--agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]")
 		return 1
 	}
+	// `verify --session <id>` is the unified NockGuard + NockLock session
+	// verdict (verify_session.go). It has its own flag set and never falls
+	// through to the single-trail modes below.
+	if hasSessionFlag(args[1:]) {
+		return runVerifySession(args[1:])
+	}
 	var auditPath, auditDir, agentName, keyEnv, pubEnv string
 	allMode := false
 	jsonOutput := false
@@ -1401,6 +1407,7 @@ Usage:
   nockguard mcp-listen --listen 127.0.0.1:<port> --upstream <url> --agent <name> [--policy <path>] [--audit <path>]
   nockguard egress-proxy --listen <addr> --agent <name> --policy <path> [--audit <path>] [--enforce]
   nockguard verify (--all | --agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
+  nockguard verify --session <id> --lock-db <path> --guard-trail <path> (--pub-env <ENV> | --lock-pub-env <ENV> --guard-pub-env <ENV>) [--json]
   nockguard selftest [--policy <path>] [--json]
   nockguard policy propose --agent <name> [--audit <path>] [--audit-dir <dir>]
   nockguard policy shadow-report --agent <name> [--audit <path>] [--audit-dir <dir>]
@@ -1422,6 +1429,11 @@ Options:
   --ed25519-pub-env  Env var holding the hex Ed25519 public key (non-repudiable verify)
   --audit            Path to the audit JSONL (default: ~/.nockguard/logs/audit.jsonl)
   --audit-dir        Directory holding per-agent audit files (for: audit verify / evidence --agent)
+  --session          nocklock session id to verify across the NockLock log and a NockGuard trail (for: verify)
+  --lock-db          Path to the NockLock SQLite audit log (for: verify --session; required, no discovery)
+  --guard-trail      Path to the NockGuard Ed25519 JSONL trail (for: verify --session; required, no discovery)
+  --pub-env          Env var holding one hex Ed25519 public key used for BOTH chains (for: verify --session)
+  --lock-pub-env / --guard-pub-env   Env vars holding each chain's hex Ed25519 public key (for: verify --session)
   --framework        Compliance framework to map against (for: evidence) — soc2 (gdpr/pci/hipaa are stubs)
   --from / --to      Inclusive date filter for evidence entries (YYYY-MM-DD or RFC3339)
   --format           Evidence output format: html (default) or json
@@ -1448,6 +1460,7 @@ Examples:
   nockguard keygen --agent coder                        # generate per-agent keypair
   nockguard verify --agent coder                        # prove coder's trail is intact + non-repudiable (exit 0 = clean, 2 = tampered)
   nockguard selftest --policy policy.yaml               # prove the firewall BLOCKS a denied tool + catches a secret (exit 0 = proven, 2 = gap)
+  nockguard verify --session "$NOCKLOCK_SESSION_ID" --lock-db <nocklock.db> --guard-trail ~/.nockguard/logs/coder.audit.jsonl --lock-pub-env LOCK_PUB --guard-pub-env GUARD_PUB   # one verdict across both chains (exit 0 = PROTECTED, 2 = TAMPERED, 1 = anything else)
   nockguard verify --all                                # prove EVERY per-agent trail in ~/.nockguard/logs in one command (exit 0 = all intact, 2 = tampered, 1 = unverifiable or no trails found)
   nockguard policy propose --agent coder                 # derive a shadow allowlist from coder's observed allowed tools
   nockguard policy shadow-report --agent coder           # count shadow would-deny misses by tool
