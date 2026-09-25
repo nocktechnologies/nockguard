@@ -214,3 +214,69 @@ func TestOldTrailWithoutNewFieldsStillVerifies(t *testing.T) {
 		t.Errorf("expected 3 entries verified, got %d", n)
 	}
 }
+
+// TestCallerKeyIDNeverSurvives (fix round, N10647): a caller-supplied
+// Event.KeyID must never reach the JSON line as-is. In HMAC and unsigned
+// modes it must be dropped entirely (key_id absent); in Ed25519 mode it must
+// be overwritten with the Auditor's own hex(sha256(pub)), never the caller's
+// forged value. Trusting caller input here would let any caller forge
+// attribution to a signing key that never signed the entry.
+func TestCallerKeyIDNeverSurvives(t *testing.T) {
+	t.Setenv(nocklockSessionIDEnv, "")
+
+	// HMAC mode: forged KeyID must not survive.
+	hmacPath := filepath.Join(t.TempDir(), "hmac.jsonl")
+	hmacA, err := New(hmacPath, WithSigningKey([]byte("shared-secret-key-material")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hmacA.Record(Event{Agent: "kit", Tool: "t", Decision: "allow", KeyID: "forged"}); err != nil {
+		t.Fatal(err)
+	}
+	hmacA.Close()
+	hmacLines := readLines(t, hmacPath)
+	if got, present := hmacLines[0]["key_id"]; present {
+		t.Errorf("HMAC trail must never carry a caller-supplied key_id, got %v", got)
+	}
+
+	// Unsigned mode: forged KeyID must not survive.
+	unsignedPath := filepath.Join(t.TempDir(), "unsigned.jsonl")
+	unsignedA, err := New(unsignedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unsignedA.Record(Event{Agent: "kit", Tool: "t", Decision: "allow", KeyID: "forged"}); err != nil {
+		t.Fatal(err)
+	}
+	unsignedA.Close()
+	unsignedLines := readLines(t, unsignedPath)
+	if got, present := unsignedLines[0]["key_id"]; present {
+		t.Errorf("unsigned trail must never carry a caller-supplied key_id, got %v", got)
+	}
+
+	// Ed25519 mode: forged KeyID must be overwritten with the real key_id.
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantKeyID := func() string {
+		sum := sha256.Sum256(pub)
+		return hex.EncodeToString(sum[:])
+	}()
+	edPath := filepath.Join(t.TempDir(), "ed.jsonl")
+	edA, err := New(edPath, WithEd25519Key(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := edA.Record(Event{Agent: "kit", Tool: "t", Decision: "allow", KeyID: "forged"}); err != nil {
+		t.Fatal(err)
+	}
+	edA.Close()
+	edLines := readLines(t, edPath)
+	if got := edLines[0]["key_id"]; got != wantKeyID {
+		t.Errorf("Ed25519 trail key_id = %v, want %s (caller-forged value must be overwritten)", got, wantKeyID)
+	}
+	if edLines[0]["key_id"] == "forged" {
+		t.Fatal("caller-supplied key_id 'forged' must never survive into the Ed25519 line")
+	}
+}

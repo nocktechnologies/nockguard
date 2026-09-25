@@ -262,6 +262,13 @@ func (a *Auditor) Record(ev Event) error {
 	if ev.SessionID == "" {
 		ev.SessionID = os.Getenv(nocklockSessionIDEnv)
 	}
+	// key_id is NEVER caller-supplied: a caller-set Event.KeyID is discarded
+	// unconditionally and only re-populated from the Auditor's own Ed25519 key.
+	// Trusting caller input here would let any caller forge a key_id in HMAC or
+	// unsigned mode (false attribution to a signing key that never signed
+	// anything), and would let a caller stamp the WRONG Ed25519 key_id even in
+	// Ed25519 mode.
+	ev.KeyID = ""
 	if a.edPriv != nil {
 		ev.KeyID = a.keyID
 	}
