@@ -147,6 +147,49 @@ func TestVerifyAllAgentsExitCodes(t *testing.T) {
 	})
 }
 
+// Zero audit trails means there is nothing to verify. That must never read as
+// PROTECTED: an empty (or wrong) audit dir is the absence of evidence, and a
+// verifier that reports it as clean is a silent success.
+func TestVerifyAll_ZeroTrailsIsNotProtected(t *testing.T) {
+	t.Run("text", func(t *testing.T) {
+		dir := t.TempDir()
+		code, stdout, stderr := runCommandForTest(t, "verify", "--all", "--audit-dir", dir)
+		if code == 0 {
+			t.Fatalf("exit code = 0 with zero trails, want non-zero\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if strings.Contains(stdout, "VERDICT: PROTECTED") {
+			t.Fatalf("zero trails must not print VERDICT: PROTECTED, got:\n%s", stdout)
+		}
+		if !strings.Contains(stdout, "VERDICT: NO_TRAILS") {
+			t.Fatalf("zero trails should print VERDICT: NO_TRAILS, got:\n%s", stdout)
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		dir := t.TempDir()
+		code, stdout, stderr := runCommandForTest(t, "verify", "--all", "--json", "--audit-dir", dir)
+		if code == 0 {
+			t.Fatalf("exit code = 0 with zero trails, want non-zero\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		var res verifyAllResult
+		if err := json.Unmarshal([]byte(stdout), &res); err != nil {
+			t.Fatalf("stdout is not verifyAllResult JSON: %v\n%s", err, stdout)
+		}
+		if res.Verdict == "PROTECTED" {
+			t.Fatalf("zero trails must not report verdict PROTECTED, got:\n%s", stdout)
+		}
+		if res.Verdict != "NO_TRAILS" {
+			t.Fatalf("verdict = %q, want NO_TRAILS\n%s", res.Verdict, stdout)
+		}
+		if res.AuditDir != dir {
+			t.Fatalf("audit_dir = %q, want %q", res.AuditDir, dir)
+		}
+		if res.Total != 0 {
+			t.Fatalf("total = %d, want 0", res.Total)
+		}
+	})
+}
+
 func TestEvidenceCommandVerifiesBackingTrail(t *testing.T) {
 	dir := t.TempDir()
 	path, pubHex := writeEd25519Trail(t, dir, "kit")
