@@ -26,8 +26,8 @@ import (
 //
 // Unified verdict: PROTECTED only when BOTH chains verify, BOTH hold at least
 // one row for the session, and BOTH tails are verified (Lock: the signed
-// chain_head anchors the walked chain; Guard: the signed .hwm sidecar exists
-// and matched). Otherwise the worst per-chain verdict by
+// chain_head anchors the walked chain; Guard: the signed .hwm checkpoint
+// covers every entry in the trail). Otherwise the worst per-chain verdict by
 // TAMPERED > UNVERIFIABLE > UNSIGNED > NO_ROWS > UNANCHORED.
 // Exit codes follow `verify`: 0 = PROTECTED, 2 = TAMPERED, 1 = anything else.
 
@@ -330,10 +330,10 @@ func readGuardSnapshot(path string, limit int64) (data []byte, exists bool, err 
 func verifyGuardSession(path string, pub ed25519.PublicKey, session string) sessionChainResult {
 	// The .hwm is snapshotted BEFORE the trail. audit.Auditor.Record appends
 	// the entry and only then advances the .hwm, so a checkpoint read first
-	// always describes a prefix of any trail read after it; the verifier
-	// accepts a trail longer than its checkpoint when the entry at the
-	// checkpoint's count matches. Reading in the other order lets a genuine
-	// append between the two reads pair a newer checkpoint with an older trail.
+	// always describes a prefix of any trail read after it. A concurrent append
+	// then reads as UNANCHORED (entries beyond the checkpoint), never PROTECTED.
+	// Reading in the other order lets a genuine append between the two reads
+	// pair a newer checkpoint with an older trail (a spurious TAMPERED).
 	hwm, _, err := readGuardSnapshot(path+".hwm", guardHWMSnapshotCap)
 	if err != nil {
 		return sessionChainResult{Path: path, KeyID: keyFingerprint(pub), Verdict: sessionVerdictUnverifiable,
@@ -370,12 +370,33 @@ func verifyGuardSnapshot(trail, hwm []byte, pub ed25519.PublicKey, session strin
 		}
 		return c
 	}
-	// The verifier enforced the .hwm check. It passes a trail with no sidecar
-	// only when the trail is empty, so require the sidecar explicitly.
-	if hwm != nil && n > 0 {
-		c.TailVerified = true
-	} else {
+	// The verifier already checked the .hwm signature, rejected a checkpoint
+	// count above the entries present (truncation), and matched the entry at
+	// the checkpoint's count. The tail is verified ONLY when the checkpoint
+	// covers every entry in the snapshot: entries past it (a writer mid-append,
+	// or a crash before the .hwm update) are signed but unanchored, so rows
+	// removed from that suffix could not be detected.
+	switch {
+	case hwm == nil || n == 0:
 		c.TailReason = "no signed .hwm sidecar: rows removed from the tail cannot be detected"
+	default:
+		var mark struct {
+			Count int `json:"count"`
+		}
+		if err := json.Unmarshal(bytes.TrimSpace(hwm), &mark); err != nil {
+			c.Verdict, c.Reason = sessionVerdictUnverifiable, fmt.Sprintf("guard .hwm: %v", err)
+			return c
+		}
+		switch {
+		case mark.Count == n:
+			c.TailVerified = true
+		case mark.Count < n:
+			c.TailReason = fmt.Sprintf("%d entries beyond the signed checkpoint (count %d); re-run once the writer is idle", n-mark.Count, mark.Count)
+		default:
+			// Unreachable: the verifier reports this as truncation. Never pass it.
+			c.Verdict, c.Reason = sessionVerdictTampered, fmt.Sprintf("signed checkpoint count %d exceeds the %d entries in the trail", mark.Count, n)
+			return c
+		}
 	}
 
 	// Select the session's lines from the exact bytes just verified, split the
@@ -440,7 +461,7 @@ func printSessionResult(res sessionVerifyResult) {
 		fmt.Printf("            %s\n", l.Reason)
 	}
 	g := res.Guard
-	fmt.Printf("  NockGuard %-12s %d of %d entries, %s  %s\n", g.Verdict, g.Rows, g.EntriesVerified, tail(g, "signed .hwm"), g.Path)
+	fmt.Printf("  NockGuard %-12s %d of %d entries, %s  %s\n", g.Verdict, g.Rows, g.EntriesVerified, tail(g, "signed .hwm covers every entry"), g.Path)
 	fmt.Printf("            key %s\n", g.KeyID)
 	if g.Reason != "" {
 		fmt.Printf("            %s\n", g.Reason)

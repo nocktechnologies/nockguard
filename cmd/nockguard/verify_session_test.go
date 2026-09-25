@@ -624,7 +624,62 @@ func TestSessionVerify_AppendBetweenSnapshotsIsNotTampered(t *testing.T) {
 	if opens != 2 {
 		t.Fatalf("guard snapshot opens = %d, want 2 (.hwm and trail, once each)", opens)
 	}
-	if code != 0 || got.Verdict != "PROTECTED" || got.Guard.Verdict != "INTACT" || got.Guard.Rows != 4 {
-		t.Fatalf("append between snapshots: exit=%d verdict=%s guard=%+v, want PROTECTED/INTACT with 4 session rows", code, got.Verdict, got.Guard)
+	// The appended entry lies beyond the checkpoint snapshotted first, so the
+	// Guard tail is not proven: UNANCHORED (exit 1), never TAMPERED or PROTECTED.
+	if code != 1 || got.Verdict != "UNANCHORED" || got.Guard.Verdict != "UNANCHORED" || got.Guard.Rows != 4 {
+		t.Fatalf("append between snapshots: exit=%d verdict=%s guard=%+v, want UNANCHORED/exit 1 with 4 session rows", code, got.Verdict, got.Guard)
+	}
+	if !strings.Contains(got.Guard.Reason, "beyond the signed checkpoint") {
+		t.Fatalf("UNANCHORED reason must name the entries beyond the checkpoint: %q", got.Guard.Reason)
+	}
+}
+
+// TestSessionVerify_RowsBeyondCheckpointAreUnanchored: a genuine, correctly
+// chained and signed entry sits past the .hwm count (a crash between the
+// append and the checkpoint update, or a writer mid-append). Every signature
+// verifies, but the suffix is not covered by the signed checkpoint, so the
+// Guard tail is UNANCHORED, including for a session that lives only there.
+func TestSessionVerify_RowsBeyondCheckpointAreUnanchored(t *testing.T) {
+	f := newSessionFixture(t)
+	oldHWM, err := os.ReadFile(f.guardPath + ".hwm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := audit.New(f.guardPath, audit.WithEd25519Key(f.guardPriv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Record(audit.Event{Agent: "coder", Tool: "Edit", Decision: "allow", SessionID: "session-c"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.Close()
+	if err := os.WriteFile(f.guardPath+".hwm", oldHWM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := audit.VerifyEd25519(f.guardPath, f.guardPub); err != nil || n != 5 {
+		t.Fatalf("fixture error: the suffix must be genuine (verifier passes 5 entries), n=%d err=%v", n, err)
+	}
+
+	out := requireVerdict(t, f.args(sessA), "UNANCHORED", 1)
+	if !strings.Contains(out, "1 entries beyond the signed checkpoint (count 4)") {
+		t.Fatalf("UNANCHORED output must name the suffix:\n%s", out)
+	}
+	// session-c has rows ONLY in the unanchored suffix; the Lock chain has none,
+	// so the unified verdict is the worse NO_ROWS, and the Guard side must still
+	// read UNANCHORED rather than INTACT.
+	code, stdout, _ := runCommandForTest(t, f.args("session-c", "--json")...)
+	var got struct {
+		Verdict string `json:"verdict"`
+		Guard   struct {
+			Verdict      string `json:"verdict"`
+			Rows         int    `json:"rows"`
+			TailVerified bool   `json:"tail_verified"`
+		} `json:"guard"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, stdout)
+	}
+	if code == 0 || got.Verdict == "PROTECTED" || got.Guard.Verdict != "UNANCHORED" || got.Guard.Rows != 1 || got.Guard.TailVerified {
+		t.Fatalf("suffix-only session: exit=%d %+v, want not PROTECTED with Guard UNANCHORED over 1 row", code, got)
 	}
 }
