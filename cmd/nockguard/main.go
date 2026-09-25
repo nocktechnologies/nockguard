@@ -641,7 +641,8 @@ func parseCommand(cmd string) []string {
 // in the audit dir — the "prove the whole fleet is accountable in one command"
 // path behind `nockguard verify --all`. Each trail is checked with that agent's
 // own public key (NOCKGUARD_AGENT_<NAME>_ED25519_PUB). Exit 0 = all intact,
-// 2 = any tampered, 1 = any trail it could not verify (missing/invalid key).
+// 2 = any tampered, 1 = any trail it could not verify (missing/invalid key) or
+// no trails found at all (verdict NO_TRAILS: nothing to verify is not protected).
 type verifyResult struct {
 	Verdict         string `json:"verdict"`
 	AuditPath       string `json:"audit_path,omitempty"`
@@ -690,13 +691,16 @@ func verifyAllAgents(auditDir string, jsonOutput bool) int {
 		return 1
 	}
 	if len(matches) == 0 {
+		// Nothing to verify is the absence of evidence, never PROTECTED.
+		// Same exit class as UNVERIFIABLE: we could not verify anything.
 		if jsonOutput {
-			writeJSON(verifyAllResult{Verdict: "PROTECTED", AuditDir: baseDir})
+			writeJSON(verifyAllResult{Verdict: "NO_TRAILS", AuditDir: baseDir, Trails: []verifyTrailResult{}})
 		} else {
 			fmt.Printf("No per-agent audit trails (*%s) found in %s\n", suffix, baseDir)
-			fmt.Println("VERDICT: PROTECTED")
+			fmt.Println("Nothing to verify: an empty audit dir is not evidence of protection.")
+			fmt.Println("VERDICT: NO_TRAILS")
 		}
-		return 0
+		return 1
 	}
 	var intact, tampered, unverifiable int
 	results := make([]verifyTrailResult, 0, len(matches))
@@ -1444,7 +1448,7 @@ Examples:
   nockguard keygen --agent coder                        # generate per-agent keypair
   nockguard verify --agent coder                        # prove coder's trail is intact + non-repudiable (exit 0 = clean, 2 = tampered)
   nockguard selftest --policy policy.yaml               # prove the firewall BLOCKS a denied tool + catches a secret (exit 0 = proven, 2 = gap)
-  nockguard verify --all                                # prove EVERY per-agent trail in ~/.nockguard/logs in one command
+  nockguard verify --all                                # prove EVERY per-agent trail in ~/.nockguard/logs in one command (exit 0 = all intact, 2 = tampered, 1 = unverifiable or no trails found)
   nockguard policy propose --agent coder                 # derive a shadow allowlist from coder's observed allowed tools
   nockguard policy shadow-report --agent coder           # count shadow would-deny misses by tool
   nockguard evidence --framework soc2 --agent coder -o coder-soc2.html   # SOC2 pack for coder's signed trail
