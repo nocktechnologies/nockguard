@@ -159,6 +159,24 @@ nockguard verify --all          # every per-agent trail in one shot — prove th
 
 `--all` scans the audit dir for every `<agent>.audit.jsonl`, verifies each with that agent's own public key, and prints a per-agent summary (exit 0 = all intact, 2 = any tampered, 1 = any it could not verify). An audit dir with **zero** trails is not "protected": there is nothing to verify, so `--all` prints `VERDICT: NO_TRAILS` and exits 1. That single command replays the whole hash chain and the per-entry signatures: it proves the trail was not edited, reordered, truncated, or signed by anyone but the holder of the agent's private key. `verify` is the first-class form of `audit verify` (below), which documents HMAC vs Ed25519 signing, per-agent keys, and the compliance evidence packs.
 
+### One verdict for a session across NockGuard and NockLock
+
+When an agent runs under `nocklock wrap`, NockLock records the session in its own signed SQLite log and NockGuard stamps the same `session_id` (and its signing key's `key_id`) on every trail line. `verify --session` checks both chains for that session and gives one verdict:
+
+```bash
+nockguard verify --session <id> \
+  --lock-db <path/to/nocklock/events.db> \
+  --guard-trail <path/to/agent.audit.jsonl> \
+  --lock-pub-env NOCKLOCK_PUB --guard-pub-env NOCKGUARD_PUB    # or --pub-env <ENV> when one key signs both
+```
+
+- Paths are explicit. There is no discovery, and a missing flag, an unset key variable, or an unreadable file is a failure (exit 1), never a pass.
+- The NockLock side runs nocklock's own public verifier (`pkg/receipt`): every row's hash link, the session rows' signatures, and the signed chain head, which must anchor exactly the chain on disk.
+- The NockGuard side verifies the **whole** trail with the same Ed25519 verifier as `verify`, including the signed `.hwm` truncation check, then selects the lines whose `session_id` matches. A line whose `key_id` names a different key than the one supplied is `TAMPERED`.
+- `PROTECTED` (exit 0) needs both chains intact, at least one row for the session in each, and both tails verified. Otherwise the verdict is the worst of the two: `TAMPERED` (exit 2) > `UNVERIFIABLE` > `UNSIGNED` > `NO_ROWS` > `UNANCHORED` (all exit 1).
+- Both key fingerprints (`hex(sha256(pub))`) are printed; `--json` gives the verdict plus per-chain detail.
+- Not covered: rolling a whole chain back **together with** its signed head (chain_head or `.hwm`) to an earlier genuine state passes every local check. Only `nocklock verify --against-remote-anchor` detects that, and only for the NockLock chain.
+
 ## Prove the firewall BLOCKS — `selftest`
 
 `verify` proves the audit **trail** is intact. But a firewall can keep a flawless trail while silently forwarding every call — an intact record of an open door. `selftest` closes that gap: it proves the live **enforcement** path actually blocks.
