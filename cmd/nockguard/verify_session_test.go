@@ -582,3 +582,49 @@ func TestSessionVerify_GuardSymlinkRefused(t *testing.T) {
 		t.Fatalf("symlinked trail must be refused as a symlink:\n%s", out)
 	}
 }
+
+// TestSessionVerify_AppendBetweenSnapshotsIsNotTampered: a genuine Record
+// (entry append, then .hwm advance) lands between the two Guard snapshot reads.
+// That is legitimate concurrent writing, not tampering, so the verdict must be
+// PROTECTED with the rows of the trail snapshot.
+func TestSessionVerify_AppendBetweenSnapshotsIsNotTampered(t *testing.T) {
+	f := newSessionFixture(t)
+	opens := 0
+	orig := guardSnapshotOpen
+	t.Cleanup(func() { guardSnapshotOpen = orig })
+	guardSnapshotOpen = func(name string) (*os.File, error) {
+		opens++
+		if opens == 2 {
+			// The first snapshot is taken; the second is not yet opened.
+			a, err := audit.New(f.guardPath, audit.WithEd25519Key(f.guardPriv))
+			if err != nil {
+				t.Errorf("audit.New for concurrent append: %v", err)
+			} else {
+				if err := a.Record(audit.Event{Agent: "coder", Tool: "Edit", Decision: "allow", SessionID: sessA}); err != nil {
+					t.Errorf("concurrent Record: %v", err)
+				}
+				_ = a.Close()
+			}
+		}
+		return orig(name)
+	}
+
+	code, stdout, stderr := runCommandForTest(t, f.args(sessA, "--json")...)
+	var got struct {
+		Verdict string `json:"verdict"`
+		Guard   struct {
+			Verdict string `json:"verdict"`
+			Rows    int    `json:"rows"`
+			Reason  string `json:"reason"`
+		} `json:"guard"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s\n%s", err, stdout, stderr)
+	}
+	if opens != 2 {
+		t.Fatalf("guard snapshot opens = %d, want 2 (.hwm and trail, once each)", opens)
+	}
+	if code != 0 || got.Verdict != "PROTECTED" || got.Guard.Verdict != "INTACT" || got.Guard.Rows != 4 {
+		t.Fatalf("append between snapshots: exit=%d verdict=%s guard=%+v, want PROTECTED/INTACT with 4 session rows", code, got.Verdict, got.Guard)
+	}
+}

@@ -328,6 +328,17 @@ func readGuardSnapshot(path string, limit int64) (data []byte, exists bool, err 
 // and hands those bytes to verifyGuardSnapshot. The trail path is never
 // reopened, so nothing can be swapped between verification and selection.
 func verifyGuardSession(path string, pub ed25519.PublicKey, session string) sessionChainResult {
+	// The .hwm is snapshotted BEFORE the trail. audit.Auditor.Record appends
+	// the entry and only then advances the .hwm, so a checkpoint read first
+	// always describes a prefix of any trail read after it; the verifier
+	// accepts a trail longer than its checkpoint when the entry at the
+	// checkpoint's count matches. Reading in the other order lets a genuine
+	// append between the two reads pair a newer checkpoint with an older trail.
+	hwm, _, err := readGuardSnapshot(path+".hwm", guardHWMSnapshotCap)
+	if err != nil {
+		return sessionChainResult{Path: path, KeyID: keyFingerprint(pub), Verdict: sessionVerdictUnverifiable,
+			Reason: fmt.Sprintf("cannot read guard .hwm sidecar: %v", err)}
+	}
 	trail, exists, err := readGuardSnapshot(path, guardTrailSnapshotCap)
 	if err == nil && !exists {
 		err = fmt.Errorf("%s does not exist", path)
@@ -335,11 +346,6 @@ func verifyGuardSession(path string, pub ed25519.PublicKey, session string) sess
 	if err != nil {
 		return sessionChainResult{Path: path, KeyID: keyFingerprint(pub), Verdict: sessionVerdictUnverifiable,
 			Reason: fmt.Sprintf("cannot read guard trail: %v", err)}
-	}
-	hwm, _, err := readGuardSnapshot(path+".hwm", guardHWMSnapshotCap)
-	if err != nil {
-		return sessionChainResult{Path: path, KeyID: keyFingerprint(pub), Verdict: sessionVerdictUnverifiable,
-			Reason: fmt.Sprintf("cannot read guard .hwm sidecar: %v", err)}
 	}
 	c := verifyGuardSnapshot(trail, hwm, pub, session)
 	c.Path = path
