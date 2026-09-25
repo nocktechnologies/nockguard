@@ -455,3 +455,130 @@ func TestSessionVerify_JSON(t *testing.T) {
 		t.Fatalf("json tampered: exit=%d %+v", code, got)
 	}
 }
+
+// forgedSessionLine is a session-a line that no key signed.
+func forgedSessionLine(t *testing.T) []byte {
+	t.Helper()
+	b, err := json.Marshal(audit.Event{Time: "2026-09-25T12:00:09Z", Agent: "coder", Tool: "Bash", Decision: "allow", SessionID: sessA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(b, '\n')
+}
+
+func TestSessionVerify_SnapshotVerifyAndSelectSameBytes(t *testing.T) {
+	f := newSessionFixture(t)
+	trail, err := os.ReadFile(f.guardPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hwm, err := os.ReadFile(f.guardPath + ".hwm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := verifyGuardSnapshot(trail, hwm, f.guardPub, sessA); c.Verdict != "INTACT" || c.Rows != 3 || !c.TailVerified {
+		t.Fatalf("genuine snapshot: %+v, want INTACT/3 rows/tail verified", c)
+	}
+	lines := strings.SplitAfter(strings.TrimRight(string(trail), "\n"), "\n")
+
+	// Same line count, one genuine line replaced by an unsigned session line:
+	// the swap an attacker would stage between verify and select.
+	swapped := strings.Join(append(append([]string{}, lines[:2]...), append([]string{string(forgedSessionLine(t))}, lines[3:]...)...), "")
+	if c := verifyGuardSnapshot([]byte(swapped), hwm, f.guardPub, sessA); c.Verdict == "INTACT" || c.Verdict != "TAMPERED" {
+		t.Fatalf("unsigned session line in the snapshot: %+v, want TAMPERED", c)
+	}
+
+	// An extra unsigned session line inserted mid-trail.
+	inserted := strings.Join(append(append([]string{}, lines[:1]...), append([]string{string(forgedSessionLine(t))}, lines[1:]...)...), "")
+	if c := verifyGuardSnapshot([]byte(inserted), hwm, f.guardPub, sessA); c.Verdict != "TAMPERED" {
+		t.Fatalf("inserted unsigned session line: %+v, want TAMPERED", c)
+	}
+
+	// A session line validly signed, but by another key.
+	_, otherPriv, _ := ed25519.GenerateKey(nil)
+	other := filepath.Join(f.dir, "other.audit.jsonl")
+	writeHandSignedGuardTrail(t, other, otherPriv, []audit.Event{
+		{Time: "2026-09-25T12:00:00Z", Agent: "coder", Tool: "Bash", Decision: "allow", SessionID: sessA},
+	})
+	ob, _ := os.ReadFile(other)
+	oh, _ := os.ReadFile(other + ".hwm")
+	if c := verifyGuardSnapshot(ob, oh, f.guardPub, sessA); c.Verdict != "TAMPERED" {
+		t.Fatalf("session line signed by another key: %+v, want TAMPERED", c)
+	}
+
+	// Rows present but the sidecar missing from the snapshot.
+	if c := verifyGuardSnapshot(trail, nil, f.guardPub, sessA); c.Verdict != "TAMPERED" {
+		t.Fatalf("snapshot without .hwm: %+v, want TAMPERED", c)
+	}
+}
+
+// TestSessionVerify_GuardTrailReadOnce swaps the trail on disk the instant it is
+// opened (rename over the path, same line count, forged session rows) and
+// deletes the .hwm the instant it is opened. The verdict must reflect the one
+// snapshot taken, and each Guard path must be opened exactly once.
+func TestSessionVerify_GuardTrailReadOnce(t *testing.T) {
+	f := newSessionFixture(t)
+	genuine, err := os.ReadFile(f.guardPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Forged replacement: 4 lines like the genuine trail, all unsigned session-a.
+	forged := filepath.Join(f.dir, "forged.jsonl")
+	var fb []byte
+	for i := 0; i < strings.Count(string(genuine), "\n"); i++ {
+		fb = append(fb, forgedSessionLine(t)...)
+	}
+	if err := os.WriteFile(forged, fb, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opens := map[string]int{}
+	orig := guardSnapshotOpen
+	t.Cleanup(func() { guardSnapshotOpen = orig })
+	guardSnapshotOpen = func(name string) (*os.File, error) {
+		fh, err := orig(name)
+		opens[name]++
+		switch name {
+		case f.guardPath:
+			if rerr := os.Rename(forged, f.guardPath); rerr != nil {
+				t.Errorf("swap trail: %v", rerr)
+			}
+		case f.guardPath + ".hwm":
+			if rerr := os.Remove(name); rerr != nil {
+				t.Errorf("remove hwm: %v", rerr)
+			}
+		}
+		return fh, err
+	}
+
+	code, stdout, stderr := runCommandForTest(t, f.args(sessA, "--json")...)
+	var got struct {
+		Verdict string `json:"verdict"`
+		Guard   struct {
+			Verdict string `json:"verdict"`
+			Rows    int    `json:"rows"`
+		} `json:"guard"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s\n%s", err, stdout, stderr)
+	}
+	if opens[f.guardPath] != 1 || opens[f.guardPath+".hwm"] != 1 {
+		t.Fatalf("guard files opened %v, want each exactly once", opens)
+	}
+	if code != 0 || got.Verdict != "PROTECTED" || got.Guard.Verdict != "INTACT" || got.Guard.Rows != 3 {
+		t.Fatalf("verdict must reflect the snapshot (PROTECTED, 3 genuine rows), got exit=%d %+v\n%s", code, got, stdout)
+	}
+}
+
+func TestSessionVerify_GuardSymlinkRefused(t *testing.T) {
+	f := newSessionFixture(t)
+	link := filepath.Join(f.dir, "link.audit.jsonl")
+	if err := os.Symlink(f.guardPath, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	f.guardPath = link
+	out := requireVerdict(t, f.args(sessA), "UNVERIFIABLE", 1)
+	if !strings.Contains(out, "symlink") {
+		t.Fatalf("symlinked trail must be refused as a symlink:\n%s", out)
+	}
+}

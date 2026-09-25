@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/nocktechnologies/nocklock/pkg/receipt"
@@ -269,23 +270,90 @@ func verifyLockSession(dbPath string, pub ed25519.PublicKey, session string) ses
 	return c
 }
 
-// verifyGuardSession verifies the WHOLE Guard trail with audit.VerifyEd25519
-// (every line's signature, the chain, and the signed .hwm tail check), then
-// selects the lines whose session_id equals session. The Guard verifier cannot
-// yield UNSIGNED: an unsigned line is a chain break (TAMPERED) there.
-func verifyGuardSession(path string, pub ed25519.PublicKey, session string) sessionChainResult {
-	c := sessionChainResult{Path: path, KeyID: keyFingerprint(pub)}
-	fi, err := os.Stat(path)
-	if err != nil {
-		c.Verdict, c.Reason = sessionVerdictUnverifiable, fmt.Sprintf("cannot read guard trail: %v", err)
-		return c
-	}
-	if !fi.Mode().IsRegular() {
-		c.Verdict, c.Reason = sessionVerdictUnverifiable, "guard trail is not a regular file"
-		return c
-	}
+// Guard snapshot caps. The trail cap is a multiple of the per-line cap the
+// verifier already enforces (audit.MaxTrailLineBytes); the .hwm sidecar is a
+// single small JSON object.
+const (
+	guardTrailSnapshotCap = 64 * audit.MaxTrailLineBytes
+	guardHWMSnapshotCap   = 64 * 1024
+)
 
-	n, verr := audit.VerifyEd25519(path, pub)
+// guardSnapshotOpen opens a Guard file for the one snapshot read. A package
+// var only so tests can count opens; production is os.Open.
+var guardSnapshotOpen = os.Open
+
+// readGuardSnapshot reads path into memory exactly once. It refuses symlinks
+// and non-regular files, and refuses a file swapped between the Lstat and the
+// open. exists is false (with a nil error) only when path does not exist.
+func readGuardSnapshot(path string, limit int64) (data []byte, exists bool, err error) {
+	lfi, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if lfi.Mode()&os.ModeSymlink != 0 {
+		return nil, true, fmt.Errorf("%s is a symlink; refusing to follow it", path)
+	}
+	if !lfi.Mode().IsRegular() {
+		return nil, true, fmt.Errorf("%s is not a regular file", path)
+	}
+	f, err := guardSnapshotOpen(path)
+	if err != nil {
+		return nil, true, err
+	}
+	defer f.Close()
+	ofi, err := f.Stat()
+	if err != nil {
+		return nil, true, err
+	}
+	if !os.SameFile(lfi, ofi) {
+		return nil, true, fmt.Errorf("%s was replaced while being opened", path)
+	}
+	data, err = io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, true, err
+	}
+	if int64(len(data)) > limit {
+		return nil, true, fmt.Errorf("%s exceeds the %d-byte snapshot cap", path, limit)
+	}
+	if data == nil {
+		data = []byte{}
+	}
+	return data, true, nil
+}
+
+// verifyGuardSession snapshots the Guard trail and its .hwm sidecar ONCE each
+// and hands those bytes to verifyGuardSnapshot. The trail path is never
+// reopened, so nothing can be swapped between verification and selection.
+func verifyGuardSession(path string, pub ed25519.PublicKey, session string) sessionChainResult {
+	trail, exists, err := readGuardSnapshot(path, guardTrailSnapshotCap)
+	if err == nil && !exists {
+		err = fmt.Errorf("%s does not exist", path)
+	}
+	if err != nil {
+		return sessionChainResult{Path: path, KeyID: keyFingerprint(pub), Verdict: sessionVerdictUnverifiable,
+			Reason: fmt.Sprintf("cannot read guard trail: %v", err)}
+	}
+	hwm, _, err := readGuardSnapshot(path+".hwm", guardHWMSnapshotCap)
+	if err != nil {
+		return sessionChainResult{Path: path, KeyID: keyFingerprint(pub), Verdict: sessionVerdictUnverifiable,
+			Reason: fmt.Sprintf("cannot read guard .hwm sidecar: %v", err)}
+	}
+	c := verifyGuardSnapshot(trail, hwm, pub, session)
+	c.Path = path
+	return c
+}
+
+// verifyGuardSnapshot verifies the WHOLE trail snapshot with
+// audit.VerifyEd25519Bytes (every line's signature, the chain, and the signed
+// .hwm tail check; hwm is nil when the sidecar is absent), then selects the
+// session's lines by scanning the SAME trail slice. The Guard verifier cannot
+// yield UNSIGNED: an unsigned line is a chain break (TAMPERED) there.
+func verifyGuardSnapshot(trail, hwm []byte, pub ed25519.PublicKey, session string) sessionChainResult {
+	c := sessionChainResult{KeyID: keyFingerprint(pub)}
+	n, verr := audit.VerifyEd25519Bytes(trail, hwm, pub)
 	c.EntriesVerified = n
 	if verr != nil {
 		c.Reason = verr.Error()
@@ -296,22 +364,17 @@ func verifyGuardSession(path string, pub ed25519.PublicKey, session string) sess
 		}
 		return c
 	}
-	// VerifyEd25519 enforced the .hwm check. It passes a trail with no sidecar
+	// The verifier enforced the .hwm check. It passes a trail with no sidecar
 	// only when the trail is empty, so require the sidecar explicitly.
-	if hfi, herr := os.Stat(path + ".hwm"); herr == nil && hfi.Mode().IsRegular() && n > 0 {
+	if hwm != nil && n > 0 {
 		c.TailVerified = true
 	} else {
 		c.TailReason = "no signed .hwm sidecar: rows removed from the tail cannot be detected"
 	}
 
-	// Select the session's lines from the trail just verified.
-	f, err := os.Open(path)
-	if err != nil {
-		c.Verdict, c.Reason = sessionVerdictUnverifiable, fmt.Sprintf("re-read guard trail: %v", err)
-		return c
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
+	// Select the session's lines from the exact bytes just verified, split the
+	// same way the verifier split them.
+	sc := bufio.NewScanner(bytes.NewReader(trail))
 	sc.Buffer(make([]byte, 0, 64*1024), audit.MaxTrailLineBytes)
 	line := 0
 	for sc.Scan() {
@@ -322,7 +385,7 @@ func verifyGuardSession(path string, pub ed25519.PublicKey, session string) sess
 		line++
 		var ev audit.Event
 		if err := json.Unmarshal(raw, &ev); err != nil {
-			c.Verdict, c.Reason = sessionVerdictTampered, fmt.Sprintf("line %d: invalid json on re-read: %v", line, err)
+			c.Verdict, c.Reason = sessionVerdictTampered, fmt.Sprintf("line %d: invalid json: %v", line, err)
 			return c
 		}
 		// The whole trail verified under one key, so a key_id naming any other
@@ -342,12 +405,7 @@ func verifyGuardSession(path string, pub ed25519.PublicKey, session string) sess
 		}
 	}
 	if err := sc.Err(); err != nil {
-		c.Verdict, c.Reason = sessionVerdictUnverifiable, fmt.Sprintf("re-read guard trail: %v", err)
-		return c
-	}
-	if line != n {
-		// The file changed between verification and selection.
-		c.Verdict, c.Reason = sessionVerdictUnverifiable, fmt.Sprintf("guard trail changed during verification (%d lines verified, %d re-read)", n, line)
+		c.Verdict, c.Reason = sessionVerdictUnverifiable, fmt.Sprintf("scan guard snapshot: %v", err)
 		return c
 	}
 	switch {
