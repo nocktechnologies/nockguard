@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -352,6 +353,70 @@ func TestHTTPToolDiscoverySSEBodylessStatusFailsClosed(t *testing.T) {
 				t.Fatalf("upstream %d: connector body is not a JSON-RPC error: %q", upstreamStatus, w.Body.String())
 			}
 		})
+	}
+}
+
+// blockingReadCloser never returns from Read until Close is called, at which
+// point Read reports io.EOF. It models what a Go HTTP client hands back for a
+// 101 Switching Protocols response: resp.Body IS the upgraded bidirectional
+// connection, so reading it (e.g. via io.Copy) blocks until the far end closes
+// the connection — which for an upgraded stream may be never.
+type blockingReadCloser struct {
+	done   chan struct{}
+	closed atomic.Bool
+}
+
+func newBlockingReadCloser() *blockingReadCloser {
+	return &blockingReadCloser{done: make(chan struct{})}
+}
+
+func (b *blockingReadCloser) Read(p []byte) (int, error) {
+	<-b.done
+	return 0, io.EOF
+}
+
+func (b *blockingReadCloser) Close() error {
+	if b.closed.CompareAndSwap(false, true) {
+		close(b.done)
+	}
+	return nil
+}
+
+// TestHTTPToolDiscoverySSESwitchingProtocolsClosesNotDrains verifies that a
+// 101 Switching Protocols response under Content-Type: text/event-stream is
+// closed, not drained: statusHasNoBody treats 101 as bodyless, but a Go HTTP
+// client exposes a 101 response body as the live upgraded connection, so
+// draining it with io.Copy would block until the upstream closes it — hanging
+// this request and, with it, every later request's audit behind the
+// still-unresolved sequence (forward() only resolves after forwardToolList
+// returns). closing the body instead must let this return promptly.
+func TestHTTPToolDiscoverySSESwitchingProtocolsClosesNotDrains(t *testing.T) {
+	body := newBlockingReadCloser()
+	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
+	l := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
+	w := httptest.NewRecorder()
+	resp := &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: body}
+
+	done := make(chan struct{})
+	go func() {
+		l.forwardToolList(w, resp, []byte(discoveryRequest), json.RawMessage("9007199254740993"), 0, func() {})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatalf("forwardToolList blocked on a 101 Switching Protocols body instead of closing it")
+	}
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (JSON-RPC error body)", w.Code)
+	}
+	if !json.Valid(w.Body.Bytes()) || !strings.Contains(w.Body.String(), `"error"`) {
+		t.Fatalf("body is not a JSON-RPC error: %q", w.Body.String())
+	}
+	if !body.closed.Load() {
+		t.Fatalf("upstream 101 body was never closed")
 	}
 }
 

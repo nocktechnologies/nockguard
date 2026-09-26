@@ -44,9 +44,15 @@ func (l *HTTPListener) forwardToolList(w http.ResponseWriter, resp *http.Respons
 			// connector would get an unusable empty response and never see the
 			// invalid() event streamToolList would otherwise emit. Fail closed
 			// the same way the JSON path handles out==nil: a JSON-RPC error over
-			// application/json with HTTP 200, draining the (absent) upstream
-			// body instead of trying to stream it.
-			_, _ = io.Copy(io.Discard, resp.Body)
+			// application/json with HTTP 200. statusHasNoBody also covers 101
+			// Switching Protocols, where a Go HTTP client hands back the
+			// upgraded bidirectional connection AS resp.Body — draining it with
+			// io.Copy would block until the upstream closes it, hanging this
+			// request and, with it, every later request's audit behind the
+			// still-unresolved sequence. Close it instead of reading it; the
+			// caller's own deferred resp.Body.Close() is then a harmless second
+			// close.
+			_ = resp.Body.Close()
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(invalid())
