@@ -4,6 +4,12 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Added
+- `mcp-gateway`: a loopback OAuth resource gateway with authenticated token
+  introspection, fixed agent identity, isolated bounded MCP sessions, shared
+  quotas and separate upstream Agent credentials. Requires Ed25519 audit
+  signing; includes local integration coverage and deployment prerequisites.
+
 ## [0.2.0] - 2026-09-26
 
 ### Fixed

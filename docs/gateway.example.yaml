@@ -1,0 +1,16 @@
+# Template only. The issuer, upstream Agent authentication and HTTPS ingress
+# must be provisioned before use. No live NockCC cutover is implied.
+listen: 127.0.0.1:8791
+resource: https://guard.example/mcp
+issuer: https://issuer.example
+introspection_url: https://issuer.example/oauth/introspect
+introspection_auth_header: X-Agent-Token
+introspection_token_env: NOCKGUARD_INTROSPECTION_TOKEN
+subject: operator-subject-id
+client_id: registered-claude-client-id
+scope: mcp
+agent: mira
+policy: /etc/nockguard/policy.yaml
+upstream: https://upstream.example/mcp
+upstream_token_env: NOCKGUARD_UPSTREAM_AGENT_TOKEN
+allowed_origins: []

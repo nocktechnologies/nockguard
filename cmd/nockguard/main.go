@@ -116,6 +116,9 @@ func runCLI(args []string) int {
 	if args[0] == "mcp-listen" {
 		return runMCPListen(args[1:])
 	}
+	if args[0] == "mcp-gateway" {
+		return runMCPGateway(args[1:])
+	}
 
 	if args[0] == "mcp-http" {
 		return runMCPHTTP(args[1:])
@@ -1405,6 +1408,7 @@ Usage:
   nockguard proxy --upstream <command> --agent <name> [--policy <path>]
   nockguard mcp-http --upstream <url> --agent <name> [--policy <path>] [--auth-env <ENV>]
   nockguard mcp-listen --listen 127.0.0.1:<port> --upstream <url> --agent <name> [--policy <path>] [--audit <path>]
+  nockguard mcp-gateway --config <path>  (OAuth resource behind a loopback HTTPS ingress)
   nockguard egress-proxy --listen <addr> --agent <name> --policy <path> [--audit <path>] [--enforce]
   nockguard verify (--all | --agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
   nockguard verify --session <id> --lock-db <path> --guard-trail <path> (--pub-env <ENV> | --lock-pub-env <ENV> --guard-pub-env <ENV>) [--json]
