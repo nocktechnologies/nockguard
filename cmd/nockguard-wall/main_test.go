@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -288,12 +289,15 @@ func TestHandleExportCSV(t *testing.T) {
 	if len(recs) != 2 { // header + 1 filtered row
 		t.Fatalf("csv rows: got %d want 2 (header + block row)", len(recs))
 	}
-	if got := strings.Join(recs[0], ","); got != "ts,agent,tool,decision,severity,reason" {
+	if got := strings.Join(recs[0], ","); got != "ts,agent,tool,decision,severity,reason,verification" {
 		t.Fatalf("csv header: got %q", got)
 	}
 	// The block row's reason "=DANGER()" must be prefixed with a quote.
 	if reason := recs[1][5]; reason != "'=DANGER()" {
 		t.Fatalf("formula injection not neutralised: reason=%q", reason)
+	}
+	if verification := recs[1][6]; verification != "unsigned" {
+		t.Fatalf("unsigned CSV verification = %q, want unsigned", verification)
 	}
 	// Server parity: exported data rows == pulse Total for the same filter.
 	total := computePulse(loadEvents(b.auditPath), "", "block", "", nil, nil).Total
@@ -340,6 +344,506 @@ func TestHandleExportJSON(t *testing.T) {
 	if out[0].Severity == "" {
 		t.Fatalf("expected derived severity on exported event, got empty")
 	}
+	if out[0].Verification != "unsigned" {
+		t.Fatalf("unsigned export verification = %q, want unsigned", out[0].Verification)
+	}
+}
+
+// TestHandleExportMarksTamperedRowsFailed proves the exported receipt is
+// calculated when the export is requested, rather than reusing an old UI badge.
+// A changed middle record must remain in the export and be explicitly failed.
+func TestHandleExportMarksTamperedRowsFailed(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(string(data), `"decision":"block"`, `"decision":"allow"`, 1)
+	if tampered == string(data) {
+		t.Fatal("tamper replacement did not change the trail")
+	}
+	if err := os.WriteFile(path, []byte(tampered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("NOCKGUARD_TEST_EXPORT_PUB", hex.EncodeToString(pub))
+	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "")
+	if err != nil {
+		t.Fatalf("newVerifier: %v", err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = v
+
+	req := httptest.NewRequest(http.MethodGet, "/export?format=json", nil).WithContext(t.Context())
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, req)
+
+	var out []event
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode export: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("exported rows = %d, want 3", len(out))
+	}
+	if got := out[0].Verification; got != "verified" {
+		t.Fatalf("first intact row verification = %q, want verified", got)
+	}
+	if got := out[1].Verification; got != "failed" {
+		t.Fatalf("tampered export row verification = %q, want failed", got)
+	}
+}
+
+func TestHandleExportMarksUnchangedRowsVerified(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+
+	out := exportJSON(t, path, pub, nil, nil)
+	if len(out) != 3 {
+		t.Fatalf("exported rows = %d, want 3", len(out))
+	}
+	for i, ev := range out {
+		if ev.Verification != "verified" {
+			t.Fatalf("row %d verification = %q, want verified", i+1, ev.Verification)
+		}
+	}
+}
+
+func TestHandleExportHMACSnapshot(t *testing.T) {
+	key := []byte("test-export-hmac-key-32-bytes-pad")
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeHMACTrail(t, path, key, sampleTrailEvents())
+
+	t.Setenv("NOCKGUARD_TEST_EXPORT_HMAC", string(key))
+	v, err := newVerifier("", "NOCKGUARD_TEST_EXPORT_HMAC")
+	if err != nil {
+		t.Fatalf("newVerifier: %v", err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = v
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json", nil).WithContext(t.Context()))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("export status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out []event
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode export: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("exported rows = %d, want 3", len(out))
+	}
+	for i, ev := range out {
+		if ev.Verification != "verified" {
+			t.Fatalf("HMAC row %d verification = %q, want verified", i+1, ev.Verification)
+		}
+	}
+}
+
+func TestHandleExportUsesOneTrailSnapshotAcrossRotation(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+
+	replacement := []byte(`{"ts":"new","agent":"mallory","tool":"Rotate","decision":"allow"}` + "\n")
+	// Negative control: the former two-read sequence verifies the old file, then
+	// loads the replacement at line 1 and falsely calls that new row verified.
+	t.Setenv("NOCKGUARD_TEST_EXPORT_PUB", hex.EncodeToString(pub))
+	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "")
+	if err != nil {
+		t.Fatalf("newVerifier: %v", err)
+	}
+	stale := v.verify(path)
+	if err := os.WriteFile(path, replacement, 0o644); err != nil {
+		t.Fatalf("install negative-control replacement: %v", err)
+	}
+	rotated := loadEvents(path)
+	if len(rotated) != 1 || exportVerification(stale, rotated[0].auditLine) != "verified" {
+		t.Fatal("negative control did not reproduce stale-snapshot false verification")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove negative-control replacement: %v", err)
+	}
+	if err := os.Remove(path + ".hwm"); err != nil {
+		t.Fatalf("remove negative-control checkpoint: %v", err)
+	}
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+
+	out := exportJSON(t, path, pub, nil, func() {
+		if err := os.WriteFile(path, replacement, 0o644); err != nil {
+			t.Fatalf("rotate trail: %v", err)
+		}
+	})
+	if len(out) != 3 {
+		t.Fatalf("exported snapshot rows = %d, want 3", len(out))
+	}
+	for i, ev := range out {
+		if ev.Agent == "mallory" {
+			t.Fatal("replacement row was exported from outside the verified snapshot")
+		}
+		if ev.Verification != "verified" {
+			t.Fatalf("snapshot row %d verification = %q, want verified", i+1, ev.Verification)
+		}
+	}
+}
+
+func TestHandleExportDoesNotIncludeAppendAfterSnapshot(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+
+	out := exportJSON(t, path, pub, nil, func() {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatalf("open trail for append: %v", err)
+		}
+		defer f.Close()
+		if _, err := f.WriteString(`{"ts":"later","agent":"eve","tool":"Append","decision":"allow"}` + "\n"); err != nil {
+			t.Fatalf("append trail: %v", err)
+		}
+	})
+	for i, ev := range out {
+		if ev.Agent == "eve" {
+			t.Fatal("post-snapshot append was exported without verification")
+		}
+		if ev.Verification != "verified" {
+			t.Fatalf("snapshot row %d verification = %q, want verified", i+1, ev.Verification)
+		}
+	}
+	if got := exportVerification(verifyReport{ChainIntact: boolptr(true), EntriesVerified: len(out)}, len(out)+1); got != "unsigned" {
+		t.Fatalf("post-snapshot row verification = %q, want unsigned", got)
+	}
+}
+
+// TestHandleExportReadsCheckpointBeforeTrail proves a normal append cannot
+// pair an older trail with a newer checkpoint, which would falsely report a
+// truncated/tampered chain. The negative control constructs that unsafe pair.
+func TestHandleExportReadsCheckpointBeforeTrail(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+	oldTrail, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := exportJSON(t, path, pub, func() {
+		appendSignedTrail(t, path, priv, audit.Event{Agent: "eve", Tool: "Append", Decision: "allow"})
+		newHWM, err := os.ReadFile(path + ".hwm")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := audit.VerifyEd25519Bytes(oldTrail, newHWM, pub); err == nil {
+			t.Fatal("negative control accepted an old trail with a newer checkpoint")
+		}
+	}, nil)
+	if len(out) != 4 {
+		t.Fatalf("exported rows = %d, want 4", len(out))
+	}
+	for i, ev := range out {
+		if ev.Verification != "verified" {
+			t.Fatalf("append-safe row %d verification = %q, want verified", i+1, ev.Verification)
+		}
+	}
+}
+
+func TestHandleExportRejectsOversizedSnapshot(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxExportTrailBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("NOCKGUARD_TEST_EXPORT_PUB", hex.EncodeToString(pub))
+	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "")
+	if err != nil {
+		t.Fatalf("newVerifier: %v", err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = v
+	readStarted := false
+	b.beforeExportRead = func() { readStarted = true }
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json", nil).WithContext(t.Context()))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized export status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
+	}
+	if readStarted {
+		t.Fatal("oversized trail reached the read path")
+	}
+}
+
+func TestHandleExportAcceptsAtLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxExportTrailBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = &verifier{mode: modeHMAC, key: []byte("test-key")}
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json", nil).WithContext(t.Context()))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("at-limit export status = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleExportRejectsGrowthPastLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxExportTrailBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = &verifier{mode: modeHMAC, key: []byte("test-key")}
+	b.beforeExportRead = func() {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if _, err := f.Write([]byte{'x'}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json", nil).WithContext(t.Context()))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("grown export status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+func TestHandleExportUnsignedTrailOverLimitStreamsLastWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i <= maxWindow; i++ {
+		if _, err := fmt.Fprintf(f, `{"ts":"t%d","agent":"a","tool":"Read","decision":"allow"}`+"\n", i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	b := newBroker()
+	b.auditPath = path
+	b.exportTrailLimit = 1024
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() <= b.exportTrailLimit {
+		t.Fatalf("test trail size = %d, want over test cap %d", info.Size(), b.exportTrailLimit)
+	}
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json", nil).WithContext(t.Context()))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unsigned oversized export status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out []event
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode export: %v", err)
+	}
+	if len(out) != maxWindow {
+		t.Fatalf("exported rows = %d, want %d", len(out), maxWindow)
+	}
+	if out[0].Ts != "t1" || out[maxWindow-1].Ts != "t500" {
+		t.Fatalf("exported window = %q..%q, want t1..t500", out[0].Ts, out[maxWindow-1].Ts)
+	}
+	for i, ev := range out {
+		if ev.Verification != "unsigned" {
+			t.Fatalf("row %d verification = %q, want unsigned", i+1, ev.Verification)
+		}
+	}
+}
+
+func TestHandleExportMissingTrailAndCheckpointIsEmpty(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+	t.Setenv("NOCKGUARD_TEST_EXPORT_PUB", hex.EncodeToString(pub))
+	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "")
+	if err != nil {
+		t.Fatalf("newVerifier: %v", err)
+	}
+	b := newBroker()
+	b.auditPath = filepath.Join(t.TempDir(), "missing.jsonl")
+	b.verifier = v
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json", nil).WithContext(t.Context()))
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("missing trail export = (%d, %q), want (200, [])", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleExportMissingTrailWithCheckpointReportsTamper(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("NOCKGUARD_TEST_EXPORT_PUB", hex.EncodeToString(pub))
+	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "")
+	if err != nil {
+		t.Fatalf("newVerifier: %v", err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = v
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json", nil).WithContext(t.Context()))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("missing trail with checkpoint status = %d, want %d: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	var receipt struct {
+		Verification string  `json:"verification"`
+		ChainIntact  *bool   `json:"chain_intact"`
+		Status       string  `json:"status"`
+		Detail       *string `json:"detail"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &receipt); err != nil {
+		t.Fatalf("decode tamper receipt: %v", err)
+	}
+	if receipt.Verification != "failed" {
+		t.Fatalf("receipt verification = %q, want failed", receipt.Verification)
+	}
+	if receipt.ChainIntact == nil || *receipt.ChainIntact {
+		t.Fatalf("receipt chain_intact = %v, want false", receipt.ChainIntact)
+	}
+	if receipt.Status != statusTampered {
+		t.Fatalf("receipt status = %q, want %q", receipt.Status, statusTampered)
+	}
+	if receipt.Detail == nil || !strings.Contains(*receipt.Detail, "truncated") {
+		t.Fatalf("receipt detail = %v, want truncation detail", receipt.Detail)
+	}
+}
+
+func TestHandleExportMissingTrailWithCheckpointIsEmptyWhenVerificationDisabled(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+
+	b := newBroker()
+	b.auditPath = path
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json", nil).WithContext(t.Context()))
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("unsigned missing trail export = (%d, %q), want (200, [])", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleExportCreatesNoTempFile(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+	before, err := filepath.Glob(filepath.Join(os.TempDir(), "nockguard-wall-export-*.jsonl*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = exportJSON(t, path, pub, nil, nil)
+	after, err := filepath.Glob(filepath.Join(os.TempDir(), "nockguard-wall-export-*.jsonl*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(before, "\n") != strings.Join(after, "\n") {
+		t.Fatalf("export changed temp-file set: before=%v after=%v", before, after)
+	}
+}
+
+func TestHandleExportSerializesConcurrentRequests(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	if err := os.WriteFile(path, []byte(`{"agent":"a","decision":"allow"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = &verifier{mode: modeHMAC, key: []byte("test-key")}
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	b.afterExportCheckpoint = func() {
+		entered <- struct{}{}
+		<-release
+	}
+	done := make(chan struct{}, 2)
+	run := func() {
+		rec := httptest.NewRecorder()
+		b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json", nil))
+		done <- struct{}{}
+	}
+	go run()
+	<-entered
+	go run()
+	select {
+	case <-entered:
+		t.Fatal("second export entered capture while first was active")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release <- struct{}{}
+	<-done
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("second export did not enter after first completed")
+	}
+	release <- struct{}{}
+	<-done
+}
+
+func exportJSON(t *testing.T, path string, pub ed25519.PublicKey, afterCheckpoint, afterSnapshot func()) []event {
+	t.Helper()
+	t.Setenv("NOCKGUARD_TEST_EXPORT_PUB", hex.EncodeToString(pub))
+	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "")
+	if err != nil {
+		t.Fatalf("newVerifier: %v", err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = v
+	b.afterExportCheckpoint = afterCheckpoint
+	b.afterExportSnapshot = afterSnapshot
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json", nil).WithContext(t.Context()))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("export status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out []event
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode export: %v", err)
+	}
+	return out
 }
 
 // --- audit-chain verification (N9868) ---------------------------------------
@@ -357,6 +861,20 @@ func writeSignedTrail(t *testing.T, path string, priv ed25519.PrivateKey, evs []
 		if err := a.Record(ev); err != nil {
 			t.Fatalf("Record: %v", err)
 		}
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func appendSignedTrail(t *testing.T, path string, priv ed25519.PrivateKey, ev audit.Event) {
+	t.Helper()
+	a, err := audit.New(path, audit.WithEd25519Key(priv))
+	if err != nil {
+		t.Fatalf("audit.New: %v", err)
+	}
+	if err := a.Record(ev); err != nil {
+		t.Fatalf("Record: %v", err)
 	}
 	if err := a.Close(); err != nil {
 		t.Fatalf("Close: %v", err)

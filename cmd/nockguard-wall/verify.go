@@ -130,6 +130,30 @@ func (v *verifier) verify(path string) verifyReport {
 	return classifyVerifyResult(n, err, now)
 }
 
+// verifyBytes verifies one immutable trail/checkpoint snapshot, so callers can
+// decode exactly the bytes whose signatures were checked.
+func (v *verifier) verifyBytes(trail, hwm []byte) verifyReport {
+	now := time.Now().Format(time.RFC3339)
+	if !v.enabled() {
+		return verifyReport{
+			LastVerifiedAt: now,
+			Status:         statusUnconfigured,
+			Detail:         strptr("audit signing not configured — chain not verified (set --verify-ed25519-pub-env or --verify-key-env)"),
+		}
+	}
+	var (
+		n   int
+		err error
+	)
+	switch v.mode {
+	case modeEd25519:
+		n, err = audit.VerifyEd25519Bytes(trail, hwm, v.pub)
+	default:
+		n, err = audit.VerifyBytes(trail, hwm, v.key)
+	}
+	return classifyVerifyResult(n, err, now)
+}
+
 // classifyVerifyResult folds internal/audit's (entries, err) contract into a
 // verifyReport, distinguishing a REAL tamper from a benign read/scan failure —
 // the crux of N9870. Only errors.Is(err, audit.ErrTamper) sets chain_intact=false

@@ -39,6 +39,14 @@ import (
 // large audit trail from flooding the page or re-scanning unboundedly.
 const maxWindow = 500
 
+// maxExportTrailBytes is the hard 64 MiB cap for the immutable in-memory trail
+// snapshot used by exports. It bounds both memory use and request work.
+const maxExportTrailBytes = 64 << 20
+
+// exportMu queues export requests so concurrent clients cannot multiply the
+// single 64 MiB snapshot allocation.
+var exportMu sync.Mutex
+
 //go:embed index.html
 var indexFS embed.FS
 
@@ -63,6 +71,11 @@ type event struct {
 	// existing internal/audit chain verification (see verify.go); never from the
 	// browser, which holds no key.
 	VerifyState string `json:"verifyState,omitempty"`
+	// Verification is added only to export rows. It is "verified" when this
+	// export's chain walk covered the row, "failed" after a detected break, or
+	// "unsigned" when signing is not configured or the row was not covered.
+	Verification string `json:"verification,omitempty"`
+	auditLine    int    `json:"-"`
 }
 
 // classify tags an event with its derived threat tier. Called at every ingest
@@ -76,8 +89,11 @@ func classify(ev event) event {
 // browser.
 type broker struct {
 	auditPath string // replayed to each newly-connected client as history
-	mu        sync.Mutex
-	clients   map[chan event]struct{}
+	// exportTrailLimit bounds verifier-enabled immutable snapshots. Tests lower
+	// it to exercise the boundary without constructing a 64 MiB fixture.
+	exportTrailLimit int64
+	mu               sync.Mutex
+	clients          map[chan event]struct{}
 
 	// verifier holds the server-side trusted key used to verify the audit chain;
 	// vsnap caches the most recent full-verify result so per-event badges (replay
@@ -85,11 +101,18 @@ type broker struct {
 	verifier *verifier
 	vmu      sync.Mutex
 	vsnap    verifyReport
+
+	// Test seams for mutating the live files at each capture boundary.
+	// Production leaves both nil.
+	afterExportCheckpoint func()
+	afterExportSnapshot   func()
+	beforeExportRead      func()
 }
 
 func newBroker() *broker {
 	return &broker{
-		clients: make(map[chan event]struct{}),
+		clients:          make(map[chan event]struct{}),
+		exportTrailLimit: maxExportTrailBytes,
 	}
 }
 
@@ -422,12 +445,22 @@ func loadEvents(path string) []event {
 		return nil
 	}
 	defer f.Close()
+	return loadEventsFrom(f)
+}
+
+func loadEventsFrom(r io.Reader) []event {
 	var evs []event
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), audit.MaxTrailLineBytes)
+	lineNo := 0
 	for sc.Scan() {
+		if len(bytes.TrimSpace(sc.Bytes())) == 0 {
+			continue
+		}
+		lineNo++
 		var ev event
 		if json.Unmarshal(sc.Bytes(), &ev) == nil && ev.Decision != "" {
+			ev.auditLine = lineNo
 			evs = append(evs, classify(ev))
 			if len(evs) > maxWindow {
 				evs = evs[1:]
@@ -438,6 +471,29 @@ func loadEvents(path string) []event {
 		log.Printf("error reading audit log for pulse: %v", err)
 	}
 	return evs
+}
+
+func loadEventsFromBytes(data []byte) []event {
+	return loadEventsFrom(bytes.NewReader(data))
+}
+
+// exportVerification translates the full-chain result into the compact receipt
+// carried by an export row. A row appended after the walk is not called verified:
+// it has not been checked by this export yet.
+func exportVerification(rep verifyReport, line int) string {
+	if rep.ChainIntact == nil {
+		return "unsigned"
+	}
+	if *rep.ChainIntact {
+		if line > rep.EntriesVerified {
+			return "unsigned"
+		}
+		return "verified"
+	}
+	if rep.BreakAt == nil || line >= *rep.BreakAt {
+		return "failed"
+	}
+	return "verified"
 }
 
 // handlePulse serves the current pulse over the persisted audit window as JSON,
@@ -501,8 +557,101 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	since := parseTimeFilter(q.Get("since"))
 	until := parseTimeFilter(q.Get("until"))
-	evs := filterEvents(loadEvents(b.auditPath), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
-	if q.Get("format") == "json" {
+	if !b.verifier.enabled() {
+		evs := filterEvents(loadEvents(b.auditPath), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
+		for i := range evs {
+			evs[i].Verification = "unsigned"
+		}
+		writeExport(w, q.Get("format"), evs)
+		return
+	}
+
+	exportMu.Lock()
+	defer exportMu.Unlock()
+
+	// The writer appends a trail line before advancing the checkpoint under its
+	// flock. Capturing the checkpoint first therefore preserves hwm.count <= the
+	// captured trail entries when an append lands between these reads.
+	hwm, err := os.ReadFile(b.auditPath + ".hwm")
+	if err != nil && !os.IsNotExist(err) {
+		http.Error(w, "audit checkpoint unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if b.afterExportCheckpoint != nil {
+		b.afterExportCheckpoint()
+	}
+	f, err := os.Open(b.auditPath)
+	if os.IsNotExist(err) {
+		if hwm == nil {
+			writeExport(w, q.Get("format"), nil)
+			return
+		}
+		rep := b.verifier.verifyBytes(nil, hwm)
+		if b.afterExportSnapshot != nil {
+			b.afterExportSnapshot()
+		}
+		writeExportFailure(w, q.Get("format"), rep)
+		return
+	}
+	if err != nil {
+		http.Error(w, "audit trail unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		http.Error(w, "audit trail unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if info.Size() > b.exportTrailLimit {
+		http.Error(w, "audit trail exceeds 64 MiB export limit", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if b.beforeExportRead != nil {
+		b.beforeExportRead()
+	}
+	trail, err := io.ReadAll(io.LimitReader(f, b.exportTrailLimit+1))
+	if err != nil {
+		http.Error(w, "audit trail unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if int64(len(trail)) > b.exportTrailLimit {
+		http.Error(w, "audit trail exceeds 64 MiB export limit", http.StatusRequestEntityTooLarge)
+		return
+	}
+	rep := b.verifier.verifyBytes(trail, hwm)
+	if b.afterExportSnapshot != nil {
+		b.afterExportSnapshot()
+	}
+	evs := filterEvents(loadEventsFromBytes(trail), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
+	for i := range evs {
+		evs[i].Verification = exportVerification(rep, evs[i].auditLine)
+	}
+	writeExport(w, q.Get("format"), evs)
+}
+
+type exportFailure struct {
+	Verification string `json:"verification"`
+	verifyReport
+}
+
+func writeExportFailure(w http.ResponseWriter, format string, rep verifyReport) {
+	w.Header().Set("X-NockGuard-Verification", "failed")
+	w.Header().Set("X-NockGuard-Chain-Intact", "false")
+	if format == "json" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(exportFailure{Verification: "failed", verifyReport: rep})
+		return
+	}
+	http.Error(w, "audit trail verification failed", http.StatusConflict)
+}
+
+func writeExport(w http.ResponseWriter, format string, evs []event) {
+	if format == "json" {
+		if evs == nil {
+			evs = []event{}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Disposition", `attachment; filename="nockguard-wall.json"`)
 		_ = json.NewEncoder(w).Encode(evs)
@@ -511,11 +660,11 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="nockguard-wall.csv"`)
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{"ts", "agent", "tool", "decision", "severity", "reason"})
+	_ = cw.Write([]string{"ts", "agent", "tool", "decision", "severity", "reason", "verification"})
 	for _, ev := range evs {
 		_ = cw.Write([]string{
 			csvSafe(ev.Ts), csvSafe(ev.Agent), csvSafe(ev.Tool),
-			csvSafe(ev.Decision), csvSafe(ev.Severity), csvSafe(ev.Reason),
+			csvSafe(ev.Decision), csvSafe(ev.Severity), csvSafe(ev.Reason), csvSafe(ev.Verification),
 		})
 	}
 	cw.Flush()
