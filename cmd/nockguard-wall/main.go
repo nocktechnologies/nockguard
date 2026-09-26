@@ -39,6 +39,10 @@ import (
 // large audit trail from flooding the page or re-scanning unboundedly.
 const maxWindow = 500
 
+// maxExportSnapshotBytes bounds the temporary immutable copy used by signed
+// exports. The wall must never allocate an append-only audit trail wholesale.
+const maxExportSnapshotBytes = 64 << 20
+
 //go:embed index.html
 var indexFS embed.FS
 
@@ -91,9 +95,10 @@ type broker struct {
 	vmu      sync.Mutex
 	vsnap    verifyReport
 
-	// afterExportSnapshot is a test seam for replacing/appending the live file
-	// after export has captured it. Production leaves it nil.
-	afterExportSnapshot func()
+	// Test seams for mutating the live files at each capture boundary.
+	// Production leaves both nil.
+	afterExportCheckpoint func()
+	afterExportSnapshot   func()
 }
 
 func newBroker() *broker {
@@ -539,21 +544,60 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	since := parseTimeFilter(q.Get("since"))
 	until := parseTimeFilter(q.Get("until"))
-	trail, err := os.ReadFile(b.auditPath)
-	if err != nil {
-		http.Error(w, "audit trail unavailable", http.StatusServiceUnavailable)
-		return
+	snapshotPath := b.auditPath
+	if b.verifier.enabled() {
+		hwm, err := os.ReadFile(b.auditPath + ".hwm")
+		if err != nil && !os.IsNotExist(err) {
+			http.Error(w, "audit checkpoint unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if b.afterExportCheckpoint != nil {
+			b.afterExportCheckpoint()
+		}
+		src, err := os.Open(b.auditPath)
+		if err != nil {
+			http.Error(w, "audit trail unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		defer src.Close()
+		info, err := src.Stat()
+		if err != nil {
+			http.Error(w, "audit trail unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if info.Size() > maxExportSnapshotBytes {
+			http.Error(w, "audit trail exceeds export snapshot limit", http.StatusServiceUnavailable)
+			return
+		}
+		snapshot, err := os.CreateTemp("", "nockguard-wall-export-*.jsonl")
+		if err != nil {
+			http.Error(w, "audit trail snapshot unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		snapshotPath = snapshot.Name()
+		defer os.Remove(snapshotPath)
+		defer os.Remove(snapshotPath + ".hwm")
+		if _, err := io.CopyN(snapshot, src, info.Size()); err != nil {
+			snapshot.Close()
+			http.Error(w, "audit trail snapshot unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if err := snapshot.Close(); err != nil {
+			http.Error(w, "audit trail snapshot unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if hwm != nil {
+			if err := os.WriteFile(snapshotPath+".hwm", hwm, 0o600); err != nil {
+				http.Error(w, "audit checkpoint unavailable", http.StatusServiceUnavailable)
+				return
+			}
+		}
 	}
-	hwm, err := os.ReadFile(b.auditPath + ".hwm")
-	if err != nil && !os.IsNotExist(err) {
-		http.Error(w, "audit checkpoint unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	rep := b.verifier.verifyBytes(trail, hwm)
+	rep := b.verifier.verify(snapshotPath)
 	if b.afterExportSnapshot != nil {
 		b.afterExportSnapshot()
 	}
-	evs := filterEvents(loadEventsFrom(bytes.NewReader(trail)), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
+	evs := filterEvents(loadEvents(snapshotPath), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
 	for i := range evs {
 		evs[i].Verification = exportVerification(rep, evs[i].auditLine)
 	}
