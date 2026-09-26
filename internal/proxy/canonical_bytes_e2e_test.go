@@ -200,10 +200,8 @@ func TestUnknownAgentFailsClosedE2E(t *testing.T) {
 	}
 }
 
-// Canonicalization must NOT mangle tool arguments — the whole reason "arguments"
-// is kept as a verbatim RawMessage. A large integer must survive intact (not be
-// re-encoded to 1.23e18), and floats / nested structures must pass through byte
-// for byte. Proves the float-precision-safety design decision, not just asserts it.
+// Canonicalization must preserve numeric literals and nested argument values.
+// A large integer must survive intact instead of rounding through float64.
 func TestToolArgumentsPreservedThroughCanonicalization(t *testing.T) {
 	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"safe_tool","arguments":{"big":1234567890123456789,"f":0.1,"nested":{"a":[1,2,3]}}}}` + "\n"
 	_, forwarded := runProxyCapture(t, input)
