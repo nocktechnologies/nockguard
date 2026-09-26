@@ -109,6 +109,15 @@ func (l *HTTPListener) streamToolList(w http.ResponseWriter, body io.Reader, req
 	var lines, data []string
 	size := 0
 	first := true
+	// answered tracks whether a response matching request's id has already
+	// been delivered on this stream. JSON-RPC allows exactly one response per
+	// id: a well-behaved upstream never sends a second one, but a misbehaving
+	// one must not get a second bite at tools/list filtering. Handling a
+	// repeat match would either forward the raw, unfiltered second result past
+	// policy (a leak) or re-queue its hide audits onto a seq the audit queue
+	// has already flushed past (silent audit loss) — so any later matching
+	// response is dropped outright instead.
+	answered := false
 	for scanner.Scan() {
 		line := scanner.Text()
 		if first {
@@ -129,23 +138,38 @@ func (l *HTTPListener) streamToolList(w http.ResponseWriter, body io.Reader, req
 		}
 		// An empty data buffer dispatches no event under the SSE specification.
 		matched := false
+		drop := false
 		if payload := []byte(strings.Join(data, "\n")); len(payload) > 0 {
 			var msg jsonrpc.Message
 			if json.Unmarshal(payload, &msg) != nil {
 				return fmt.Errorf("invalid SSE JSON-RPC message")
 			}
 			if msg.Method == "" && jsonRPCIDMatches(request, msg.ID) {
-				matched = true
-				filtered := l.gate.filterToolListResponse(payload, seq)
-				kept := make([]string, 0, len(lines))
-				for _, raw := range lines {
-					field, _, _ := strings.Cut(raw, ":")
-					if field != "data" {
-						kept = append(kept, raw)
+				if answered {
+					drop = true
+				} else {
+					matched = true
+					answered = true
+					filtered := l.gate.filterToolListResponse(payload, seq)
+					kept := make([]string, 0, len(lines))
+					for _, raw := range lines {
+						field, _, _ := strings.Cut(raw, ":")
+						if field != "data" {
+							kept = append(kept, raw)
+						}
 					}
+					lines = append(kept, "data: "+string(filtered))
 				}
-				lines = append(kept, "data: "+string(filtered))
 			}
+		}
+		if drop {
+			// Never forward the repeat and never re-run it through
+			// filterToolListResponse: that would either leak the unfiltered
+			// duplicate to the connector or append hide audits onto a seq the
+			// audit queue has already flushed past.
+			l.logger.Printf("UPSTREAM-DUPLICATE-RESPONSE agent=%s: dropped repeated tools/list result", l.gate.agent)
+			lines, data, size = nil, nil, 0
+			continue
 		}
 		if _, err := io.WriteString(w, strings.Join(lines, "\n")+"\n\n"); err != nil {
 			return err

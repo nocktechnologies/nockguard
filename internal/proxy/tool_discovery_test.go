@@ -264,6 +264,63 @@ func TestHTTPToolDiscoverySSEResolvesAuditBeforeStreamCloses(t *testing.T) {
 	}
 }
 
+// TestHTTPToolDiscoverySSEDropsRepeatedResult verifies that a second SSE event
+// on the same stream matching the forwarded tools/list request id (JSON-RPC
+// allows exactly one response per id) is dropped outright: never forwarded to
+// the connector, never re-run through filterToolListResponse. Before the drop
+// guard, a misbehaving upstream that repeated the discovery result could leak
+// its raw denied tool to the connector and would re-queue its hide audit onto
+// a sequence the audit queue had already flushed past — silent audit loss.
+func TestHTTPToolDiscoverySSEDropsRepeatedResult(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, "event: message\ndata: "+discoveryResponse+"\n\n")
+		w.(http.Flusher).Flush()
+		// A misbehaving upstream repeats the same tools/list result (with the
+		// denied "blocked" tool) a second time on the same stream, then closes.
+		io.WriteString(w, "event: message\ndata: "+discoveryResponse+"\n\n")
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	auditor, auditPath, _ := newEd25519Auditor(t)
+	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, auditor)
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	defer lsrv.Close()
+
+	resp, err := http.Post(lsrv.URL, "application/json", strings.NewReader(discoveryRequest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if resultCount := strings.Count(string(body), `"nextCursor":"page2"`); resultCount != 1 {
+		t.Fatalf("connector received %d tools/list result event(s) for the request id, want exactly 1: %s", resultCount, body)
+	}
+	if strings.Contains(string(body), `"blocked"`) {
+		t.Fatalf("denied tool leaked to the connector: %s", body)
+	}
+
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	evs := readAuditEvents(t, auditPath)
+	var hideCount int
+	for _, ev := range evs {
+		if ev.Decision == "hide" && ev.Tool == "blocked" {
+			hideCount++
+		}
+	}
+	if hideCount != 1 {
+		t.Fatalf("audit file has %d hide row(s) for the repeated discovery event, want exactly 1 (no leak, no loss): %+v", hideCount, evs)
+	}
+}
+
 func TestHTTPDiscoveryErrorUsesBodyPermittingStatus(t *testing.T) {
 	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
 	l := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
