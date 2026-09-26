@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
 )
@@ -208,6 +209,134 @@ func TestHTTPListener_MalformedSuccessDoesNotCommitCard(t *testing.T) {
 	gate.cardMu.Unlock()
 	if card != 0 {
 		t.Errorf("currentCard = %d after malformed claim response, want 0 (not committed)", card)
+	}
+}
+
+// TestHTTPListener_OversizedJSONResponseFailsWithoutCommittingCard verifies that
+// response verification stays bounded. The listener must return a visible error,
+// preserve its allow audit row, and refuse to claim a card from an over-limit
+// JSON response instead of buffering it without bound.
+func TestHTTPListener_OversizedJSONResponseFailsWithoutCommittingCard(t *testing.T) {
+	const prefix = `{"jsonrpc":"2.0","id":12345,"result":{"content":[{"type":"text","text":"`
+	const suffix = `"}]}}`
+	response := prefix + strings.Repeat("x", httpListenerBodyCap+1-len(prefix)-len(suffix)) + suffix
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, response)
+	}))
+	defer upstream.Close()
+
+	auditor, auditPath, pub := newEd25519Auditor(t)
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	defer lsrv.Close()
+
+	status, body, _ := post(t, lsrv.URL, `{"jsonrpc":"2.0","id":12345,"method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":12345}}}`)
+	if status != http.StatusOK {
+		t.Errorf("status = %d, want 200 JSON-RPC error", status)
+	}
+	if !strings.Contains(body, "upstream response exceeds the 10MB limit") {
+		t.Errorf("body = %q, want visible oversized-response error", body)
+	}
+	if !strings.Contains(body, `"id":12345`) {
+		t.Errorf("body = %q, want error tied to request id 12345", body)
+	}
+	if gate.currentCard != 0 {
+		t.Errorf("currentCard = %d after oversized claim response, want 0", gate.currentCard)
+	}
+
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	n, err := audit.VerifyEd25519(auditPath, pub)
+	if err != nil {
+		t.Fatalf("audit chain verification failed: %v", err)
+	}
+	evs := readAuditEvents(t, auditPath)
+	if n != 1 || len(evs) != 1 || evs[0].Decision != "allow" || evs[0].NockID != 12345 {
+		t.Errorf("audit rows = %+v, want one allow row for nock 12345", evs)
+	}
+}
+
+// TestHTTPListener_JSONReadTimeoutFailsWithoutCommittingCard verifies that
+// response verification stays bounded in TIME, not just size. An upstream that
+// sends 200 + application/json headers, flushes, then never writes a body must
+// not block the handler (or the audit queue behind it) forever: the listener
+// must give up after httpListenerJSONReadTimeout, return a visible JSON-RPC
+// error tied to the request id, resolve the audit, and refuse to commit card
+// state.
+func TestHTTPListener_JSONReadTimeoutFailsWithoutCommittingCard(t *testing.T) {
+	old := httpListenerJSONReadTimeout
+	httpListenerJSONReadTimeout = 200 * time.Millisecond
+	defer func() { httpListenerJSONReadTimeout = old }()
+
+	done := make(chan struct{})
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		// Headers are sent; now stall until the test tears down, well past
+		// httpListenerJSONReadTimeout.
+		select {
+		case <-done:
+		case <-r.Context().Done():
+		}
+	}))
+	defer upstream.Close()
+
+	auditor, auditPath, pub := newEd25519Auditor(t)
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	defer lsrv.Close()
+	// Registered last so it runs FIRST on teardown (defers are LIFO): the
+	// stalled upstream handler must be released before lsrv.Close() /
+	// upstream.Close() above try to wait for its connection to finish.
+	defer close(done)
+
+	type result struct {
+		status int
+		body   string
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		status, body, _ := post(t, lsrv.URL, `{"jsonrpc":"2.0","id":777,"method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":777}}}`)
+		resultCh <- result{status, body}
+	}()
+
+	select {
+	case res := <-resultCh:
+		if res.status != http.StatusOK {
+			t.Errorf("status = %d, want 200 JSON-RPC error", res.status)
+		}
+		if !strings.Contains(res.body, "upstream response timed out") {
+			t.Errorf("body = %q, want visible upstream-timeout error", res.body)
+		}
+		if !strings.Contains(res.body, `"id":777`) {
+			t.Errorf("body = %q, want error tied to request id 777", res.body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("request did not return within 2s of httpListenerJSONReadTimeout=%s; handler is stuck reading a stalled upstream body", httpListenerJSONReadTimeout)
+	}
+
+	gate.cardMu.Lock()
+	card := gate.currentCard
+	gate.cardMu.Unlock()
+	if card != 0 {
+		t.Errorf("currentCard = %d after timed-out claim response, want 0 (not committed)", card)
+	}
+
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	n, err := audit.VerifyEd25519(auditPath, pub)
+	if err != nil {
+		t.Fatalf("audit chain verification failed: %v", err)
+	}
+	evs := readAuditEvents(t, auditPath)
+	if n != 1 || len(evs) != 1 || evs[0].Decision != "allow" || evs[0].NockID != 777 {
+		t.Errorf("audit rows = %+v, want one allow row for nock 777 (queue not stalled)", evs)
 	}
 }
 

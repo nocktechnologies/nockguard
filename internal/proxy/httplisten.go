@@ -21,16 +21,28 @@ import (
 )
 
 // httpListenerBodyCap mirrors mcphttp's 10 MB scanner max-token cap: the largest
-// single JSON-RPC message the listener will read from the connector before
-// rejecting it. Large tool RESULTS (a long nock_list / identity doc) travel on
-// the RESPONSE path, which is streamed and uncapped except for tools/list:
-// discovery responses/events are inspected under this cap before delivery.
+// single JSON-RPC message the listener reads from the connector or buffers from
+// an upstream response before rejecting it. Discovery responses/events and JSON
+// tool responses that need card-state or audit verification are inspected under
+// this cap; other responses stream without buffering.
 const httpListenerBodyCap = 10 * 1024 * 1024
+
+// httpListenerJSONReadTimeout bounds how long the buffered-JSON read in the
+// needsJSONVerification path (forward, below) will wait once upstream response
+// headers have already arrived. The transport's ResponseHeaderTimeout stops
+// applying the moment headers land, and http.Client.Timeout is intentionally
+// left unset on this listener's client so an SSE relay can stay open
+// indefinitely — so nothing else bounds a JSON response body that trickles in
+// or never arrives. Audits flush strictly in sequence order, so one stuck read
+// here stalls every request behind it, not just this one. A var, not a const,
+// so tests can shorten it.
+var httpListenerJSONReadTimeout = 30 * time.Second
 
 // HTTPListener is the N8761 Option-A local HTTP forward-proxy. It puts the SAME
 // enforcement gate the stdio proxy runs (StdioProxy.decide: policy → validate →
-// rate-limit → approval → Ed25519 audit) behind an HTTP listener the flagship
-// seat's managed remote-HTTP MCP connector can re-point its NockCC endpoint at.
+// rate-limit → approval → Ed25519 audit) behind a local HTTP listener. Hosted
+// connectors require a reachable authenticated gateway and a protected route
+// to this loopback endpoint; they cannot target the operator's loopback directly.
 //
 // It gates on the MCP TOOL NAME, not on egress host — so its audit rows are
 // identical in shape to the stdio proxy's and `nockguard verify` / the Live Wall
@@ -313,6 +325,56 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 		return
 	}
 
+	// Card state commit and audit emission are gated on JSON-RPC-level success, not HTTP status.
+	// For JSON responses, buffer and parse to check for errors before committing/auditing.
+	// For SSE streams, pass through byte-faithful without buffering (no state updates over SSE).
+	needsJSONVerification := (toolForState != "" || len(deferredAudits) > 0) &&
+		resp.StatusCode >= 200 && resp.StatusCode < 300 &&
+		strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json")
+	var respBody []byte
+	if needsJSONVerification {
+		responseID := request.ID
+		if responseID == nil {
+			responseID = json.RawMessage("null")
+		}
+		// Read one byte past the cap so an oversized response is rejected before
+		// writing its headers or partial body to the connector. Bound the wall
+		// clock too: headers have already arrived, so nothing else stops an
+		// upstream that stalls or trickles its body from blocking this handler
+		// (and every audit queued behind it) forever — close the body once
+		// httpListenerJSONReadTimeout elapses so the read below unblocks.
+		var readErr error
+		timer := time.AfterFunc(httpListenerJSONReadTimeout, func() {
+			_ = resp.Body.Close()
+		})
+		respBody, readErr = io.ReadAll(io.LimitReader(resp.Body, httpListenerBodyCap+1))
+		timedOut := !timer.Stop()
+		if timedOut {
+			// The timer either already fired (closing the body, which is why
+			// ReadAll returned) or raced the read's own completion — either way
+			// treat it as a timeout, not a generic read error.
+			l.logger.Printf("UPSTREAM-RESPONSE-TIMEOUT agent=%s limit=%s", l.gate.agent, httpListenerJSONReadTimeout)
+			*resolved = true
+			l.gate.resolveAudit(seq)
+			l.writeJSONRPCError(w, responseID, -32603, "nockguard: upstream response timed out")
+			return
+		}
+		if readErr != nil {
+			l.logger.Printf("UPSTREAM-STREAM-ERROR agent=%s: read response body: %v", l.gate.agent, readErr)
+			*resolved = true
+			l.gate.resolveAudit(seq)
+			l.writeJSONRPCError(w, responseID, -32603, "nockguard: could not read upstream response")
+			return
+		}
+		if len(respBody) > httpListenerBodyCap {
+			l.logger.Printf("UPSTREAM-RESPONSE-TOO-LARGE agent=%s limit=%d", l.gate.agent, httpListenerBodyCap)
+			*resolved = true
+			l.gate.resolveAudit(seq)
+			l.writeJSONRPCError(w, responseID, -32603, "nockguard: upstream response exceeds the 10MB limit")
+			return
+		}
+	}
+
 	// Relay upstream response headers back unchanged, minus hop-by-hop headers
 	// (reused from forwardhttp). Carrying Content-Type and Mcp-Session-Id makes the
 	// response indistinguishable from a direct NockCC call.
@@ -324,67 +386,49 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	// Card state commit and audit emission are gated on JSON-RPC-level success, not HTTP status.
-	// For JSON responses, buffer and parse to check for errors before committing/auditing.
-	// For SSE streams, pass through byte-faithful without buffering (no state updates over SSE).
-	if (toolForState != "" || len(deferredAudits) > 0) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		ct := resp.Header.Get("Content-Type")
-		if strings.HasPrefix(ct, "application/json") {
-			// Buffer and parse the JSON response to check for JSON-RPC errors
-			// before committing card state. Only commit if the response is a genuine
-			// JSON-RPC success (no "error" field and no tool-level isError).
-			respBody, readErr := io.ReadAll(resp.Body)
-			if readErr != nil {
-				// Read error — treat as upstream failure, do not commit state.
-				l.logger.Printf("UPSTREAM-STREAM-ERROR agent=%s: read response body: %v", l.gate.agent, readErr)
-				if _, werr := w.Write(respBody); werr != nil {
-					return
-				}
-				// Resolve audits unconditionally to ensure the queue doesn't stall.
-				*resolved = true
-				l.gate.resolveAudit(seq)
-			} else {
-				// Commit card state only on a genuine JSON-RPC 2.0 success response for
-				// THIS request: version "2.0", a response shape (no method), an id that
-				// matches the forwarded request, a present "result" member, and no
-				// "error" member at all (absent, not merely null). A 2xx body such as
-				// {} or null unmarshals cleanly but carries no result/id and must NOT
-				// commit — it would corrupt currentCard as a false success.
-				shouldCommit := false
-				var msg jsonrpc.Message
-				var members map[string]json.RawMessage
-				if json.Unmarshal(respBody, &msg) == nil && json.Unmarshal(respBody, &members) == nil {
-					// Use raw member presence to distinguish an ABSENT error member from
-					// an explicit "error": null — a response carrying an error member at
-					// all must not commit — and to require a present "result" member.
-					_, hasError := members["error"]
-					resultRaw, hasResult := members["result"]
-					if msg.JSONRPC == "2.0" && msg.Method == "" && !hasError && hasResult && jsonRPCIDMatches(body, msg.ID) {
-						shouldCommit = true
-						// A tool-level failure (MCP result.isError=true) is a success
-						// envelope but a failed tool call — do not commit.
-						var result map[string]interface{}
-						if json.Unmarshal(resultRaw, &result) == nil {
-							if toolErr, ok := result["isError"].(bool); ok && toolErr {
-								shouldCommit = false
-							}
-						}
+	if needsJSONVerification {
+		// Commit card state only on a genuine JSON-RPC 2.0 success response for
+		// THIS request: version "2.0", a response shape (no method), an id that
+		// matches the forwarded request, a present "result" member, and no
+		// "error" member at all (absent, not merely null). A 2xx body such as
+		// {} or null unmarshals cleanly but carries no result/id and must NOT
+		// commit — it would corrupt currentCard as a false success.
+		shouldCommit := false
+		var msg jsonrpc.Message
+		var members map[string]json.RawMessage
+		if json.Unmarshal(respBody, &msg) == nil && json.Unmarshal(respBody, &members) == nil {
+			// Use raw member presence to distinguish an ABSENT error member from
+			// an explicit "error": null — a response carrying an error member at
+			// all must not commit — and to require a present "result" member.
+			_, hasError := members["error"]
+			resultRaw, hasResult := members["result"]
+			if msg.JSONRPC == "2.0" && msg.Method == "" && !hasError && hasResult && jsonRPCIDMatches(body, msg.ID) {
+				shouldCommit = true
+				// A tool-level failure (MCP result.isError=true) is a success
+				// envelope but a failed tool call — do not commit.
+				var result map[string]interface{}
+				if json.Unmarshal(resultRaw, &result) == nil {
+					if toolErr, ok := result["isError"].(bool); ok && toolErr {
+						shouldCommit = false
 					}
 				}
-				// Write the buffered response bytes unchanged.
-				if _, werr := w.Write(respBody); werr != nil {
-					return
-				}
-				// Commit card state only if JSON-RPC succeeded.
-				if shouldCommit {
-					l.gate.updateCardState(seq, toolForState, refsForState)
-				}
-				// Resolve audits unconditionally to ensure the queue doesn't stall.
-				*resolved = true
-				l.gate.resolveAudit(seq)
 			}
+		}
+		// Write the buffered response bytes unchanged.
+		if _, werr := w.Write(respBody); werr != nil {
 			return
 		}
+		// Commit card state only if JSON-RPC succeeded.
+		if shouldCommit {
+			l.gate.updateCardState(seq, toolForState, refsForState)
+		}
+		// Resolve audits unconditionally to ensure the queue doesn't stall.
+		*resolved = true
+		l.gate.resolveAudit(seq)
+		return
+	}
+
+	if (toolForState != "" || len(deferredAudits) > 0) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		// SSE and other streaming responses: pass through byte-faithful without buffering.
 		// No card state is committed over streaming responses (design limitation: N/A for
 		// tool calls which return JSON responses, not SSE).

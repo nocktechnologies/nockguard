@@ -5,6 +5,9 @@ All notable changes to NockGuard are documented here.
 ## Unreleased
 
 ### Fixed
+- Correct hosted-connector deployment guidance: cloud clients need a reachable
+  authenticated gateway, with explicit agent identity and session isolation,
+  before the separately approved live cutover.
 - Reject missing, invalid, zero, and negative rate-limit windows at policy load
   time, including default-agent policies.
 - Show redacted MCP argument scalars in approval prompts so amounts and targets
