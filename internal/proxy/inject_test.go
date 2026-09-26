@@ -1,18 +1,23 @@
 package proxy
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-
-	"github.com/nocktechnologies/nockguard/internal/secrets"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/nocktechnologies/nockguard/internal/policy"
+	"github.com/nocktechnologies/nockguard/internal/secrets"
 )
 
 // mockResolver is a test helper that resolves refs from a map.
@@ -25,6 +30,262 @@ func (m *mockResolver) Resolve(ref string) (string, error) {
 		return val, nil
 	}
 	return "", nil // Unresolved
+}
+
+func TestInjectNockCC(t *testing.T) {
+	const vaultValue = "vault-test-value-0001"
+	const agentToken = "test-nockcc-agent-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/api/secrets/GITHUB_TOKEN/" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if got := r.Header.Get("X-Agent-Token"); got != agentToken {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if got := r.Header.Get("X-API-Key"); got != "" {
+			t.Errorf("X-API-Key = %q, want empty", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("Authorization = %q, want empty", got)
+		}
+		_, _ = io.WriteString(w, `{"success":true,"data":{"value":"`+vaultValue+`"}}`)
+	}))
+	defer server.Close()
+	t.Setenv("NOCKCC_BASE_URL", server.URL)
+	t.Setenv("NOCKGUARD_VAULT_AGENT_TOKEN", agentToken)
+
+	engine, err := policy.LoadBytes([]byte(`
+agents:
+  test-agent:
+    mode: allow
+    inject:
+      - tools: ["github_create_issue"]
+        ref: "nockcc:GITHUB_TOKEN"
+        arg: "headers.Authorization"
+`))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	validator, err := engine.ValidatorFor("test-agent")
+	if err != nil {
+		t.Fatalf("ValidatorFor: %v", err)
+	}
+	p := NewStdioProxy(nil, "test-agent", engine, validator, nil, nil, nil, log.New(io.Discard, "", 0))
+
+	var upstream bytes.Buffer
+	call := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"github_create_issue","arguments":{"title":"test"}}}`
+	if err := p.agentToUpstream(strings.NewReader(call), &upstream, &sync.Map{}); err != nil {
+		t.Fatalf("agentToUpstream: %v", err)
+	}
+	var forwarded struct {
+		Params struct {
+			Arguments struct {
+				Headers struct {
+					Authorization string `json:"Authorization"`
+				} `json:"headers"`
+			} `json:"arguments"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(upstream.Bytes(), &forwarded); err != nil {
+		t.Fatalf("decode forwarded call: %v", err)
+	}
+	if got := forwarded.Params.Arguments.Headers.Authorization; got != vaultValue {
+		t.Errorf("injected value = %q, want vault value", got)
+	}
+}
+
+func TestInjectNockCCFailuresReject(t *testing.T) {
+	const agentToken = "test-nockcc-agent-token"
+	tests := []struct {
+		name       string
+		handler    http.HandlerFunc
+		wantReason string
+	}{
+		{
+			name:       "forbidden",
+			wantReason: "inject-unresolved ref=nockcc:GITHUB_TOKEN",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+			},
+		},
+		{
+			name:       "not found",
+			wantReason: "inject-unresolved ref=nockcc:GITHUB_TOKEN",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+			},
+		},
+		{
+			name:       "server error",
+			wantReason: "inject-unresolved ref=nockcc:GITHUB_TOKEN",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+			},
+		},
+		{
+			name:       "empty body",
+			wantReason: "inject-unresolved ref=nockcc:GITHUB_TOKEN",
+			handler:    func(http.ResponseWriter, *http.Request) {},
+		},
+		{
+			name:       "empty value",
+			wantReason: "inject-unresolved ref=nockcc:GITHUB_TOKEN",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"success":true,"data":{"value":""}}`)
+			},
+		},
+		{
+			name:       "oversized body",
+			wantReason: "inject-unresolved ref=nockcc:GITHUB_TOKEN",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"success":true,"data":{"value":"`+strings.Repeat("x", 64*1024)+`"}}`)
+			},
+		},
+		{
+			name:       "truncated body",
+			wantReason: "inject-unresolved ref=nockcc:GITHUB_TOKEN",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"success":true,"data":`)
+			},
+		},
+		{
+			name:       "short value",
+			wantReason: "inject-too-short ref=nockcc:GITHUB_TOKEN",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"success":true,"data":{"value":"short"}}`)
+			},
+		},
+		{
+			name:       "timeout",
+			wantReason: "inject-unresolved ref=nockcc:GITHUB_TOKEN",
+			handler: func(_ http.ResponseWriter, r *http.Request) {
+				<-r.Context().Done()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("X-Agent-Token"); got != agentToken {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				tt.handler(w, r)
+			}))
+			defer server.Close()
+			t.Setenv("NOCKCC_BASE_URL", server.URL)
+			t.Setenv("NOCKGUARD_VAULT_AGENT_TOKEN", agentToken)
+			auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+			engine, err := policy.LoadBytes([]byte(fmt.Sprintf(`
+audit:
+  enabled: true
+  path: %s
+agents:
+  test-agent:
+    mode: allow
+    inject:
+      - tools: ["test_tool"]
+        ref: "nockcc:GITHUB_TOKEN"
+        arg: "auth"
+`, auditPath)))
+			if err != nil {
+				t.Fatalf("LoadBytes: %v", err)
+			}
+			validator, err := engine.ValidatorFor("test-agent")
+			if err != nil {
+				t.Fatalf("ValidatorFor: %v", err)
+			}
+			auditor, err := engine.AuditorFor("test-agent")
+			if err != nil {
+				t.Fatalf("AuditorFor: %v", err)
+			}
+			p := NewStdioProxy(nil, "test-agent", engine, validator, nil, auditor, nil, log.New(io.Discard, "", 0))
+
+			forwarded, reply, err := p.Probe([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{}}}`))
+			if err != nil {
+				t.Fatalf("Probe: %v", err)
+			}
+			if forwarded {
+				t.Fatal("vault failure forwarded the call")
+			}
+			if strings.Contains(string(reply), "GITHUB_TOKEN") {
+				t.Errorf("agent-facing error exposed vault key name: %s", reply)
+			}
+			auditData, err := os.ReadFile(auditPath)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			if !strings.Contains(string(auditData), tt.wantReason) {
+				t.Errorf("audit missing %q: %s", tt.wantReason, auditData)
+			}
+		})
+	}
+}
+
+func TestInjectNockCCScrubsValueAndEncodings(t *testing.T) {
+	const vaultValue = "vault+secret/0001"
+	const agentToken = "test-nockcc-agent-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Agent-Token"); got != agentToken {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		_, _ = io.WriteString(w, `{"success":true,"data":{"value":"`+vaultValue+`"}}`)
+	}))
+	defer server.Close()
+	t.Setenv("NOCKCC_BASE_URL", server.URL)
+	t.Setenv("NOCKGUARD_VAULT_AGENT_TOKEN", agentToken)
+
+	engine, err := policy.LoadBytes([]byte(`
+agents:
+  test-agent:
+    mode: allow
+    inject:
+      - tools: ["test_tool"]
+        ref: "nockcc:GITHUB_TOKEN"
+        arg: "auth"
+`))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	validator, err := engine.ValidatorFor("test-agent")
+	if err != nil {
+		t.Fatalf("ValidatorFor: %v", err)
+	}
+	p := NewStdioProxy(nil, "test-agent", engine, validator, nil, nil, nil, log.New(io.Discard, "", 0))
+	forwarded, reply, err := p.Probe([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{}}}`))
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if !forwarded {
+		t.Fatalf("expected forwarded, got blocked: %s", reply)
+	}
+
+	jsonValue, _ := json.Marshal(vaultValue)
+	variants := []string{
+		vaultValue,
+		string(jsonValue[1 : len(jsonValue)-1]),
+		url.QueryEscape(vaultValue),
+		base64.StdEncoding.EncodeToString([]byte(vaultValue)),
+		base64.URLEncoding.EncodeToString([]byte(vaultValue)),
+	}
+	var output bytes.Buffer
+	if err := p.writeAgentLine(&output, []byte(strings.Join(variants, " "))); err != nil {
+		t.Fatalf("writeAgentLine: %v", err)
+	}
+	for _, variant := range variants {
+		if strings.Contains(output.String(), variant) {
+			t.Errorf("agent output leaked vault value encoding %q: %s", variant, output.String())
+		}
+	}
+	if !strings.Contains(output.String(), "[nockguard:redacted]") {
+		t.Errorf("agent output missing redaction marker: %s", output.String())
+	}
 }
 
 // TestInjectHit verifies that a configured rule attaches the credential to the
