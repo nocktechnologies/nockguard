@@ -307,10 +307,11 @@ type initWriter struct {
 	status        int
 	mode          string // "undecided", "buffer", or "sse"
 	held          bytes.Buffer
-	pos           int // start of current event in held buffer
-	lineStart     int // start of current line in held buffer
-	searchFrom    int // offset to search from for next line terminator
-	bytesExamined int // for testing: count of bytes examined
+	pos           int  // start of current event in held buffer
+	lineStart     int  // start of current line in held buffer
+	searchFrom    int  // offset to search from for next line terminator
+	bytesExamined int  // for testing: count of bytes examined
+	skipLF        bool // skip next LF if it's the second half of a CRLF
 	committed     bool
 	rejected      bool
 	upstreamID    string
@@ -419,17 +420,17 @@ func (w *initWriter) parseSSEEvents() {
 			isTerminator = true
 			termLen = 1
 		} else if b == '\r' {
+			// \r is always a terminator (per WHATWG SSE parser)
+			isTerminator = true
 			if i+1 < len(data) && data[i+1] == '\n' {
-				isTerminator = true
 				termLen = 2
-			} else if i+1 < len(data) {
-				// bare \r followed by non-\n
-				isTerminator = true
+			} else if i+1 == len(data) {
+				// \r at end of buffer: set flag to skip following \n if it comes
 				termLen = 1
+				w.skipLF = true
 			} else {
-				// \r at end of buffer: ambiguous, wait for more data
-				w.searchFrom = i
-				return
+				// bare \r followed by non-\n
+				termLen = 1
 			}
 		}
 

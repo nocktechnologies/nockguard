@@ -999,3 +999,51 @@ func TestSSEParserBareCRMultiLineEvent(t *testing.T) {
 		}
 	})
 }
+
+// TestSSEParserCRLFSplitAfterCR tests \r at end of one Write followed by \n\r\n in next.
+// Verifies no phantom blank line and correct position tracking when using WHATWG SSE parser with skipLF.
+func TestSSEParserCRLFSplitAfterCR(t *testing.T) {
+	rec := httptest.NewRecorder()
+	iw := &initWriter{
+		real:   rec,
+		id:     json.RawMessage("1"),
+		header: make(http.Header),
+		mode:   "sse",
+	}
+	iw.header.Set("Content-Type", "text/event-stream")
+
+	// First write: complete data line ending with bare \r
+	iw.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\r"))
+	if iw.committed || iw.rejected {
+		t.Fatal("incomplete line should not commit")
+	}
+
+	// Second write: \n (skipped as second half of CRLF), then blank line \r\n
+	iw.Write([]byte("\n\r\n"))
+	if !iw.committed {
+		t.Fatal("should commit after blank line")
+	}
+}
+
+// TestSSEParserKeepOpenCROnly tests that a keep-open CR-only initialize response commits.
+// Bug: "...\r\r" with no bytes after and NO finalize must commit.
+// With old code, the final \r waits for more data. With skipLF, the bare \r
+// at EOF is a terminator, and the final \r marks the blank line.
+func TestSSEParserKeepOpenCROnly(t *testing.T) {
+	rec := httptest.NewRecorder()
+	iw := &initWriter{
+		real:   rec,
+		id:     json.RawMessage("1"),
+		header: make(http.Header),
+		mode:   "sse",
+	}
+	iw.header.Set("Content-Type", "text/event-stream")
+
+	eventData := []byte("data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\rdata: {}}\r\r")
+
+	iw.Write(eventData)
+	// NO finalize() call - the event must commit during Write
+	if !iw.committed {
+		t.Fatalf("keep-open CR-only event should commit without finalize; committed=%v rejected=%v", iw.committed, iw.rejected)
+	}
+}
