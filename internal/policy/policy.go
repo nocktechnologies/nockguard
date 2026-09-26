@@ -853,15 +853,16 @@ func (e *Engine) AuditorFor(agent string) (*audit.Auditor, error) {
 	return audit.New(AgentAuditPath(path, agent), audit.WithEd25519Key(priv))
 }
 
-// SigningKeyEnvNamesFor extends SigningKeyEnvNames with the per-agent key env
-// var for the given agent when it is present in the environment. The proxy uses
-// this to strip ALL signing seeds (global + per-agent) from the child process
-// before spawning it, so the policed agent cannot read and forge any key.
-func (e *Engine) SigningKeyEnvNamesFor(agent string) []string {
+// SigningKeyEnvNamesFor includes every inherited per-agent signing key, even
+// for agents absent from this policy. No upstream child needs another agent's
+// signing authority. The agent argument is retained for caller compatibility.
+func (e *Engine) SigningKeyEnvNamesFor(_ string) []string {
 	names := e.SigningKeyEnvNames()
-	envName := AgentKeyEnvName(agent)
-	if os.Getenv(envName) != "" {
-		names = append(names, envName)
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(name, "NOCKGUARD_AGENT_") && strings.HasSuffix(name, "_ED25519_KEY") {
+			names = append(names, name)
+		}
 	}
 	return names
 }

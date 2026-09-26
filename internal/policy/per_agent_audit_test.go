@@ -183,6 +183,29 @@ agents:
 	}
 }
 
+func TestSigningKeyEnvNamesForOtherAgents(t *testing.T) {
+	eng, err := LoadBytes([]byte("agents:\n  kit:\n    mode: allow\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, value string
+		strip       bool
+	}{
+		{AgentKeyEnvName("mira-nockos"), "test-only-seed", true},
+		{AgentKeyEnvName("not-in-policy"), "", true},
+		{AgentPubKeyEnvName("mira-nockos"), "public", false},
+		{"NOCKGUARD_AGENT_LABEL", "label", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(tc.name, tc.value)
+			if got := contains(eng.SigningKeyEnvNamesFor("kit"), tc.name); got != tc.strip {
+				t.Errorf("strip %s = %v, want %v", tc.name, got, tc.strip)
+			}
+		})
+	}
+}
+
 // TestSigningKeyEnvNamesForNoAgentKeyUnchanged verifies that
 // SigningKeyEnvNamesFor returns the same set as SigningKeyEnvNames when no
 // per-agent key env var is set.
