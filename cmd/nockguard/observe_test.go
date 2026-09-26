@@ -16,6 +16,7 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 	"github.com/nocktechnologies/nockguard/internal/proxy"
+	"golang.org/x/sys/unix"
 )
 
 // TestObserveSetupSignsTrailAndReusesKey is the core proof: zero-config observe
@@ -74,6 +75,13 @@ func TestObserveSetupSignsTrailAndReusesKey(t *testing.T) {
 	}
 	if n < 1 {
 		t.Fatalf("signed trail has %d entries, want >= 1 (the allowed call)", n)
+	}
+	keyDirInfo, err := os.Stat(filepath.Join(home, ".nockguard", "keys"))
+	if err != nil {
+		t.Fatalf("stat observe key directory: %v", err)
+	}
+	if perm := keyDirInfo.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("observe key directory permissions = %o, want 700", perm)
 	}
 
 	// Second run in the same HOME must reuse the SAME key, and must open the
@@ -176,6 +184,317 @@ func TestEnsureObserveKeyConcurrentFirstStart(t *testing.T) {
 	}
 	if _, _, err := loadSeedHex(seedPath, string(seed)); err != nil {
 		t.Fatalf("published seed is incomplete or invalid: %v", err)
+	}
+}
+
+func TestOpenOrCreateObserveDirExistingDirValidatesAndSyncsParent(t *testing.T) {
+	parentPath := t.TempDir()
+	parent, err := os.Open(parentPath)
+	if err != nil {
+		t.Fatalf("open parent: %v", err)
+	}
+	defer parent.Close()
+	if err := os.Mkdir(filepath.Join(parentPath, "keys"), 0o700); err != nil {
+		t.Fatalf("pre-create key dir: %v", err)
+	}
+
+	syncCalls := 0
+	dir, err := openOrCreateObserveDir(int(parent.Fd()), "keys", 0o700, func(fd int) error {
+		if fd != int(parent.Fd()) {
+			t.Fatalf("sync parent fd = %d, want %d", fd, parent.Fd())
+		}
+		syncCalls++ // The callback runs only after the no-follow descriptor validates.
+		return unix.Fsync(fd)
+	})
+	if err != nil {
+		t.Fatalf("open pre-existing key dir: %v", err)
+	}
+	defer dir.Close()
+	if syncCalls != 1 {
+		t.Fatalf("parent sync calls = %d, want 1 after Mkdirat EEXIST", syncCalls)
+	}
+}
+
+func TestEnsureObserveKeyAcceptsSetgidCreatedDirs(t *testing.T) {
+	home := t.TempDir()
+	if err := os.Chmod(home, 0o700|os.ModeSetgid); err != nil {
+		t.Fatalf("set setgid home permissions: %v", err)
+	}
+	probe := filepath.Join(home, "setgid-probe")
+	if err := os.Mkdir(probe, 0o700); err != nil {
+		t.Fatalf("create setgid inheritance probe: %v", err)
+	}
+	info, err := os.Stat(probe)
+	if err != nil {
+		t.Fatalf("stat setgid inheritance probe: %v", err)
+	}
+	if info.Mode()&os.ModeSetgid == 0 {
+		t.Skip("filesystem does not inherit setgid on new directories")
+	}
+	if err := os.Remove(probe); err != nil {
+		t.Fatalf("remove setgid inheritance probe: %v", err)
+	}
+
+	if _, _, err := ensureObserveKey(home, defaultObserveAgent); err != nil {
+		t.Fatalf("ensureObserveKey with setgid parent: %v", err)
+	}
+	info, err = os.Stat(filepath.Join(home, ".nockguard"))
+	if err != nil {
+		t.Fatalf("stat created nockguard dir: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("created nockguard dir permissions = %o, want 700", got)
+	}
+}
+
+func TestEnsureObserveKeyAcceptsExistingNockguardDirWithoutGroupOrOtherWrite(t *testing.T) {
+	home := t.TempDir()
+	nockguardDir := filepath.Join(home, ".nockguard")
+	if err := os.Mkdir(nockguardDir, 0o755); err != nil {
+		t.Fatalf("create existing nockguard dir: %v", err)
+	}
+	if err := os.Chmod(nockguardDir, 0o755); err != nil {
+		t.Fatalf("set existing nockguard dir permissions: %v", err)
+	}
+
+	if _, _, err := ensureObserveKey(home, defaultObserveAgent); err != nil {
+		t.Fatalf("ensureObserveKey with existing nockguard dir: %v", err)
+	}
+	info, err := os.Stat(nockguardDir)
+	if err != nil {
+		t.Fatalf("stat existing nockguard dir: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("existing nockguard dir permissions = %o, want 755", got)
+	}
+}
+
+func TestEnsureObserveKeyRejectsGroupWritableNockguardDir(t *testing.T) {
+	home := t.TempDir()
+	nockguardDir := filepath.Join(home, ".nockguard")
+	if err := os.Mkdir(nockguardDir, 0o700); err != nil {
+		t.Fatalf("create group-writable nockguard dir: %v", err)
+	}
+	if err := os.Chmod(nockguardDir, 0o770); err != nil {
+		t.Fatalf("set group-writable nockguard dir permissions: %v", err)
+	}
+
+	if _, _, err := ensureObserveKey(home, defaultObserveAgent); err == nil {
+		t.Fatal("ensureObserveKey accepted a group-writable nockguard dir")
+	} else if !strings.Contains(err.Error(), "permissions") {
+		t.Fatalf("ensureObserveKey error = %v, want permissions refusal", err)
+	}
+}
+
+func TestEnsureObserveKeyRejectsForeignOwnedNockguardDir(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to create a foreign-owned directory")
+	}
+
+	home := t.TempDir()
+	nockguardDir := filepath.Join(home, ".nockguard")
+	if err := os.Mkdir(nockguardDir, 0o700); err != nil {
+		t.Fatalf("create nockguard dir: %v", err)
+	}
+	if err := os.Chown(nockguardDir, 1, -1); err != nil {
+		t.Fatalf("make nockguard dir foreign-owned: %v", err)
+	}
+
+	if _, _, err := ensureObserveKey(home, defaultObserveAgent); err == nil {
+		t.Fatal("ensureObserveKey accepted a foreign-owned nockguard dir")
+	} else if !strings.Contains(err.Error(), "owner uid") {
+		t.Fatalf("ensureObserveKey error = %v, want owner refusal", err)
+	}
+}
+
+func TestEnsureObserveKeyTightensReadOnlyExcessKeyDirPermissions(t *testing.T) {
+	for _, mode := range []os.FileMode{0o750, 0o755} {
+		t.Run(mode.String(), func(t *testing.T) {
+			home := t.TempDir()
+			nockguardDir := filepath.Join(home, ".nockguard")
+			keyDir := filepath.Join(nockguardDir, "keys")
+			if err := os.Mkdir(nockguardDir, 0o700); err != nil {
+				t.Fatalf("create nockguard dir: %v", err)
+			}
+			if err := os.Mkdir(keyDir, 0o700); err != nil {
+				t.Fatalf("create key dir: %v", err)
+			}
+			if err := os.Chmod(keyDir, mode); err != nil {
+				t.Fatalf("set key dir permissions: %v", err)
+			}
+
+			if _, _, err := ensureObserveKey(home, defaultObserveAgent); err != nil {
+				t.Fatalf("ensureObserveKey with %o key dir: %v", mode, err)
+			}
+			info, err := os.Stat(keyDir)
+			if err != nil {
+				t.Fatalf("stat key dir: %v", err)
+			}
+			if got := info.Mode().Perm(); got != 0o700 {
+				t.Fatalf("key dir permissions = %o, want 700", got)
+			}
+		})
+	}
+}
+
+func TestEnsureObserveKeyRejectsWritableExistingKeyDirWithoutReadingKey(t *testing.T) {
+	for _, mode := range []os.FileMode{0o770, 0o777} {
+		t.Run(mode.String(), func(t *testing.T) {
+			home := t.TempDir()
+			keyDir := filepath.Join(home, ".nockguard", "keys")
+			if err := os.MkdirAll(keyDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			keyPath := filepath.Join(keyDir, defaultObserveAgent+".ed25519")
+			if err := os.WriteFile(keyPath, []byte("planted-invalid-seed"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(keyDir, mode); err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err := ensureObserveKey(home, defaultObserveAgent)
+			if err == nil {
+				t.Fatalf("ensureObserveKey accepted a pre-existing %o key dir", mode)
+			}
+			if !strings.Contains(err.Error(), "group/other writable") || strings.Contains(err.Error(), "parsing persisted key") {
+				t.Fatalf("ensureObserveKey error = %v, want directory refusal before key read", err)
+			}
+			info, statErr := os.Stat(keyDir)
+			if statErr != nil {
+				t.Fatal(statErr)
+			}
+			if got := info.Mode().Perm(); got != mode {
+				t.Fatalf("refused key dir permissions = %o, want unchanged %o", got, mode)
+			}
+		})
+	}
+}
+
+func TestEnsureObserveKeyRejectsGroupWritableExistingKeyFile(t *testing.T) {
+	home := t.TempDir()
+	keyDir := filepath.Join(home, ".nockguard", "keys")
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seedHex, _ := freshEd25519(t)
+	keyPath := filepath.Join(keyDir, defaultObserveAgent+".ed25519")
+	if err := os.WriteFile(keyPath, []byte(seedHex), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(keyPath, 0o620); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := ensureObserveKey(home, defaultObserveAgent); err == nil {
+		t.Fatal("ensureObserveKey accepted a group-writable key file")
+	} else if !strings.Contains(err.Error(), "group/other writable") {
+		t.Fatalf("ensureObserveKey error = %v, want key-file permission refusal", err)
+	}
+}
+
+func TestEnsureObserveKeyRejectsForeignOwnedKeyDir(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to create a foreign-owned directory")
+	}
+
+	home := t.TempDir()
+	keyDir := filepath.Join(home, ".nockguard", "keys")
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(keyDir, 1, -1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ensureObserveKey(home, defaultObserveAgent); err == nil {
+		t.Fatal("ensureObserveKey accepted a foreign-owned key dir")
+	} else if !strings.Contains(err.Error(), "owner uid") {
+		t.Fatalf("ensureObserveKey error = %v, want owner refusal", err)
+	}
+}
+
+func TestEnsureObserveKeyRejectsForeignOwnedKeyFile(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to create a foreign-owned file")
+	}
+
+	home := t.TempDir()
+	keyDir := filepath.Join(home, ".nockguard", "keys")
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seedHex, _ := freshEd25519(t)
+	keyPath := filepath.Join(keyDir, defaultObserveAgent+".ed25519")
+	if err := os.WriteFile(keyPath, []byte(seedHex), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(keyPath, 1, -1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ensureObserveKey(home, defaultObserveAgent); err == nil {
+		t.Fatal("ensureObserveKey accepted a foreign-owned key file")
+	} else if !strings.Contains(err.Error(), "owner uid") {
+		t.Fatalf("ensureObserveKey error = %v, want owner refusal", err)
+	}
+}
+
+func TestEnsureObserveKeyRejectsSymlinkedPaths(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, home, target string)
+	}{
+		{
+			name: "nockguard state dir",
+			setup: func(t *testing.T, home, target string) {
+				t.Helper()
+				if err := os.Symlink(target, filepath.Join(home, ".nockguard")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "keyDir",
+			setup: func(t *testing.T, home, target string) {
+				t.Helper()
+				if err := os.Mkdir(filepath.Join(home, ".nockguard"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, filepath.Join(home, ".nockguard", "keys")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "private key",
+			setup: func(t *testing.T, home, target string) {
+				t.Helper()
+				keyDir := filepath.Join(home, ".nockguard", "keys")
+				if err := os.MkdirAll(keyDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(target, "seed"), filepath.Join(keyDir, defaultObserveAgent+".ed25519")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home, target := t.TempDir(), t.TempDir()
+			tt.setup(t, home, target)
+
+			if _, _, err := ensureObserveKey(home, defaultObserveAgent); err == nil {
+				t.Fatal("ensureObserveKey accepted a symlinked state path")
+			} else if !strings.Contains(err.Error(), "symlink") {
+				t.Fatalf("ensureObserveKey error = %v, want a symlink refusal", err)
+			}
+			if entries, err := os.ReadDir(target); err != nil {
+				t.Fatal(err)
+			} else if len(entries) != 0 {
+				t.Fatalf("symlink target received key state: %v", entries)
+			}
+		})
 	}
 }
 
@@ -315,47 +634,4 @@ func freshEd25519(t *testing.T) (privSeedHex, pubHex string) {
 		t.Fatalf("generate key: %v", err)
 	}
 	return hex.EncodeToString(priv.Seed()), hex.EncodeToString(pub)
-}
-
-// TestDurableMkdirAll covers the directory-durability helper behind the
-// zero-config observe key path: it creates a missing nested hierarchy, is a
-// no-op error-free on an already-existing directory, and respects perms. The
-// crash-durability the fsyncs provide is not unit-testable without fault
-// injection; this asserts the helper's observable happy-path behavior so a
-// regression in the create/idempotency logic is caught.
-func TestDurableMkdirAll(t *testing.T) {
-	root := t.TempDir()
-
-	// Missing nested hierarchy is fully created.
-	nested := filepath.Join(root, ".nockguard", "keys")
-	if err := durableMkdirAll(nested, 0o700); err != nil {
-		t.Fatalf("durableMkdirAll(missing) = %v, want nil", err)
-	}
-	info, err := os.Stat(nested)
-	if err != nil {
-		t.Fatalf("stat after create: %v", err)
-	}
-	if !info.IsDir() {
-		t.Fatalf("%s is not a directory", nested)
-	}
-	if perm := info.Mode().Perm(); perm != 0o700 {
-		t.Fatalf("perm = %o, want 700", perm)
-	}
-
-	// Idempotent: calling again on an existing hierarchy succeeds and preserves it.
-	if err := durableMkdirAll(nested, 0o700); err != nil {
-		t.Fatalf("durableMkdirAll(existing) = %v, want nil", err)
-	}
-	if _, err := os.Stat(nested); err != nil {
-		t.Fatalf("stat after idempotent call: %v", err)
-	}
-
-	// A file where a directory is expected surfaces an error rather than a panic.
-	filePath := filepath.Join(root, "afile")
-	if werr := os.WriteFile(filePath, []byte("x"), 0o600); werr != nil {
-		t.Fatalf("seeding file: %v", werr)
-	}
-	if err := durableMkdirAll(filepath.Join(filePath, "child"), 0o700); err == nil {
-		t.Fatalf("durableMkdirAll under a regular file = nil, want error")
-	}
 }

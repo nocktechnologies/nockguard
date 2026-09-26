@@ -254,6 +254,10 @@ nockguard policy shadow-report --agent coder
 `0 would-deny entries` means the shadow window is clean enough for human review
 before flipping `mode: allow` to `mode: deny`.
 
+Zero-config observe persists its per-agent signing seed at
+`~/.nockguard/keys/<agent>.ed25519`; it refuses symbolic links in the
+`~/.nockguard` state path, key directory, or seed file.
+
 ### Tamper-evidence (HMAC hash-chain)
 
 Audit entries can be signed with an HMAC hash-chain — each entry's signature covers its own content plus the previous entry's signature, so any insertion, deletion, or edit anywhere in the trail breaks the chain from that point forward. Signing is opt-in (provide a key); without one, the trail behaves exactly as the unsigned JSONL above. This closes Phase 4.
