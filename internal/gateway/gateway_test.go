@@ -707,3 +707,103 @@ func TestJSONErrorResponseStillWorks(t *testing.T) {
 	}
 	g.mu.Unlock()
 }
+
+// TestSSEInitializeKeepOpenCommitsBeforeTimeout verifies that when an upstream
+// responds to initialize with SSE and keeps the stream open, the gateway sends
+// the matching result to the client within 2 seconds (not waiting for the handler
+// to return or the 5-minute timeout).
+func TestSSEInitializeKeepOpenCommitsBeforeTimeout(t *testing.T) {
+	c := testConfig(t)
+	finished := make(chan struct{})
+
+	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Respond to initialize with SSE
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Mcp-Session-Id", "upstream-session-id")
+			fmt.Fprint(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n")
+			w.(http.Flusher).Flush()
+			// Block to simulate keep-open upstream
+			select {
+			case <-finished:
+			case <-r.Context().Done():
+			}
+		})
+	})
+
+	// Use httptest.NewServer to run over actual HTTP
+	server := httptest.NewServer(g)
+	defer server.Close()
+
+	// Make initialize request with short timeout
+	initReq, err := http.NewRequest("POST", server.URL+"/mcp", strings.NewReader(initialize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	initReq.Host = "guard.example"
+	initReq.Header.Set("Authorization", "Bearer connector-test-token")
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	initResp, err := client.Do(initReq)
+	if err != nil {
+		t.Fatalf("initialize request failed (timeout?): %v", err)
+	}
+	defer initResp.Body.Close()
+
+	// Verify response arrived with headers before 2-second timeout
+	if initResp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", initResp.StatusCode)
+	}
+
+	sid := initResp.Header.Get("Mcp-Session-Id")
+	if sid == "" {
+		t.Fatal("Mcp-Session-Id header missing in initialize response")
+	}
+	if strings.Contains(sid, "upstream") {
+		t.Fatalf("session ID leaked upstream value: %s", sid)
+	}
+
+	// Read first line of response body (should be the SSE event) within timeout
+	reader := bufio.NewReader(initResp.Body)
+	line, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	if !strings.HasPrefix(line, "data: ") {
+		t.Fatalf("expected SSE data line, got: %s", line)
+	}
+
+	// Verify session was created
+	g.mu.Lock()
+	s := g.sessions[sid]
+	g.mu.Unlock()
+	if s == nil {
+		t.Fatal("session not found after initialize")
+	}
+
+	// Close the upstream handler's blocking channel so next request can proceed
+	close(finished)
+
+	// Make a follow-up request with the session ID to verify it's usable
+	listReq, err := http.NewRequest("POST", server.URL+"/mcp", strings.NewReader(list))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listReq.Host = "guard.example"
+	listReq.Header.Set("Authorization", "Bearer connector-test-token")
+	listReq.Header.Set("Mcp-Session-Id", sid)
+
+	listResp, err := client.Do(listReq)
+	if err != nil {
+		t.Fatalf("follow-up request failed: %v", err)
+	}
+	defer listResp.Body.Close()
+
+	if listResp.StatusCode != 200 {
+		body, _ := io.ReadAll(listResp.Body)
+		t.Fatalf("follow-up request got %d: %s", listResp.StatusCode, string(body))
+	}
+	if listResp.Header.Get("Mcp-Session-Id") != sid {
+		t.Fatal("follow-up response missing session ID")
+	}
+}
