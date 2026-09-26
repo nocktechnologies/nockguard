@@ -5,6 +5,8 @@ All notable changes to NockGuard are documented here.
 ## Unreleased
 
 ### Fixed
+- Reject missing, invalid, zero, and negative rate-limit windows at policy load
+  time, including default-agent policies.
 - Show redacted MCP argument scalars in approval prompts so amounts and targets
   are visible, without exposing nested values or envelope metadata.
 - Preserve pagination and tool metadata when hiding denied tools; apply the same

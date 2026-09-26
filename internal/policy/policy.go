@@ -209,6 +209,11 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 	// the policy engine match the fail-loud posture of LimiterFor and
 	// validate.New, which both error on misconfiguration at startup.
 	for agent, pol := range cfg.Agents {
+		if pol.RateLimit != nil {
+			if _, err := rateLimitWindow(agent, pol.RateLimit); err != nil {
+				return nil, err
+			}
+		}
 		for field, patterns := range map[string][]string{
 			"allow":            pol.Allow,
 			"deny":             pol.Deny,
@@ -641,7 +646,7 @@ func (e *Engine) ValidatorFor(agent string) (*validate.Validator, error) {
 // LimiterFor builds the Phase 3 rate/spend limiter for an agent (falling back
 // to the "default" policy). Returns a nil limiter when neither control is
 // configured — callers guard with limiter.Enabled() (nil-safe), exactly like
-// ValidatorFor. A rate_limit with a missing or unparseable window is a
+// ValidatorFor. A rate_limit with a missing, nonpositive or unparseable window is a
 // misconfiguration and returns an error so it fails loud at startup.
 func (e *Engine) LimiterFor(agent string) (*ratelimit.Limiter, error) {
 	pol, ok := e.config.Agents[agent]
@@ -654,12 +659,9 @@ func (e *Engine) LimiterFor(agent string) (*ratelimit.Limiter, error) {
 
 	var cfg ratelimit.Config
 	if pol.RateLimit != nil {
-		if pol.RateLimit.Window == "" {
-			return nil, fmt.Errorf("rate_limit for agent %q requires a window (e.g. \"1m\")", agent)
-		}
-		window, err := time.ParseDuration(pol.RateLimit.Window)
+		window, err := rateLimitWindow(agent, pol.RateLimit)
 		if err != nil {
-			return nil, fmt.Errorf("rate_limit window %q for agent %q: %w", pol.RateLimit.Window, agent, err)
+			return nil, err
 		}
 		cfg.MaxCalls = pol.RateLimit.MaxCalls
 		cfg.Window = window
@@ -668,6 +670,20 @@ func (e *Engine) LimiterFor(agent string) (*ratelimit.Limiter, error) {
 		cfg.SpendCap = pol.SpendCap.MaxCalls
 	}
 	return ratelimit.New(cfg), nil
+}
+
+func rateLimitWindow(agent string, pol *RateLimitPolicy) (time.Duration, error) {
+	if pol.Window == "" {
+		return 0, fmt.Errorf("rate_limit for agent %q requires a window (e.g. \"1m\")", agent)
+	}
+	window, err := time.ParseDuration(pol.Window)
+	if err != nil {
+		return 0, fmt.Errorf("rate_limit window %q for agent %q: %w", pol.Window, agent, err)
+	}
+	if window <= 0 {
+		return 0, fmt.Errorf("rate_limit window %q for agent %q must be positive", pol.Window, agent)
+	}
+	return window, nil
 }
 
 // TrustFor builds the opt-in behavioral trust accumulator for an agent. Missing

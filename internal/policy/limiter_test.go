@@ -1,6 +1,45 @@
 package policy
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
+
+func TestRateLimitWindowValidation(t *testing.T) {
+	for _, tc := range []struct {
+		window string
+		valid  bool
+	}{
+		{"0s", false}, {"-1m", false}, {"", false}, {"not-a-duration", false}, {"1m", true}, {"0.5s", true},
+	} {
+		t.Run(tc.window, func(t *testing.T) {
+			// Validate the default too, even before any agent constructs a limiter.
+			body := fmt.Sprintf("agents:\n  default:\n    rate_limit:\n      max_calls: 1\n      window: %q\n", tc.window)
+			for _, load := range []func() (*Engine, error){
+				func() (*Engine, error) { return LoadBytes([]byte(body)) },
+				func() (*Engine, error) { return Load(writePolicy(t, body)) },
+			} {
+				eng, err := load()
+				if (err == nil) != tc.valid {
+					t.Fatalf("window %q: err=%v, valid=%v", tc.window, err, tc.valid)
+				}
+				if !tc.valid {
+					continue
+				}
+				lim, err := eng.LimiterFor("unlisted")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := lim.Allow(); !ok {
+					t.Fatal("first call denied")
+				}
+				if _, ok := lim.Allow(); ok {
+					t.Fatal("second call bypassed limit")
+				}
+			}
+		})
+	}
+}
 
 func TestLimiterForDisabledWhenUnset(t *testing.T) {
 	path := writePolicy(t, `
@@ -72,39 +111,6 @@ agents:
 	}
 	if reason, ok := lim.Allow(); ok || reason != "spend-cap" {
 		t.Fatalf("second call should hit spend cap, got ok=%v reason=%q", ok, reason)
-	}
-}
-
-func TestLimiterForInvalidWindowErrors(t *testing.T) {
-	path := writePolicy(t, `
-agents:
-  kit:
-    rate_limit:
-      max_calls: 5
-      window: "not-a-duration"
-`)
-	eng, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := eng.LimiterFor("kit"); err == nil {
-		t.Fatal("invalid window duration should fail loud at build time")
-	}
-}
-
-func TestLimiterForMissingWindowErrors(t *testing.T) {
-	path := writePolicy(t, `
-agents:
-  kit:
-    rate_limit:
-      max_calls: 5
-`)
-	eng, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := eng.LimiterFor("kit"); err == nil {
-		t.Fatal("rate_limit with max_calls but no window should fail loud")
 	}
 }
 
