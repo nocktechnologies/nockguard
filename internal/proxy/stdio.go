@@ -1041,8 +1041,9 @@ func sanitizedEnv(strip []string) []string {
 // call the proxy cannot interpret, which the caller fails closed. Top-level
 // duplicate keys collapse to the last value (the value the name gate sees), so
 // the forwarded bytes carry exactly one of each key and the upstream cannot
-// resolve a shadow name. Nested "arguments" are kept verbatim as RawMessage, so
-// numbers inside tool arguments are never re-encoded (no float-precision risk).
+// resolve a shadow name. Canonicalize nested objects too: a typed upstream may
+// merge duplicate objects that the validator's map decoder replaces. UseNumber
+// preserves numeric literals without passing them through float64.
 func canonicalToolCall(params json.RawMessage) (name string, canonical json.RawMessage, ok bool) {
 	if len(params) == 0 {
 		return "", nil, false
@@ -1058,7 +1059,13 @@ func canonicalToolCall(params json.RawMessage) (name string, canonical json.RawM
 	if err := json.Unmarshal(rawName, &name); err != nil {
 		return "", nil, false
 	}
-	out, err := json.Marshal(obj)
+	var value map[string]interface{}
+	dec := json.NewDecoder(bytes.NewReader(params))
+	dec.UseNumber()
+	if err := dec.Decode(&value); err != nil {
+		return "", nil, false
+	}
+	out, err := json.Marshal(value)
 	if err != nil {
 		return "", nil, false
 	}

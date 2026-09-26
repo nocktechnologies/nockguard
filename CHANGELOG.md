@@ -4,6 +4,10 @@ All notable changes to NockGuard are documented here.
 
 ## Unreleased
 
+### Fixed
+- Canonicalize nested tool arguments before validation and forwarding, closing
+  duplicate-object parser differences while preserving exact numeric literals.
+
 ### Added
 - `nockguard selftest` — proof-of-block self-test (N9070). Proves the live
   enforcement path actually **blocks**: a policy-denied canary tool is denied at
