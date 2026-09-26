@@ -412,6 +412,23 @@ func (w *initWriter) parseSSEEvents() {
 		w.bytesExamined++
 		b := data[i]
 
+		// A CR at the end of the previous write already ended its line; an LF
+		// arriving first in this write is the rest of that CRLF, not a new line.
+		if w.skipLF {
+			w.skipLF = false
+			if b == '\n' {
+				if w.pos == i {
+					w.pos++
+				}
+				if w.lineStart == i {
+					w.lineStart++
+				}
+				i++
+				w.searchFrom = i
+				continue
+			}
+		}
+
 		var termLen int
 		isTerminator := false
 

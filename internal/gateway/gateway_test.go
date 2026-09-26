@@ -1047,3 +1047,29 @@ func TestSSEParserKeepOpenCROnly(t *testing.T) {
 		t.Fatalf("keep-open CR-only event should commit without finalize; committed=%v rejected=%v", iw.committed, iw.rejected)
 	}
 }
+
+// A CRLF split across writes inside an event must not create a phantom blank
+// line: the LF that completes a CR seen at the end of one write is skipped.
+func TestSSEParserCRLFSplitMidEventNoPhantomBlankLine(t *testing.T) {
+	for _, perByte := range []bool{false, true} {
+		rec := httptest.NewRecorder()
+		iw := &initWriter{real: rec, id: json.RawMessage("1"), header: make(http.Header), mode: "sse"}
+		iw.header.Set("Content-Type", "text/event-stream")
+		parts := [][]byte{
+			[]byte("data: {\"jsonrpc\":\"2.0\",\r"),
+			[]byte("\ndata: \"id\":1,\"result\":{}}\r\n\r\n"),
+		}
+		for _, p := range parts {
+			if perByte {
+				for i := range p {
+					iw.Write(p[i : i+1])
+				}
+			} else {
+				iw.Write(p)
+			}
+		}
+		if !iw.committed || iw.rejected {
+			t.Fatalf("perByte=%v: split CRLF inside an event must not end the event early; committed=%v rejected=%v", perByte, iw.committed, iw.rejected)
+		}
+	}
+}
