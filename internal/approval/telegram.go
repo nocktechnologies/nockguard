@@ -58,10 +58,20 @@ func (t *TelegramApprover) Ask(req Request) Verdict {
 	var call struct {
 		Arguments json.RawMessage `json:"arguments"`
 	}
-	// Params is the MCP tools/call envelope. Summarize only its arguments;
-	// summarizing the envelope would hide every useful scalar behind {…}.
-	_ = json.Unmarshal(req.Params, &call)
-	if summary := summarizeParams(call.Arguments); summary != "" {
+	// Params is usually the MCP tools/call envelope; summarize only its
+	// arguments there, since summarizing the whole envelope would hide every
+	// useful scalar behind {…}. Not every caller passes an envelope, though —
+	// the fail-closed unextractable-name path in decideToolCall hands over the
+	// entire JSON-RPC line, which has no top-level "arguments" at all. Fall
+	// back to summarizing the raw params directly whenever the envelope
+	// decode fails or yields no (or a null) arguments field, so that path
+	// still shows the human SOMETHING instead of an empty prompt.
+	envelopeErr := json.Unmarshal(req.Params, &call)
+	summaryParams := req.Params
+	if envelopeErr == nil && len(call.Arguments) > 0 && string(call.Arguments) != "null" {
+		summaryParams = call.Arguments
+	}
+	if summary := summarizeParams(summaryParams); summary != "" {
 		text += "\n" + summary
 	}
 	text += "\n\nApprove this call?"

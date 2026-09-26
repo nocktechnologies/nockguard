@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -291,9 +292,25 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 
 	var request jsonrpc.Message
 	if json.Unmarshal(body, &request) == nil && request.Method == "tools/list" && request.ID != nil {
-		l.forwardToolList(w, resp, body, request.ID, seq)
-		*resolved = true
-		l.gate.resolveAudit(seq)
+		// A tools/list SSE response can stay open indefinitely after delivering
+		// the matching discovery event (keep-alive upstream). Audits flush
+		// strictly in sequence order, so resolveOnce lets forwardToolList
+		// resolve seq as soon as that event is filtered and flushed — instead
+		// of only after the whole stream ends — without blocking every later
+		// request's audit behind an upstream that never closes. The sync.Once
+		// guard makes the early resolve and this unconditional fallback call
+		// safe together: only the first one takes effect (resolveAudit itself
+		// is also idempotent past the flush frontier, so a double call here is
+		// belt-and-suspenders, not load-bearing).
+		var once sync.Once
+		resolveOnce := func() {
+			once.Do(func() {
+				*resolved = true
+				l.gate.resolveAudit(seq)
+			})
+		}
+		l.forwardToolList(w, resp, body, request.ID, seq, resolveOnce)
+		resolveOnce()
 		return
 	}
 
