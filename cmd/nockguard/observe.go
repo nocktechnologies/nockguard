@@ -333,8 +333,8 @@ func readObserveKey(dirFD int, name string) ([]byte, bool, error) {
 	if after.Uid != uint32(os.Geteuid()) {
 		return nil, true, fmt.Errorf("%s owner uid = %d, want %d", name, after.Uid, os.Geteuid())
 	}
-	if mode := uint32(after.Mode) & 0o777; mode&0o022 != 0 {
-		return nil, true, fmt.Errorf("%s permissions = %o: group/other writable; inspect and recreate the key file", name, mode)
+	if mode := uint32(after.Mode) & 0o777; mode&0o077 != 0 {
+		return nil, true, fmt.Errorf("%s permissions = %o: group/other readable or writable; inspect and recreate the key file", name, mode)
 	}
 	seedHex, err := io.ReadAll(f)
 	return seedHex, true, err
