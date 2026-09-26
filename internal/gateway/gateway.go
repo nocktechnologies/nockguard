@@ -446,13 +446,11 @@ func (w *initWriter) parseSSEEvents() {
 			if w.lineStart > w.pos {
 				// Blank line marks end of event; dispatch it
 				eventData := data[w.pos:w.lineStart]
-				eventLines := bytes.Split(eventData, []byte("\n"))
-				// Clean up trailing \r from lines (from CRLF or bare CR)
-				for j := range eventLines {
-					if len(eventLines[j]) > 0 && eventLines[j][len(eventLines[j])-1] == '\r' {
-						eventLines[j] = eventLines[j][:len(eventLines[j])-1]
-					}
-				}
+				// Normalize line endings: replace \r\n with \n, then \r with \n
+				// This handles bare \r, CRLF, and LF uniformly
+				normalized := bytes.ReplaceAll(eventData, []byte("\r\n"), []byte("\n"))
+				normalized = bytes.ReplaceAll(normalized, []byte("\r"), []byte("\n"))
+				eventLines := bytes.Split(normalized, []byte("\n"))
 
 				if w.processSSEEvent(eventLines) {
 					w.committed = true
