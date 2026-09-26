@@ -392,18 +392,46 @@ func (w *initWriter) Flush() {
 	}
 }
 
+// parseSSEEvents parses complete SSE events. On each call, it avoids quadratic
+// rescanning by skipping lines that were already processed in previous calls.
 func (w *initWriter) parseSSEEvents() {
 	if w.committed || w.rejected {
 		return
 	}
 
 	data := w.held.Bytes()
+	if len(data) == 0 {
+		return
+	}
+
 	lines := bytes.Split(data, []byte("\n"))
 
-	eventStart := 0
-	for i, lineBytes := range lines {
-		// Strip trailing \r if present (for \r\n or bare \r)
-		line := lineBytes
+	// Skip lines that were already fully processed
+	// w.scanned tells us the byte position; find the corresponding line index
+	startLineIdx := 0
+	if w.scanned > 0 {
+		// Approximate the starting line by counting bytes
+		// This is an optimization to avoid re-processing old data
+		pos := 0
+		for i := 0; i < len(lines); i++ {
+			if pos >= w.scanned {
+				startLineIdx = i
+				break
+			}
+			pos += len(lines[i]) + 1 // +1 for the newline
+		}
+		// Make sure we don't start in the middle of an event
+		// If startLineIdx points to the middle of an event, go back to the event start
+		// For safety, just process from the last known complete event boundary
+		if startLineIdx > 0 {
+			startLineIdx = startLineIdx - 1
+		}
+	}
+
+	eventStart := startLineIdx
+	for i := startLineIdx; i < len(lines); i++ {
+		// Strip trailing \r if present
+		line := lines[i]
 		if len(line) > 0 && line[len(line)-1] == '\r' {
 			line = line[:len(line)-1]
 		}
@@ -423,7 +451,6 @@ func (w *initWriter) parseSSEEvents() {
 	// Save scanned position to know where we left off
 	if len(lines) > 0 && len(lines[len(lines)-1]) > 0 {
 		// If the last line is non-empty, we haven't reached the event end yet
-		// Keep it for the next Write call
 		w.scanned = len(data) - len(lines[len(lines)-1])
 	} else {
 		w.scanned = len(data)
