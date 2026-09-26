@@ -28,8 +28,9 @@ const httpListenerBodyCap = 10 * 1024 * 1024
 
 // HTTPListener is the N8761 Option-A local HTTP forward-proxy. It puts the SAME
 // enforcement gate the stdio proxy runs (StdioProxy.decide: policy → validate →
-// rate-limit → approval → Ed25519 audit) behind an HTTP listener the flagship
-// seat's managed remote-HTTP MCP connector can re-point its NockCC endpoint at.
+// rate-limit → approval → Ed25519 audit) behind a local HTTP listener. Hosted
+// connectors require a reachable authenticated gateway and a protected route
+// to this loopback endpoint; they cannot target the operator's loopback directly.
 //
 // It gates on the MCP TOOL NAME, not on egress host — so its audit rows are
 // identical in shape to the stdio proxy's and `nockguard verify` / the Live Wall

@@ -43,13 +43,12 @@ signing Auditor unchanged.
 
 ### Candidate 1b — local HTTP listener (chosen for the flagship seat)
 
-The managed connector URL is re-pointed to `http://localhost:PORT/mcp` (or
-`https://` if the connector requires TLS). This is the **flagship-seat path** —
-see the Phase-0 design at
-[`docs/design/n8761-phase0-http-listener-forward-proxy.md`](design/n8761-phase0-http-listener-forward-proxy.md),
-which promotes this candidate from fallback to chosen because it is the only
-transport a managed remote-HTTP connector can actually target (and it scales to
-every remote-HTTP seat, not just the one stdio-wrappable one).
+The managed connector requires a reachable, authenticated HTTPS gateway with a
+protected route to the loopback listener. It cannot directly reach localhost
+on the operator's machine: its requests originate in Anthropic's cloud. The
+gateway, credential boundary, and per-agent session isolation remain deployment
+prerequisites; see the corrected design at
+[`docs/design/n8761-phase0-http-listener-forward-proxy.md`](design/n8761-phase0-http-listener-forward-proxy.md).
 
 ### Candidate 2 — NCC server-side middleware (REJECTED)
 
@@ -89,8 +88,8 @@ The `nockguard mcp-http` subcommand (see `cmd/nockguard/main.go` and
 ## Cutover Plan (Mira executes, not the builder)
 
 > Applies only to genuinely stdio-wrappable seats, **not Mira's flagship seat**.
-> The flagship cutover re-points the managed remote-HTTP connector to the local
-> HTTP forward-proxy — see
+> The flagship cutover requires a validated hosted gateway in front of the
+> local HTTP forward-proxy — see
 > [`docs/design/n8761-phase0-http-listener-forward-proxy.md`](design/n8761-phase0-http-listener-forward-proxy.md).
 
 1. Generate a per-agent keypair if not present:
