@@ -96,7 +96,9 @@ func (p *StdioProxy) applyInject(toolName string, canonicalParams json.RawMessag
 		return nil, fmt.Sprintf("nockguard: tool %q injection failed", toolName), false
 	}
 
-	// Success: record scrub set (both raw and templated) and emit audit rows
+	// Success: record scrub set (both raw and templated) and queue audit rows.
+	// The normal response/notification path resolves this sequence after the
+	// allow row is queued, so inject and allow emit together in order.
 	for _, rr := range resolved {
 		p.scrubber.add(rr.value)
 		// Also register the templated value if a template was used
@@ -106,7 +108,6 @@ func (p *StdioProxy) applyInject(toolName string, canonicalParams json.RawMessag
 		}
 		p.appendAudit(seq, toolName, "inject", fmt.Sprintf("ref=%s arg=%s", rr.rule.Ref, rr.rule.Arg), nil)
 	}
-	p.resolveAudit(seq)
 
 	return out, "", true
 }

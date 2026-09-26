@@ -1,10 +1,15 @@
 package proxy
 
 import (
+	"bytes"
+	"log"
 	"sort"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/nocktechnologies/nockguard/internal/extract"
+	"github.com/nocktechnologies/nockguard/internal/policy"
 )
 
 // TestStdioDrainDoesNotLoseResolvedAudits verifies that when the upstream
@@ -122,6 +127,67 @@ func TestStdioResolveAuditIsIdempotent(t *testing.T) {
 
 	if err := auditor.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStdioInjectedCallAuditsInjectThenAllowWithoutDrain(t *testing.T) {
+	auditor, auditPath, _ := newEd25519Auditor(t)
+	engine, err := policy.LoadBytes([]byte(`
+agents:
+  mira:
+    mode: allow
+    inject:
+      - tools: ["echo_args"]
+        ref: "env:ECHO_TOKEN"
+        arg: "headers.Authorization"
+`))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	validator, err := engine.ValidatorFor("mira")
+	if err != nil {
+		t.Fatalf("ValidatorFor: %v", err)
+	}
+	var logs bytes.Buffer
+	proxy := NewStdioProxy(nil, "mira", engine, validator, nil, auditor, nil, log.New(&logs, "", 0))
+	proxy.WithResolver(&mockResolver{
+		values: map[string]string{
+			"env:ECHO_TOKEN": "audit-secret-0001",
+		},
+	})
+
+	pending := &sync.Map{}
+	call := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo_args","arguments":{}}}`
+	var upstream bytes.Buffer
+	if err := proxy.agentToUpstream(strings.NewReader(call+"\n"), &upstream, pending); err != nil {
+		t.Fatalf("agentToUpstream: %v", err)
+	}
+	if upstream.Len() == 0 {
+		t.Fatal("injected call was not forwarded")
+	}
+
+	response := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}`
+	var agent bytes.Buffer
+	if err := proxy.upstreamToAgent(strings.NewReader(response+"\n"), &agent, pending); err != nil {
+		t.Fatalf("upstreamToAgent: %v", err)
+	}
+	proxy.drainAudits()
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(logs.String(), "AUDIT-DRAIN") {
+		t.Fatalf("clean injected call logged AUDIT-DRAIN: %s", logs.String())
+	}
+	evs := readAuditEvents(t, auditPath)
+	if len(evs) != 2 {
+		t.Fatalf("expected exactly inject + allow rows, got %d: %+v", len(evs), evs)
+	}
+	if evs[0].Tool != "echo_args" || evs[0].Decision != "inject" {
+		t.Fatalf("first audit row = %+v, want inject for echo_args", evs[0])
+	}
+	if evs[1].Tool != "echo_args" || evs[1].Decision != "allow" {
+		t.Fatalf("second audit row = %+v, want allow for echo_args", evs[1])
 	}
 }
 
