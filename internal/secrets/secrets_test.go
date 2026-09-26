@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -32,20 +33,28 @@ func TestEnvResolverUnset(t *testing.T) {
 
 func TestNockCCResolverReadsEachCall(t *testing.T) {
 	values := []string{"vault-value-old", "vault-value-new"}
+	const agentToken = "test-nockcc-agent-token"
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/secrets/GITHUB_TOKEN/" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		if got := r.Header.Get("X-API-Key"); got != "test-nockcc-api-key" {
-			t.Errorf("X-API-Key = %q", got)
+		if got := r.Header.Get("X-Agent-Token"); got != agentToken {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if got := r.Header.Get("X-API-Key"); got != "" {
+			t.Errorf("X-API-Key = %q, want empty", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("Authorization = %q, want empty", got)
 		}
 		_, _ = io.WriteString(w, fmt.Sprintf(`{"success":true,"data":{"value":%q}}`, values[requests]))
 		requests++
 	}))
 	defer server.Close()
 	t.Setenv("NOCKCC_BASE_URL", server.URL)
-	t.Setenv("NOCKCC_API_KEY", "test-nockcc-api-key")
+	t.Setenv("NOCKGUARD_VAULT_AGENT_TOKEN", agentToken)
 
 	r := Chain()
 	for _, want := range values {
@@ -59,6 +68,49 @@ func TestNockCCResolverReadsEachCall(t *testing.T) {
 	}
 	if requests != len(values) {
 		t.Errorf("vault requests = %d, want %d", requests, len(values))
+	}
+}
+
+func TestNockCCResolverRejectsForbiddenAndOversizedResponses(t *testing.T) {
+	const agentToken = "test-nockcc-agent-token"
+	tests := []struct {
+		name        string
+		serverToken string
+		body        string
+	}{
+		{
+			name:        "forbidden",
+			serverToken: "expected-agent-token",
+		},
+		{
+			name:        "oversized response",
+			serverToken: agentToken,
+			body:        `{"success":true,"data":{"value":"` + strings.Repeat("x", nockCCResponseMaxBytes) + `"}}`,
+		},
+		{
+			name:        "truncated response",
+			serverToken: agentToken,
+			body:        `{"success":true,"data":`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("X-Agent-Token"); got != tt.serverToken {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+			t.Setenv("NOCKCC_BASE_URL", server.URL)
+			t.Setenv("NOCKGUARD_VAULT_AGENT_TOKEN", agentToken)
+
+			if _, err := Chain().Resolve("nockcc:GITHUB_TOKEN"); err == nil {
+				t.Fatal("Resolve succeeded for an invalid vault response")
+			}
+		})
 	}
 }
 

@@ -34,6 +34,7 @@ func (m *mockResolver) Resolve(ref string) (string, error) {
 
 func TestInjectNockCC(t *testing.T) {
 	const vaultValue = "vault-test-value-0001"
+	const agentToken = "test-nockcc-agent-token"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("method = %s, want GET", r.Method)
@@ -41,14 +42,21 @@ func TestInjectNockCC(t *testing.T) {
 		if r.URL.Path != "/api/secrets/GITHUB_TOKEN/" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		if got := r.Header.Get("X-API-Key"); got != "test-nockcc-api-key" {
-			t.Errorf("X-API-Key = %q", got)
+		if got := r.Header.Get("X-Agent-Token"); got != agentToken {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if got := r.Header.Get("X-API-Key"); got != "" {
+			t.Errorf("X-API-Key = %q, want empty", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("Authorization = %q, want empty", got)
 		}
 		_, _ = io.WriteString(w, `{"success":true,"data":{"value":"`+vaultValue+`"}}`)
 	}))
 	defer server.Close()
 	t.Setenv("NOCKCC_BASE_URL", server.URL)
-	t.Setenv("NOCKCC_API_KEY", "test-nockcc-api-key")
+	t.Setenv("NOCKGUARD_VAULT_AGENT_TOKEN", agentToken)
 
 	engine, err := policy.LoadBytes([]byte(`
 agents:
@@ -91,11 +99,19 @@ agents:
 }
 
 func TestInjectNockCCFailuresReject(t *testing.T) {
+	const agentToken = "test-nockcc-agent-token"
 	tests := []struct {
 		name       string
 		handler    http.HandlerFunc
 		wantReason string
 	}{
+		{
+			name:       "forbidden",
+			wantReason: "inject-unresolved ref=nockcc:GITHUB_TOKEN",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+			},
+		},
 		{
 			name:       "not found",
 			wantReason: "inject-unresolved ref=nockcc:GITHUB_TOKEN",
@@ -123,6 +139,20 @@ func TestInjectNockCCFailuresReject(t *testing.T) {
 			},
 		},
 		{
+			name:       "oversized body",
+			wantReason: "inject-unresolved ref=nockcc:GITHUB_TOKEN",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"success":true,"data":{"value":"`+strings.Repeat("x", 64*1024)+`"}}`)
+			},
+		},
+		{
+			name:       "truncated body",
+			wantReason: "inject-unresolved ref=nockcc:GITHUB_TOKEN",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"success":true,"data":`)
+			},
+		},
+		{
 			name:       "short value",
 			wantReason: "inject-too-short ref=nockcc:GITHUB_TOKEN",
 			handler: func(w http.ResponseWriter, _ *http.Request) {
@@ -140,10 +170,16 @@ func TestInjectNockCCFailuresReject(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(tt.handler)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("X-Agent-Token"); got != agentToken {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				tt.handler(w, r)
+			}))
 			defer server.Close()
 			t.Setenv("NOCKCC_BASE_URL", server.URL)
-			t.Setenv("NOCKCC_API_KEY", "test-nockcc-api-key")
+			t.Setenv("NOCKGUARD_VAULT_AGENT_TOKEN", agentToken)
 			auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
 			engine, err := policy.LoadBytes([]byte(fmt.Sprintf(`
 audit:
@@ -193,12 +229,17 @@ agents:
 
 func TestInjectNockCCScrubsValueAndEncodings(t *testing.T) {
 	const vaultValue = "vault+secret/0001"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	const agentToken = "test-nockcc-agent-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Agent-Token"); got != agentToken {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
 		_, _ = io.WriteString(w, `{"success":true,"data":{"value":"`+vaultValue+`"}}`)
 	}))
 	defer server.Close()
 	t.Setenv("NOCKCC_BASE_URL", server.URL)
-	t.Setenv("NOCKCC_API_KEY", "test-nockcc-api-key")
+	t.Setenv("NOCKGUARD_VAULT_AGENT_TOKEN", agentToken)
 
 	engine, err := policy.LoadBytes([]byte(`
 agents:

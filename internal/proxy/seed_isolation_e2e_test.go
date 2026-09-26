@@ -24,7 +24,7 @@ func TestUpstreamChildCannotReadSigningSeed(t *testing.T) {
 	auditPath := filepath.Join(dir, "audit.jsonl")
 
 	// Mock MCP server that echoes two env vars straight back in its tool-call
-	// result: the secret signing seed, the NockCC API key, and an unrelated
+	// result: the secret signing seed, the NockCC vault credentials, and an unrelated
 	// passthrough var.
 	mock := filepath.Join(dir, "echo-env.sh")
 	script := `#!/bin/bash
@@ -32,7 +32,7 @@ while IFS= read -r line; do
   method=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin).get('method',''))" 2>/dev/null)
   id=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
   if [ "$method" = "tools/call" ]; then
-    echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"seed\":\"${NOCKGUARD_AUDIT_ED25519_KEY}\",\"nockcc_api_key\":\"${NOCKCC_API_KEY}\",\"passthrough\":\"${NOCKGUARD_PASSTHROUGH}\"}}"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"seed\":\"${NOCKGUARD_AUDIT_ED25519_KEY}\",\"vault_base_url\":\"${NOCKCC_BASE_URL}\",\"vault_agent_token\":\"${NOCKGUARD_VAULT_AGENT_TOKEN}\",\"passthrough\":\"${NOCKGUARD_PASSTHROUGH}\"}}"
   fi
 done
 `
@@ -62,7 +62,8 @@ done
 	cmd.Stdin = strings.NewReader(req + "\n")
 	cmd.Env = append(os.Environ(),
 		"NOCKGUARD_AUDIT_ED25519_KEY="+seed,
-		"NOCKCC_API_KEY=test-nockcc-api-key",
+		"NOCKCC_BASE_URL=https://vault.invalid",
+		"NOCKGUARD_VAULT_AGENT_TOKEN=test-nockcc-agent-token",
 		"NOCKGUARD_PASSTHROUGH=visible",
 	)
 	out, err := cmd.Output()
@@ -72,9 +73,10 @@ done
 
 	var resp struct {
 		Result struct {
-			Seed         string `json:"seed"`
-			NockCCAPIKey string `json:"nockcc_api_key"`
-			Passthrough  string `json:"passthrough"`
+			Seed            string `json:"seed"`
+			VaultBaseURL    string `json:"vault_base_url"`
+			VaultAgentToken string `json:"vault_agent_token"`
+			Passthrough     string `json:"passthrough"`
 		} `json:"result"`
 	}
 	var parsed bool
@@ -94,8 +96,11 @@ done
 	if resp.Result.Seed != "" {
 		t.Errorf("upstream child CAN read the signing seed (non-repudiation broken): seed=%q", resp.Result.Seed)
 	}
-	if resp.Result.NockCCAPIKey != "" {
-		t.Errorf("upstream child CAN read the NockCC API key: key=%q", resp.Result.NockCCAPIKey)
+	if resp.Result.VaultBaseURL != "" {
+		t.Errorf("upstream child CAN read the NockCC vault base URL: url=%q", resp.Result.VaultBaseURL)
+	}
+	if resp.Result.VaultAgentToken != "" {
+		t.Errorf("upstream child CAN read the NockCC vault agent token: token=%q", resp.Result.VaultAgentToken)
 	}
 	if resp.Result.Passthrough != "visible" {
 		t.Errorf("non-secret env var was not inherited by the child: passthrough=%q (want %q)", resp.Result.Passthrough, "visible")

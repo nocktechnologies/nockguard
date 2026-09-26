@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const nockCCRequestTimeout = 5 * time.Second
+const (
+	nockCCRequestTimeout   = 5 * time.Second
+	nockCCResponseMaxBytes = 64 * 1024
+)
 
 // Resolver resolves a secret reference string (e.g. "env:GITHUB_TOKEN" or
 // "file:/etc/nockguard/secret") to its plaintext value. Implementations must
@@ -56,8 +59,8 @@ func (c *chainResolver) Resolve(ref string) (string, error) {
 // proxy restart and never enter the upstream child's environment.
 func resolveNockCC(name string) (string, error) {
 	baseURL := strings.TrimRight(os.Getenv("NOCKCC_BASE_URL"), "/")
-	apiKey := os.Getenv("NOCKCC_API_KEY")
-	if baseURL == "" || apiKey == "" || name == "" {
+	agentToken := os.Getenv("NOCKGUARD_VAULT_AGENT_TOKEN")
+	if baseURL == "" || agentToken == "" || name == "" {
 		return "", fmt.Errorf("NockCC vault is not configured")
 	}
 
@@ -65,7 +68,7 @@ func resolveNockCC(name string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("NockCC vault request: %w", err)
 	}
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("X-Agent-Token", agentToken)
 	client := http.Client{
 		Timeout: nockCCRequestTimeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -81,13 +84,24 @@ func resolveNockCC(name string) (string, error) {
 		return "", fmt.Errorf("NockCC vault returned status %d", resp.StatusCode)
 	}
 
+	// Read one byte beyond the cap so an otherwise-valid response with a
+	// trailing payload cannot bypass the bound. json.Unmarshal also rejects a
+	// body truncated at the limit.
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, nockCCResponseMaxBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("NockCC vault response: %w", err)
+	}
+	if len(responseBody) > nockCCResponseMaxBytes {
+		return "", fmt.Errorf("NockCC vault response exceeds 64 KiB")
+	}
+
 	var body struct {
 		Success bool `json:"success"`
 		Data    struct {
 			Value string `json:"value"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(responseBody, &body); err != nil {
 		return "", fmt.Errorf("NockCC vault response: %w", err)
 	}
 	if !body.Success || body.Data.Value == "" {

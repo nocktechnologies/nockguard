@@ -484,12 +484,12 @@ func (p *StdioProxy) Run() error {
 	//      Telegram approve/callback APIs to SELF-APPROVE a human-gated call, defeating
 	//      the approval gate. The approver runs IN the proxy process (buildApprover's
 	//      os.Getenv is unaffected by this child-only sanitize), so the child never needs them.
-	//   3. The NockCC vault API key — the proxy uses it to resolve nockcc: refs,
-	//      so the upstream child must not inherit it.
+	//   3. The NockCC vault endpoint and agent token — the proxy uses them to
+	//      resolve nockcc: refs, so the upstream child must not inherit them.
 	// The strip sets compose; sanitizedEnv only touches the CHILD's cmd.Env.
 	strip := append(p.engine.SigningKeyEnvNamesFor(p.agent), approval.CredEnvNames()...)
 	strip = append(strip, p.engine.InjectEnvNames()...)
-	strip = append(strip, "NOCKCC_API_KEY")
+	strip = append(strip, "NOCKCC_BASE_URL", "NOCKGUARD_VAULT_AGENT_TOKEN")
 	cmd.Env = sanitizedEnv(strip)
 
 	upstreamIn, err := cmd.StdinPipe()
