@@ -1,12 +1,18 @@
 package secrets
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"syscall"
+	"time"
 )
+
+const nockCCRequestTimeout = 5 * time.Second
 
 // Resolver resolves a secret reference string (e.g. "env:GITHUB_TOKEN" or
 // "file:/etc/nockguard/secret") to its plaintext value. Implementations must
@@ -17,8 +23,8 @@ type Resolver interface {
 	Resolve(ref string) (string, error)
 }
 
-// Chain creates a resolver that tries multiple schemes: env: then file:,
-// then any future schemes. Unknown schemes return unresolved.
+// Chain creates a resolver that tries multiple schemes: env:, file:, then
+// nockcc:. Unknown schemes return unresolved.
 func Chain() Resolver {
 	return &chainResolver{}
 }
@@ -38,8 +44,56 @@ func (c *chainResolver) Resolve(ref string) (string, error) {
 		path := strings.TrimPrefix(ref, "file:")
 		return resolveFile(path)
 	}
+	if strings.HasPrefix(ref, "nockcc:") {
+		return resolveNockCC(strings.TrimPrefix(ref, "nockcc:"))
+	}
 	// Unknown scheme
 	return "", fmt.Errorf("unknown secret scheme in %q", ref)
+}
+
+// resolveNockCC reads one credential value from the NockCC vault. It uses the
+// proxy's own environment at resolution time so values can rotate without a
+// proxy restart and never enter the upstream child's environment.
+func resolveNockCC(name string) (string, error) {
+	baseURL := strings.TrimRight(os.Getenv("NOCKCC_BASE_URL"), "/")
+	apiKey := os.Getenv("NOCKCC_API_KEY")
+	if baseURL == "" || apiKey == "" || name == "" {
+		return "", fmt.Errorf("NockCC vault is not configured")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/api/secrets/"+url.PathEscape(name)+"/", nil)
+	if err != nil {
+		return "", fmt.Errorf("NockCC vault request: %w", err)
+	}
+	req.Header.Set("X-API-Key", apiKey)
+	client := http.Client{
+		Timeout: nockCCRequestTimeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("NockCC vault request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("NockCC vault returned status %d", resp.StatusCode)
+	}
+
+	var body struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Value string `json:"value"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", fmt.Errorf("NockCC vault response: %w", err)
+	}
+	if !body.Success || body.Data.Value == "" {
+		return "", fmt.Errorf("NockCC vault returned no value")
+	}
+	return body.Data.Value, nil
 }
 
 // resolveFile reads a secret from an absolute file path with strict security checks.
@@ -113,5 +167,5 @@ func validateFileStats(mode os.FileMode, isDir bool) error {
 // KnownScheme reports whether ref starts with a supported secret scheme prefix.
 // Used at policy load time to validate inject rules early.
 func KnownScheme(ref string) bool {
-	return strings.HasPrefix(ref, "env:") || strings.HasPrefix(ref, "file:")
+	return strings.HasPrefix(ref, "env:") || strings.HasPrefix(ref, "file:") || strings.HasPrefix(ref, "nockcc:")
 }

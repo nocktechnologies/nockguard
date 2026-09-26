@@ -1,6 +1,10 @@
 package secrets
 
 import (
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,6 +27,38 @@ func TestEnvResolverUnset(t *testing.T) {
 	_, err := r.Resolve("env:NONEXISTENT_VAR_XYZ")
 	if err == nil {
 		t.Fatal("expected error for unset env var")
+	}
+}
+
+func TestNockCCResolverReadsEachCall(t *testing.T) {
+	values := []string{"vault-value-old", "vault-value-new"}
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/secrets/GITHUB_TOKEN/" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-nockcc-api-key" {
+			t.Errorf("X-API-Key = %q", got)
+		}
+		_, _ = io.WriteString(w, fmt.Sprintf(`{"success":true,"data":{"value":%q}}`, values[requests]))
+		requests++
+	}))
+	defer server.Close()
+	t.Setenv("NOCKCC_BASE_URL", server.URL)
+	t.Setenv("NOCKCC_API_KEY", "test-nockcc-api-key")
+
+	r := Chain()
+	for _, want := range values {
+		got, err := r.Resolve("nockcc:GITHUB_TOKEN")
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if got != want {
+			t.Errorf("Resolve = %q, want %q", got, want)
+		}
+	}
+	if requests != len(values) {
+		t.Errorf("vault requests = %d, want %d", requests, len(values))
 	}
 }
 
@@ -136,6 +172,7 @@ func TestKnownScheme(t *testing.T) {
 	}{
 		{"env:GITHUB_TOKEN", true},
 		{"file:/etc/secret", true},
+		{"nockcc:GITHUB_TOKEN", true},
 		{"vault:mysecret", false},
 		{"http://example.com", false},
 	}
