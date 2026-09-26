@@ -83,6 +83,13 @@ func TestObserveSetupSignsTrailAndReusesKey(t *testing.T) {
 	if perm := keyDirInfo.Mode().Perm(); perm != 0o700 {
 		t.Fatalf("observe key directory permissions = %o, want 700", perm)
 	}
+	keyInfo, err := os.Stat(filepath.Join(home, ".nockguard", "keys", defaultObserveAgent+".ed25519"))
+	if err != nil {
+		t.Fatalf("stat observe key file: %v", err)
+	}
+	if perm := keyInfo.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("observe key file permissions = %o, want 600", perm)
+	}
 
 	// Second run in the same HOME must reuse the SAME key, and must open the
 	// existing signed trail without a verify-on-open failure.
@@ -371,25 +378,56 @@ func TestEnsureObserveKeyRejectsWritableExistingKeyDirWithoutReadingKey(t *testi
 	}
 }
 
-func TestEnsureObserveKeyRejectsGroupWritableExistingKeyFile(t *testing.T) {
-	home := t.TempDir()
-	keyDir := filepath.Join(home, ".nockguard", "keys")
-	if err := os.MkdirAll(keyDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	seedHex, _ := freshEd25519(t)
-	keyPath := filepath.Join(keyDir, defaultObserveAgent+".ed25519")
-	if err := os.WriteFile(keyPath, []byte(seedHex), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(keyPath, 0o620); err != nil {
-		t.Fatal(err)
-	}
+func TestEnsureObserveKeyRejectsGroupOrOtherAccessibleExistingKeyFileBeforeParsing(t *testing.T) {
+	for _, mode := range []os.FileMode{0o640, 0o644, 0o604, 0o620} {
+		t.Run(mode.String(), func(t *testing.T) {
+			home := t.TempDir()
+			keyDir := filepath.Join(home, ".nockguard", "keys")
+			if err := os.MkdirAll(keyDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			keyPath := filepath.Join(keyDir, defaultObserveAgent+".ed25519")
+			if err := os.WriteFile(keyPath, []byte("planted-invalid-seed"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(keyPath, mode); err != nil {
+				t.Fatal(err)
+			}
 
-	if _, _, err := ensureObserveKey(home, defaultObserveAgent); err == nil {
-		t.Fatal("ensureObserveKey accepted a group-writable key file")
-	} else if !strings.Contains(err.Error(), "group/other writable") {
-		t.Fatalf("ensureObserveKey error = %v, want key-file permission refusal", err)
+			if _, _, err := ensureObserveKey(home, defaultObserveAgent); err == nil {
+				t.Fatalf("ensureObserveKey accepted a pre-existing %o key file", mode)
+			} else if !strings.Contains(err.Error(), "group/other readable or writable") || !strings.Contains(err.Error(), "inspect and recreate the key file") || strings.Contains(err.Error(), "parsing persisted key") {
+				t.Fatalf("ensureObserveKey error = %v, want key-file permission refusal before parsing", err)
+			}
+		})
+	}
+}
+
+func TestEnsureObserveKeyAcceptsPrivateExistingKeyFileModes(t *testing.T) {
+	for _, mode := range []os.FileMode{0o600, 0o400} {
+		t.Run(mode.String(), func(t *testing.T) {
+			home := t.TempDir()
+			keyDir := filepath.Join(home, ".nockguard", "keys")
+			if err := os.MkdirAll(keyDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			seedHex, pubHex := freshEd25519(t)
+			keyPath := filepath.Join(keyDir, defaultObserveAgent+".ed25519")
+			if err := os.WriteFile(keyPath, []byte(seedHex), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(keyPath, mode); err != nil {
+				t.Fatal(err)
+			}
+
+			_, pub, err := ensureObserveKey(home, defaultObserveAgent)
+			if err != nil {
+				t.Fatalf("ensureObserveKey with %o key file: %v", mode, err)
+			}
+			if got := hex.EncodeToString(pub); got != pubHex {
+				t.Fatalf("ensureObserveKey loaded pub %q, want %q", got, pubHex)
+			}
+		})
 	}
 }
 
