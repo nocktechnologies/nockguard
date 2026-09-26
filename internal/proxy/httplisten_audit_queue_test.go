@@ -211,6 +211,53 @@ func TestHTTPListener_MalformedSuccessDoesNotCommitCard(t *testing.T) {
 	}
 }
 
+// TestHTTPListener_OversizedJSONResponseFailsWithoutCommittingCard verifies that
+// response verification stays bounded. The listener must return a visible error,
+// preserve its allow audit row, and refuse to claim a card from an over-limit
+// JSON response instead of buffering it without bound.
+func TestHTTPListener_OversizedJSONResponseFailsWithoutCommittingCard(t *testing.T) {
+	const prefix = `{"jsonrpc":"2.0","id":12345,"result":{"content":[{"type":"text","text":"`
+	const suffix = `"}]}}`
+	response := prefix + strings.Repeat("x", httpListenerBodyCap+1-len(prefix)-len(suffix)) + suffix
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, response)
+	}))
+	defer upstream.Close()
+
+	auditor, auditPath, pub := newEd25519Auditor(t)
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	defer lsrv.Close()
+
+	status, body, _ := post(t, lsrv.URL, `{"jsonrpc":"2.0","id":12345,"method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":12345}}}`)
+	if status != http.StatusOK {
+		t.Errorf("status = %d, want 200 JSON-RPC error", status)
+	}
+	if !strings.Contains(body, "upstream response exceeds the 10MB limit") {
+		t.Errorf("body = %q, want visible oversized-response error", body)
+	}
+	if !strings.Contains(body, `"id":12345`) {
+		t.Errorf("body = %q, want error tied to request id 12345", body)
+	}
+	if gate.currentCard != 0 {
+		t.Errorf("currentCard = %d after oversized claim response, want 0", gate.currentCard)
+	}
+
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	n, err := audit.VerifyEd25519(auditPath, pub)
+	if err != nil {
+		t.Fatalf("audit chain verification failed: %v", err)
+	}
+	evs := readAuditEvents(t, auditPath)
+	if n != 1 || len(evs) != 1 || evs[0].Decision != "allow" || evs[0].NockID != 12345 {
+		t.Errorf("audit rows = %+v, want one allow row for nock 12345", evs)
+	}
+}
+
 // TestHTTPListener_StructurallyInvalidSuccessDoesNotCommitCard verifies that a
 // 2xx body that parses cleanly but is not a JSON-RPC response (no result, no
 // matching id) — e.g. {} or null — does NOT commit card state.

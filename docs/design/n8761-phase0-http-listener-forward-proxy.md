@@ -86,8 +86,11 @@ empty HTTP 202. Allowed requests carry canonical JSON upstream.
 
 Tool discovery is filtered in both JSON and SSE responses. Each inspected JSON
 body or SSE event is limited to 10 MiB. Pagination, tool metadata, SSE event IDs,
-and unrelated messages are retained. Other responses stream through without
-this discovery cap. Card-state updates require a matching successful JSON
+and unrelated messages are retained. A successful JSON tool response is also
+limited to 10 MiB when the listener must inspect it before committing card state
+or resolving deferred audits; an oversized response returns a visible JSON-RPC
+error and does not commit card state. Responses that need no inspection stream
+through without buffering. Card-state updates require a matching successful JSON
 response; SSE tool results currently do not commit card state.
 
 Proxy or gateway failure must be visible to the connector. Document an operator
