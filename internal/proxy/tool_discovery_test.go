@@ -321,6 +321,86 @@ func TestHTTPToolDiscoverySSEDropsRepeatedResult(t *testing.T) {
 	}
 }
 
+// TestHTTPToolDiscoverySSEBodylessStatusFailsClosed verifies that when an
+// upstream answers a tools/list SSE request with a status that cannot carry a
+// body (204, 304), the connector gets a usable JSON-RPC error over HTTP 200
+// instead of an unusable bodyless 204/304: net/http itself suppresses any body
+// written under those statuses, so streaming SSE (or even the invalid()
+// fallback event) under the upstream's own status would silently vanish.
+// forwardToolList is exercised directly with an explicit Content-Type, the
+// same way TestHTTPDiscoveryErrorUsesBodyPermittingStatus does below — a real
+// round trip against a Go httptest upstream is not used here because Go's own
+// net/http SERVER strips Content-Type from a 304 it writes (RFC 7232 section
+// 4.1, net/http/transfer.go suppressedHeaders304), which would test that
+// server-side quirk instead of this fix. A non-Go (or non-compliant) upstream
+// MCP server can still send a bare 304 with Content-Type: text/event-stream on
+// the wire, and Go's HTTP CLIENT does not strip headers it merely reads — so
+// this branch is reachable in production against such an upstream, not just
+// in this direct unit test.
+func TestHTTPToolDiscoverySSEBodylessStatusFailsClosed(t *testing.T) {
+	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
+	l := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
+	for _, upstreamStatus := range []int{http.StatusNoContent, http.StatusNotModified} {
+		t.Run(http.StatusText(upstreamStatus), func(t *testing.T) {
+			w := httptest.NewRecorder()
+			resp := &http.Response{StatusCode: upstreamStatus, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}
+			l.forwardToolList(w, resp, []byte(discoveryRequest), json.RawMessage("9007199254740993"), 0, func() {})
+			if w.Code != http.StatusOK {
+				t.Fatalf("upstream %d: connector status = %d, want 200 (JSON-RPC error body)", upstreamStatus, w.Code)
+			}
+			if !json.Valid(w.Body.Bytes()) || !strings.Contains(w.Body.String(), `"error"`) {
+				t.Fatalf("upstream %d: connector body is not a JSON-RPC error: %q", upstreamStatus, w.Body.String())
+			}
+		})
+	}
+}
+
+// TestHTTPDiscoverySSENoMatchingResponseFailsClosed verifies that an SSE
+// stream carrying only a notification and a mismatched-id result — never the
+// requested tools/list response — does not close as a silent success: the
+// connector must still see a JSON-RPC error for its request id once the
+// stream ends, alongside the unrelated messages relayed unchanged.
+func TestHTTPDiscoverySSENoMatchingResponseFailsClosed(t *testing.T) {
+	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
+	l := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
+	input := strings.Join([]string{
+		`data: {"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`, "",
+		`data: {"jsonrpc":"2.0","id":9007199254740992,"result":{"other":true}}`, "",
+	}, "\n")
+	w := httptest.NewRecorder()
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(input))}
+	l.forwardToolList(w, resp, []byte(discoveryRequest), json.RawMessage("9007199254740993"), 0, func() {})
+
+	out := w.Body.String()
+	if !strings.Contains(out, "notifications/tools/list_changed") {
+		t.Fatalf("relayed notification lost: %s", out)
+	}
+	events := strings.Split(strings.TrimRight(out, "\n"), "\n\n")
+	last := events[len(events)-1]
+	if !strings.Contains(last, `"error"`) || !strings.Contains(last, "9007199254740993") {
+		t.Fatalf("stream with no matching response did not end with a JSON-RPC error for the request id: %s", out)
+	}
+}
+
+// TestHTTPDiscoverySSEEmptyStreamFailsClosed verifies that an SSE response
+// with no events at all (upstream closes immediately) still yields a
+// JSON-RPC error to the connector rather than a silently empty 200.
+func TestHTTPDiscoverySSEEmptyStreamFailsClosed(t *testing.T) {
+	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
+	l := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
+	w := httptest.NewRecorder()
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}
+	l.forwardToolList(w, resp, []byte(discoveryRequest), json.RawMessage("9007199254740993"), 0, func() {})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	out := w.Body.String()
+	if !strings.Contains(out, `"error"`) || !strings.Contains(out, "9007199254740993") {
+		t.Fatalf("empty SSE stream did not fail closed with a JSON-RPC error event: %q", out)
+	}
+}
+
 func TestHTTPDiscoveryErrorUsesBodyPermittingStatus(t *testing.T) {
 	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
 	l := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))

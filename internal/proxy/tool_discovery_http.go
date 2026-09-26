@@ -38,6 +38,20 @@ func (l *HTTPListener) forwardToolList(w http.ResponseWriter, resp *http.Respons
 		ct = "" // the transport normally handles gzip; refuse other encodings
 	}
 	if ct == "text/event-stream" {
+		if statusHasNoBody(resp.StatusCode) {
+			// net/http suppresses any body written for a bodyless status (204,
+			// 304, 1xx) even under Content-Type: text/event-stream, so the
+			// connector would get an unusable empty response and never see the
+			// invalid() event streamToolList would otherwise emit. Fail closed
+			// the same way the JSON path handles out==nil: a JSON-RPC error over
+			// application/json with HTTP 200, draining the (absent) upstream
+			// body instead of trying to stream it.
+			_, _ = io.Copy(io.Discard, resp.Body)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(invalid())
+			return
+		}
 		w.WriteHeader(resp.StatusCode)
 		if err := l.streamToolList(w, resp.Body, request, seq, resolveAudit); err != nil {
 			l.logger.Printf("UPSTREAM-STREAM-ERROR agent=%s: tools/list stream failed", l.gate.agent)
@@ -64,6 +78,14 @@ func (l *HTTPListener) forwardToolList(w http.ResponseWriter, resp *http.Respons
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(out)
+}
+
+// statusHasNoBody reports whether an upstream status code cannot carry a
+// response body (net/http's own bodyAllowedForStatus rule for 1xx, 204 and
+// 304): a proxy that still tries to stream an SSE body under one of these
+// gets it silently suppressed by the transport, connector included.
+func statusHasNoBody(status int) bool {
+	return status < 200 || status == http.StatusNoContent || status == http.StatusNotModified
 }
 
 // streamToolList relays an SSE tools/list response event by event, filtering
@@ -184,5 +206,16 @@ func (l *HTTPListener) streamToolList(w http.ResponseWriter, body io.Reader, req
 		}
 		lines, data, size = nil, nil, 0
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if !answered {
+		// A clean EOF with no matching response — only notifications, only
+		// mismatched ids, or no events at all — must not read as success: the
+		// connector would be left with no tools/list response whatsoever.
+		// Returning an error here routes through forwardToolList's existing
+		// error path, which emits the invalid() JSON-RPC error event.
+		return fmt.Errorf("SSE stream ended without a tools/list response")
+	}
+	return nil
 }
