@@ -247,7 +247,11 @@ func openOrCreateObserveDir(parentFD int, name string, perm uint32, syncParent f
 		return nil, fmt.Errorf("%s owner uid = %d, want %d", name, stat.Uid, os.Geteuid())
 	}
 	mode := uint32(stat.Mode) & 0o777
-	if created || (name == "keys" && mode&0o077 != 0) {
+	if !created && name == "keys" && mode&0o022 != 0 {
+		_ = dir.Close()
+		return nil, fmt.Errorf("%s permissions = %o: group/other writable; inspect and recreate the directory", name, mode)
+	}
+	if created || (name == "keys" && mode&0o055 != 0) {
 		if err := unix.Fchmod(fd, perm); err != nil {
 			_ = dir.Close()
 			return nil, fmt.Errorf("setting %s permissions: %w", name, err)
@@ -322,6 +326,15 @@ func readObserveKey(dirFD int, name string) ([]byte, bool, error) {
 	}
 	if before.Dev != after.Dev || before.Ino != after.Ino {
 		return nil, true, fmt.Errorf("%s was replaced while being opened", name)
+	}
+	if after.Mode&unix.S_IFMT != unix.S_IFREG {
+		return nil, true, fmt.Errorf("%s is not a regular file", name)
+	}
+	if after.Uid != uint32(os.Geteuid()) {
+		return nil, true, fmt.Errorf("%s owner uid = %d, want %d", name, after.Uid, os.Geteuid())
+	}
+	if mode := uint32(after.Mode) & 0o777; mode&0o022 != 0 {
+		return nil, true, fmt.Errorf("%s permissions = %o: group/other writable; inspect and recreate the key file", name, mode)
 	}
 	seedHex, err := io.ReadAll(f)
 	return seedHex, true, err
