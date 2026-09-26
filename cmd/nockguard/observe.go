@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -213,9 +214,11 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 // both Mkdirat success and EEXIST: the latter can lose a race with the creator,
 // whose directory entry may not yet be durable.
 func openOrCreateObserveDir(parentFD int, name string, perm uint32, syncParent func(int) error) (*os.File, error) {
-	if err := unix.Mkdirat(parentFD, name, perm); err != nil && !errors.Is(err, unix.EEXIST) {
+	err := unix.Mkdirat(parentFD, name, perm)
+	if err != nil && !errors.Is(err, unix.EEXIST) {
 		return nil, err
 	}
+	created := err == nil
 
 	var lstat unix.Stat_t
 	if err := unix.Fstatat(parentFD, name, &lstat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
@@ -243,9 +246,44 @@ func openOrCreateObserveDir(parentFD int, name string, perm uint32, syncParent f
 		_ = dir.Close()
 		return nil, fmt.Errorf("%s owner uid = %d, want %d", name, stat.Uid, os.Geteuid())
 	}
-	if uint32(stat.Mode)&0o7777 != perm {
+	mode := uint32(stat.Mode) & 0o777
+	if created || (name == "keys" && mode&0o077 != 0) {
+		if err := unix.Fchmod(fd, perm); err != nil {
+			_ = dir.Close()
+			return nil, fmt.Errorf("setting %s permissions: %w", name, err)
+		}
+		if !created {
+			log.Printf("[nockguard] tightening observe key dir permissions from %o to %o", mode, perm)
+		}
+		if err := unix.Fsync(fd); err != nil {
+			_ = dir.Close()
+			return nil, fmt.Errorf("syncing %s permissions: %w", name, err)
+		}
+		if err := unix.Fstat(fd, &stat); err != nil {
+			_ = dir.Close()
+			return nil, err
+		}
+		if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+			_ = dir.Close()
+			return nil, fmt.Errorf("%s is not a directory", name)
+		}
+		if stat.Uid != uint32(os.Geteuid()) {
+			_ = dir.Close()
+			return nil, fmt.Errorf("%s owner uid = %d, want %d", name, stat.Uid, os.Geteuid())
+		}
+		mode = uint32(stat.Mode) & 0o777
+		if mode != perm {
+			_ = dir.Close()
+			return nil, fmt.Errorf("%s permissions = %o, want %o", name, mode, perm)
+		}
+	}
+	if name == "keys" && mode&0o077 != 0 {
 		_ = dir.Close()
-		return nil, fmt.Errorf("%s permissions = %o, want %o", name, uint32(stat.Mode)&0o7777, perm)
+		return nil, fmt.Errorf("%s permissions = %o, want no group or other access", name, mode)
+	}
+	if name != "keys" && mode&0o022 != 0 {
+		_ = dir.Close()
+		return nil, fmt.Errorf("%s permissions = %o, want no group or other write access", name, mode)
 	}
 	if err := syncParent(parentFD); err != nil {
 		_ = dir.Close()
