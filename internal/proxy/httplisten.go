@@ -59,11 +59,22 @@ type HTTPListener struct {
 	// gate carries the enforcement pipeline (engine, validator, limiter, auditor,
 	// forwarder, trust, approver). Its stdio upstream field is unused here — only
 	// decide() is called, which never touches it.
-	gate     *StdioProxy
-	listen   string
-	upstream string
-	client   *http.Client
-	logger   *log.Logger
+	gate               *StdioProxy
+	listen             string
+	upstream           string
+	client             *http.Client
+	logger             *log.Logger
+	upstreamAgentToken *string
+}
+
+// WithUpstreamAgentToken selects the gateway's separate upstream identity.
+// Caller Authorization is never forwarded in this mode. Redirects are disabled
+// so neither credentials nor canonical tool arguments can move to another URL.
+// Configure before serving requests.
+func (l *HTTPListener) WithUpstreamAgentToken(token string) *HTTPListener {
+	l.upstreamAgentToken = &token
+	l.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return l
 }
 
 // NewHTTPListener builds a listener that binds listen (must be a loopback
@@ -261,7 +272,9 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 	// upstream verbatim and NEVER log or audit it (the audit trail records tool
 	// name + decision only, never headers or arguments). This is the REVERSE of
 	// mcphttp, which INJECTS a configured token from --auth-env.
-	if auth := r.Header.Get("Authorization"); auth != "" {
+	if l.upstreamAgentToken != nil {
+		req.Header.Set("X-Agent-Token", *l.upstreamAgentToken)
+	} else if auth := r.Header.Get("Authorization"); auth != "" {
 		req.Header.Set("Authorization", auth)
 	}
 	// Streamable-HTTP session passthrough: the connector is a spec-compliant MCP

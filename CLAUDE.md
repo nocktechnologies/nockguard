@@ -34,6 +34,7 @@ go vet ./...
 
 ## Where it runs
 - Per agent, on the operator's machine: `nockguard proxy --upstream "<mcp server cmd>" --agent <name>` wired in as that MCP server's command. Runtime state lives in `~/.nockguard/` — `policy.yaml`, `logs/<agent>.audit.jsonl`, `trust/<agent>.json`.
+- Hosted HTTP gateway: `nockguard mcp-gateway --config <path>`; contract and remaining deployment prerequisites in `docs/design/hosted-gateway.md`. Loopback behind HTTPS ingress; external OAuth issuer required.
 - Live Wall: `go run ./cmd/nockguard-wall` → `http://127.0.0.1:8787` (loopback).
 - Distribution is a binary, not a deploy: `brew install nocktechnologies/tap/nockguard` or `go install github.com/nocktechnologies/nockguard/cmd/nockguard@latest`.
 - Fleet dogfood target is Mira's NockCC connection; its status and the Kevin-gated cutover are in `docs/design/n8761-phase0-http-listener-forward-proxy.md`.

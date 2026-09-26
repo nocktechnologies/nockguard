@@ -56,6 +56,8 @@ func (l *Limiter) WithMaxCallsFunc(fn func(baseMax int) int) *Limiter {
 	if l == nil {
 		return nil
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.maxCallsFunc = fn
 	return l
 }

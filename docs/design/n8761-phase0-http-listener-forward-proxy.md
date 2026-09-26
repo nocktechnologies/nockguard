@@ -5,6 +5,11 @@ is incomplete. This revision corrects the original Phase-0 assumption that a
 managed `claude.ai` connector could point directly to the operator's loopback
 listener. No live connector change is part of this document.
 
+The [hosted gateway contract](hosted-gateway.md) describes the local
+`mcp-gateway` implementation and remaining issuer/hosting prerequisites. Its
+isolated session gates run in-process behind a loopback HTTP endpoint. A
+public HTTPS ingress and a compatible authorization server are still required.
+
 This supersedes the flagship-seat transport guidance in
 [`http-mcp-interception.md`](../http-mcp-interception.md). Historical pilot
 observations in that note are not a current deployment-health check.

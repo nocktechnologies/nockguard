@@ -338,7 +338,17 @@ All other MCP traffic passes through unmodified. NockGuard is version-transparen
 
 ## Coverage scope
 
-NockGuard operates at the **MCP transport layer**. It intercepts messages on the stdio pipe between the agent and an MCP server. That is its coverage boundary.
+For hosted HTTP MCP clients, `nockguard mcp-gateway --config <path>` provides a
+single-agent OAuth resource gateway behind a co-located HTTPS ingress. It checks
+tokens through authenticated introspection, isolates session state, shares agent
+quotas, and sends a separate service credential upstream. It requires enabled
+auditing and a per-agent Ed25519 signing key. See the
+[gateway contract and deployment steps](docs/design/hosted-gateway.md) and
+[configuration template](docs/gateway.example.yaml). The issuer and ingress must
+be supplied separately; this command does not deploy or switch a live connector.
+
+NockGuard operates at the **MCP transport layer**. It gates messages through its
+stdio proxy or HTTP enforcement listeners. That is its coverage boundary.
 
 **What NockGuard covers:**
 - Every `tools/list` and `tools/call` MCP message the agent sends through the proxy.
