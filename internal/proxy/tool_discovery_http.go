@@ -42,6 +42,7 @@ func (l *HTTPListener) forwardToolList(w http.ResponseWriter, resp *http.Respons
 		return
 	}
 	var out []byte
+	status := resp.StatusCode
 	if ct == "application/json" {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, httpListenerBodyCap+1))
 		if err == nil && len(body) <= httpListenerBodyCap {
@@ -53,9 +54,10 @@ func (l *HTTPListener) forwardToolList(w http.ResponseWriter, resp *http.Respons
 	}
 	if out == nil {
 		out = invalid()
+		status = http.StatusOK
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
+	w.WriteHeader(status)
 	_, _ = w.Write(out)
 }
 

@@ -149,3 +149,27 @@ func TestHTTPDiscoveryRejectsUninspectableResponses(t *testing.T) {
 		})
 	}
 }
+
+func TestHTTPDiscoveryErrorUsesBodyPermittingStatus(t *testing.T) {
+	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
+	l := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
+	for _, upstreamStatus := range []int{http.StatusNoContent, http.StatusNotModified} {
+		t.Run(http.StatusText(upstreamStatus), func(t *testing.T) {
+			w := httptest.NewRecorder()
+			resp := &http.Response{StatusCode: upstreamStatus, Header: make(http.Header), Body: http.NoBody}
+			l.forwardToolList(w, resp, []byte(discoveryRequest), json.RawMessage("9007199254740993"), 0)
+			if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"error"`) {
+				t.Fatalf("want body-bearing JSON-RPC error, got status %d body %q", w.Code, w.Body.String())
+			}
+		})
+	}
+	t.Run("valid response preserves status", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		resp := &http.Response{StatusCode: http.StatusCreated, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(discoveryResponse))}
+		l.forwardToolList(w, resp, []byte(discoveryRequest), json.RawMessage("9007199254740993"), 0)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("want upstream status %d, got %d", http.StatusCreated, w.Code)
+		}
+		assertDiscovery(t, w.Body.Bytes())
+	})
+}
