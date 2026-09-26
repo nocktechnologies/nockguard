@@ -63,6 +63,11 @@ type event struct {
 	// existing internal/audit chain verification (see verify.go); never from the
 	// browser, which holds no key.
 	VerifyState string `json:"verifyState,omitempty"`
+	// Verification is added only to export rows. It is "verified" when this
+	// export's chain walk covered the row, "failed" after a detected break, or
+	// "unsigned" when signing is not configured or the row was not covered.
+	Verification string `json:"verification,omitempty"`
+	auditLine    int    `json:"-"`
 }
 
 // classify tags an event with its derived threat tier. Called at every ingest
@@ -425,9 +430,15 @@ func loadEvents(path string) []event {
 	var evs []event
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), audit.MaxTrailLineBytes)
+	lineNo := 0
 	for sc.Scan() {
+		if len(bytes.TrimSpace(sc.Bytes())) == 0 {
+			continue
+		}
+		lineNo++
 		var ev event
 		if json.Unmarshal(sc.Bytes(), &ev) == nil && ev.Decision != "" {
+			ev.auditLine = lineNo
 			evs = append(evs, classify(ev))
 			if len(evs) > maxWindow {
 				evs = evs[1:]
@@ -438,6 +449,25 @@ func loadEvents(path string) []event {
 		log.Printf("error reading audit log for pulse: %v", err)
 	}
 	return evs
+}
+
+// exportVerification translates the full-chain result into the compact receipt
+// carried by an export row. A row appended after the walk is not called verified:
+// it has not been checked by this export yet.
+func exportVerification(rep verifyReport, line int) string {
+	if rep.ChainIntact == nil {
+		return "unsigned"
+	}
+	if *rep.ChainIntact {
+		if line > rep.EntriesVerified {
+			return "unsigned"
+		}
+		return "verified"
+	}
+	if rep.BreakAt == nil || line >= *rep.BreakAt {
+		return "failed"
+	}
+	return "verified"
 }
 
 // handlePulse serves the current pulse over the persisted audit window as JSON,
@@ -501,7 +531,11 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	since := parseTimeFilter(q.Get("since"))
 	until := parseTimeFilter(q.Get("until"))
+	rep := b.refreshSnapshot()
 	evs := filterEvents(loadEvents(b.auditPath), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
+	for i := range evs {
+		evs[i].Verification = exportVerification(rep, evs[i].auditLine)
+	}
 	if q.Get("format") == "json" {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Disposition", `attachment; filename="nockguard-wall.json"`)
@@ -511,11 +545,11 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="nockguard-wall.csv"`)
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{"ts", "agent", "tool", "decision", "severity", "reason"})
+	_ = cw.Write([]string{"ts", "agent", "tool", "decision", "severity", "reason", "verification"})
 	for _, ev := range evs {
 		_ = cw.Write([]string{
 			csvSafe(ev.Ts), csvSafe(ev.Agent), csvSafe(ev.Tool),
-			csvSafe(ev.Decision), csvSafe(ev.Severity), csvSafe(ev.Reason),
+			csvSafe(ev.Decision), csvSafe(ev.Severity), csvSafe(ev.Reason), csvSafe(ev.Verification),
 		})
 	}
 	cw.Flush()

@@ -288,12 +288,15 @@ func TestHandleExportCSV(t *testing.T) {
 	if len(recs) != 2 { // header + 1 filtered row
 		t.Fatalf("csv rows: got %d want 2 (header + block row)", len(recs))
 	}
-	if got := strings.Join(recs[0], ","); got != "ts,agent,tool,decision,severity,reason" {
+	if got := strings.Join(recs[0], ","); got != "ts,agent,tool,decision,severity,reason,verification" {
 		t.Fatalf("csv header: got %q", got)
 	}
 	// The block row's reason "=DANGER()" must be prefixed with a quote.
 	if reason := recs[1][5]; reason != "'=DANGER()" {
 		t.Fatalf("formula injection not neutralised: reason=%q", reason)
+	}
+	if verification := recs[1][6]; verification != "unsigned" {
+		t.Fatalf("unsigned CSV verification = %q, want unsigned", verification)
 	}
 	// Server parity: exported data rows == pulse Total for the same filter.
 	total := computePulse(loadEvents(b.auditPath), "", "block", "", nil, nil).Total
@@ -339,6 +342,57 @@ func TestHandleExportJSON(t *testing.T) {
 	// severity is derived on load, so the export carries it.
 	if out[0].Severity == "" {
 		t.Fatalf("expected derived severity on exported event, got empty")
+	}
+	if out[0].Verification != "unsigned" {
+		t.Fatalf("unsigned export verification = %q, want unsigned", out[0].Verification)
+	}
+}
+
+// TestHandleExportMarksTamperedRowsFailed proves the exported receipt is
+// calculated when the export is requested, rather than reusing an old UI badge.
+// A changed middle record must remain in the export and be explicitly failed.
+func TestHandleExportMarksTamperedRowsFailed(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(string(data), `"decision":"block"`, `"decision":"allow"`, 1)
+	if tampered == string(data) {
+		t.Fatal("tamper replacement did not change the trail")
+	}
+	if err := os.WriteFile(path, []byte(tampered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("NOCKGUARD_TEST_EXPORT_PUB", hex.EncodeToString(pub))
+	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "")
+	if err != nil {
+		t.Fatalf("newVerifier: %v", err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = v
+
+	req := httptest.NewRequest(http.MethodGet, "/export?format=json", nil).WithContext(t.Context())
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, req)
+
+	var out []event
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode export: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("exported rows = %d, want 3", len(out))
+	}
+	if got := out[0].Verification; got != "verified" {
+		t.Fatalf("first intact row verification = %q, want verified", got)
+	}
+	if got := out[1].Verification; got != "failed" {
+		t.Fatalf("tampered export row verification = %q, want failed", got)
 	}
 }
 
