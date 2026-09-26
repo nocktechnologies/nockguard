@@ -1073,3 +1073,71 @@ func TestSSEParserCRLFSplitMidEventNoPhantomBlankLine(t *testing.T) {
 		}
 	}
 }
+
+// An upstream that keeps the initialize SSE stream open after the matching
+// result must not leave the new session busy: follow-up requests work at once,
+// without the upstream ever closing the initialize stream on its own.
+func TestSSEInitializeKeepOpenReleasesSession(t *testing.T) {
+	c := testConfig(t)
+	finished := make(chan struct{})
+	defer close(finished)
+	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Mcp-Session-Id") != "" {
+				fmt.Fprint(w, `{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}`)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Mcp-Session-Id", "upstream-session-id")
+			fmt.Fprint(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n")
+			w.(http.Flusher).Flush()
+			select { // keep-open upstream: only a cancelled request ends this
+			case <-finished:
+			case <-r.Context().Done():
+			}
+		})
+	})
+	server := httptest.NewServer(g)
+	defer server.Close()
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	post := func(body, sid string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest("POST", server.URL+"/mcp", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = "guard.example"
+		req.Header.Set("Authorization", "Bearer connector-test-token")
+		if sid != "" {
+			req.Header.Set("Mcp-Session-Id", sid)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		return resp
+	}
+
+	initResp := post(initialize, "")
+	defer initResp.Body.Close() // stays open: the follow-up runs while it streams
+	sid := initResp.Header.Get("Mcp-Session-Id")
+	if line, err := bufio.NewReader(initResp.Body).ReadString('\n'); err != nil || !strings.HasPrefix(line, "data: ") {
+		t.Fatalf("initialize result not delivered: %q %v", line, err)
+	}
+	if sid == "" {
+		t.Fatal("no gateway session id on a successful keep-open initialize")
+	}
+
+	resp := post(list, sid)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("follow-up on a keep-open initialized session got %d, want 200", resp.StatusCode)
+	}
+	g.mu.Lock()
+	s := g.sessions[sid]
+	g.mu.Unlock()
+	if s == nil || s.upstreamID != "upstream-session-id" {
+		t.Fatalf("upstream session id not installed after initialize: %+v", s)
+	}
+}

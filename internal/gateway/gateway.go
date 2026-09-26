@@ -156,7 +156,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 	// Build an allowlist of transport headers. No caller credentials, cookies,
 	// forwarding/identity headers or upstream session IDs cross this boundary.
-	forward := r.Clone(ctx)
+	// The forwarded request gets its own cancel so an SSE initialize can end the
+	// upstream stream once its result commits (see initWriter.onCommit).
+	fctx, fcancel := context.WithCancel(ctx)
+	defer fcancel()
+	forward := r.Clone(fctx)
 	forward.Body = io.NopCloser(bytes.NewReader(body))
 	forward.ContentLength = int64(len(body))
 	forward.Header = make(http.Header)
@@ -173,11 +177,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if initializing {
 		// Use incremental validating writer for initialize
 		iw := &initWriter{
-			real:   w,
-			id:     msg.ID,
-			sid:    id,
-			header: make(http.Header),
-			mode:   "undecided",
+			real:     w,
+			id:       msg.ID,
+			sid:      id,
+			header:   make(http.Header),
+			mode:     "undecided",
+			onCommit: fcancel,
 		}
 		s.handler.ServeHTTP(iw, forward)
 
@@ -303,6 +308,7 @@ type initWriter struct {
 	real          http.ResponseWriter
 	id            json.RawMessage
 	sid           string
+	onCommit      func() // ends the upstream initialize stream after commit
 	header        http.Header
 	status        int
 	mode          string // "undecided", "buffer", or "sse"
@@ -380,6 +386,12 @@ func (w *initWriter) Write(p []byte) (int, error) {
 	// If decision made, commit
 	if w.committed {
 		w.commitSSE()
+		// The client has its result. End the initialize stream so the handler
+		// returns and the session leaves its busy state; a keep-open upstream
+		// would otherwise hold it until the request deadline.
+		if w.onCommit != nil {
+			w.onCommit()
+		}
 		return len(p), nil
 	}
 	if w.rejected {
