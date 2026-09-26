@@ -537,3 +537,173 @@ func TestInitializeSessionOnlyOnJSONRPCSuccess(t *testing.T) {
 		g.mu.Unlock()
 	})
 }
+
+// Test SSE with notification before the matching result
+func TestSSENotificationBeforeResult(t *testing.T) {
+	c := testConfig(t)
+	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Mcp-Session-Id", "sse-upstream-notify")
+			// Send a notification first (no id)
+			fmt.Fprint(w, "data: {\"jsonrpc\":\"2.0\",\"method\":\"notification\",\"params\":{}}\n\n")
+			// Then send the initialize result
+			fmt.Fprint(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n")
+		})
+	})
+
+	w := request(g, initialize, "", nil)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	sid := w.Header().Get("Mcp-Session-Id")
+	if sid == "" {
+		t.Fatal("session ID should be set after notification + result")
+	}
+
+	// Verify session was committed
+	g.mu.Lock()
+	s := g.sessions[sid]
+	g.mu.Unlock()
+	if s == nil {
+		t.Fatal("session should have been committed")
+	}
+	if s.upstreamID != "sse-upstream-notify" {
+		t.Fatalf("upstream ID not captured: %s", s.upstreamID)
+	}
+
+	// Response should contain both events
+	if !strings.Contains(w.Body.String(), "notification") {
+		t.Fatal("notification event missing from response")
+	}
+	if !strings.Contains(w.Body.String(), "id\":1") {
+		t.Fatal("result event missing from response")
+	}
+}
+
+// Test SSE with multi-line data payload
+func TestSSEMultiLineData(t *testing.T) {
+	c := testConfig(t)
+	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Mcp-Session-Id", "sse-upstream-multiline")
+			// SSE event with data split across multiple lines
+			fmt.Fprint(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\n")
+			fmt.Fprint(w, "data: \"result\":{}}\n\n")
+		})
+	})
+
+	w := request(g, initialize, "", nil)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	sid := w.Header().Get("Mcp-Session-Id")
+	if sid == "" {
+		t.Fatal("session ID should be set with multi-line data")
+	}
+
+	g.mu.Lock()
+	s := g.sessions[sid]
+	g.mu.Unlock()
+	if s == nil {
+		t.Fatal("session should have been committed")
+	}
+	if s.upstreamID != "sse-upstream-multiline" {
+		t.Fatalf("upstream ID not captured: %s", s.upstreamID)
+	}
+}
+
+// Test SSE with error response is rejected
+func TestSSEErrorResponseRejected(t *testing.T) {
+	c := testConfig(t)
+	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Mcp-Session-Id", "sse-upstream-error")
+			// Send an error response in SSE format
+			fmt.Fprint(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32600,\"message\":\"Invalid request\"}}\n\n")
+		})
+	})
+
+	w := request(g, initialize, "", nil)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	// Should NOT have a session ID
+	if w.Header().Get("Mcp-Session-Id") != "" {
+		t.Fatal("session ID should not be set on SSE error")
+	}
+
+	// Session should not have been committed
+	g.mu.Lock()
+	if len(g.sessions) != 0 {
+		t.Fatal("session should have been deleted on SSE error")
+	}
+	g.mu.Unlock()
+
+	// Body should contain the error event
+	if !strings.Contains(w.Body.String(), "error") {
+		t.Fatal("error event should be forwarded in body")
+	}
+}
+
+// Test SSE with CRLF line endings
+func TestSSECRLFLineEndings(t *testing.T) {
+	c := testConfig(t)
+	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Mcp-Session-Id", "sse-upstream-crlf")
+			// Send event with CRLF line endings
+			fmt.Fprint(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\r\n\r\n")
+		})
+	})
+
+	w := request(g, initialize, "", nil)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	sid := w.Header().Get("Mcp-Session-Id")
+	if sid == "" {
+		t.Fatal("session ID should be set with CRLF endings")
+	}
+
+	g.mu.Lock()
+	s := g.sessions[sid]
+	g.mu.Unlock()
+	if s == nil {
+		t.Fatal("session should have been committed with CRLF")
+	}
+	if s.upstreamID != "sse-upstream-crlf" {
+		t.Fatalf("upstream ID not captured: %s", s.upstreamID)
+	}
+}
+
+// Test that existing JSON error test still passes
+func TestJSONErrorResponseStillWorks(t *testing.T) {
+	c := testConfig(t)
+	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid request"}}`)
+		})
+	})
+
+	w := request(g, initialize, "", nil)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if w.Header().Get("Mcp-Session-Id") != "" {
+		t.Fatal("session ID should not be set on JSON error")
+	}
+	g.mu.Lock()
+	if len(g.sessions) != 0 {
+		t.Fatal("session should have been deleted on JSON error")
+	}
+	g.mu.Unlock()
+}

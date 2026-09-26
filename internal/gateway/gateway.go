@@ -6,11 +6,11 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -171,43 +171,25 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		forward.Header.Set("Mcp-Session-Id", s.upstreamID)
 	}
 	if initializing {
-		// Buffer the response to validate it's a successful JSON-RPC initialize
-		buf := &buffered{header: make(http.Header)}
-		s.handler.ServeHTTP(buf, forward)
-
-		// Check if the response is a valid JSON-RPC success
-		if buf.overflow {
-			http.Error(w, "response too large", http.StatusBadGateway)
-			return
+		// Use incremental validating writer for initialize
+		iw := &initWriter{
+			real:   w,
+			id:     msg.ID,
+			sid:    id,
+			header: make(http.Header),
+			mode:   "undecided",
 		}
+		s.handler.ServeHTTP(iw, forward)
 
-		status := buf.getStatus()
-		body := buf.getBody()
-		contentType := buf.Header().Get("Content-Type")
-
-		if validateInitializeResponse(status, contentType, body, msg.ID) {
-			s.upstreamID = buf.Header().Get("Mcp-Session-Id")
+		if iw.committed {
+			s.upstreamID = iw.upstreamID
 			success = true
-		}
-
-		// Write the buffered response to the client
-		for key := range buf.Header() {
-			if key != "Content-Type" && key != "Content-Length" && key != "Mcp-Protocol-Version" {
-				buf.Header().Del(key)
+		} else {
+			iw.finalize()
+			if iw.committed {
+				s.upstreamID = iw.upstreamID
+				success = true
 			}
-		}
-		buf.Header().Set("Cache-Control", "no-store")
-		if success {
-			buf.Header().Set("Mcp-Session-Id", id)
-		}
-		for key, vals := range buf.Header() {
-			for _, v := range vals {
-				w.Header().Add(key, v)
-			}
-		}
-		w.WriteHeader(status)
-		if len(body) > 0 {
-			_, _ = w.Write(body)
 		}
 	} else {
 		// Non-initialize requests stream normally
@@ -313,53 +295,294 @@ func (g *Gateway) Run(ctx context.Context) error {
 	}
 }
 
-// buffered wraps an http.ResponseWriter to buffer the status, headers, and body
-// of an initialize request before deciding whether to commit the session.
-type buffered struct {
-	header   http.Header
-	status   int
-	body     bytes.Buffer
-	overflow bool
+// initWriter implements http.ResponseWriter for incremental initialize response validation.
+// It buffers and validates the response to ensure:
+// - JSON responses: complete buffering and validation as before
+// - SSE responses: incremental event parsing, commit on first matching-id result
+type initWriter struct {
+	real       http.ResponseWriter
+	id         json.RawMessage
+	sid        string
+	header     http.Header
+	status     int
+	mode       string // "undecided", "buffer", or "sse"
+	held       bytes.Buffer
+	scanned    int
+	committed  bool
+	rejected   bool
+	upstreamID string
+	overflow   bool
 }
 
-func (b *buffered) Header() http.Header {
-	return b.header
+func (w *initWriter) Header() http.Header {
+	return w.header
 }
 
-func (b *buffered) WriteHeader(code int) {
-	if b.status == 0 {
-		b.status = code
+func (w *initWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+		// Determine mode based on status and Content-Type
+		ct := w.header.Get("Content-Type")
+		if code >= 200 && code < 300 && strings.HasPrefix(ct, "text/event-stream") {
+			w.mode = "sse"
+		} else {
+			w.mode = "buffer"
+		}
 	}
 }
 
-func (b *buffered) Write(p []byte) (int, error) {
-	if b.overflow {
+func (w *initWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+
+	if w.rejected {
+		return 0, errors.New("gateway: initialize rejected")
+	}
+
+	if w.committed {
+		// Stream through with flushing
+		n, err := w.real.Write(p)
+		if err == nil {
+			_ = http.NewResponseController(w.real).Flush()
+		}
+		return n, err
+	}
+
+	// Still deciding: buffer and parse
+	if w.mode == "buffer" {
+		if w.overflow {
+			return 0, bytes.ErrTooLarge
+		}
+		if w.held.Len()+len(p) > bodyLimit {
+			w.overflow = true
+			w.reject()
+			return 0, bytes.ErrTooLarge
+		}
+		return w.held.Write(p)
+	}
+
+	// SSE mode: incremental parsing
+	if w.held.Len()+len(p) > bodyLimit {
+		w.overflow = true
+		w.reject()
 		return 0, bytes.ErrTooLarge
 	}
-	// Check if writing would exceed the limit
-	if b.body.Len()+len(p) > bodyLimit {
-		b.overflow = true
-		return 0, bytes.ErrTooLarge
+	w.held.Write(p)
+
+	// Try to parse complete events
+	w.parseSSEEvents()
+
+	// If decision made, commit
+	if w.committed {
+		w.commitSSE()
+		return len(p), nil
 	}
-	return b.body.Write(p)
-}
-
-// Flush is a no-op to satisfy http.Flusher without panicking
-func (b *buffered) Flush() {
-	// no-op: we buffer everything, so no need to flush
-}
-
-// getStatus returns the status code, defaulting to 200 if not set
-func (b *buffered) getStatus() int {
-	if b.status == 0 {
-		return http.StatusOK
+	if w.rejected {
+		return 0, errors.New("gateway: initialize rejected")
 	}
-	return b.status
+
+	return len(p), nil
 }
 
-// getBody returns the buffered body bytes
-func (b *buffered) getBody() []byte {
-	return b.body.Bytes()
+func (w *initWriter) Flush() {
+	// Only flush if committed; buffer mode does no-op, SSE streaming handled in Write
+	if w.committed {
+		_ = http.NewResponseController(w.real).Flush()
+	}
+}
+
+func (w *initWriter) parseSSEEvents() {
+	if w.committed || w.rejected {
+		return
+	}
+
+	data := w.held.Bytes()
+	lines := bytes.Split(data, []byte("\n"))
+
+	eventStart := 0
+	for i, lineBytes := range lines {
+		// Strip trailing \r if present (for \r\n or bare \r)
+		line := lineBytes
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+
+		// Empty line marks end of event
+		if len(line) == 0 && i > eventStart {
+			// We have accumulated event lines from eventStart to i-1
+			eventLines := lines[eventStart:i]
+			if w.processSSEEvent(eventLines) {
+				w.committed = true
+				return
+			}
+			eventStart = i + 1
+		}
+	}
+
+	// Save scanned position to know where we left off
+	if len(lines) > 0 && len(lines[len(lines)-1]) > 0 {
+		// If the last line is non-empty, we haven't reached the event end yet
+		// Keep it for the next Write call
+		w.scanned = len(data) - len(lines[len(lines)-1])
+	} else {
+		w.scanned = len(data)
+	}
+}
+
+func (w *initWriter) processSSEEvent(lines [][]byte) bool {
+	// Collect data: lines and join with \n
+	var dataParts []string
+	for _, lineBytes := range lines {
+		line := lineBytes
+		// Strip trailing \r if present
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+
+		if bytes.HasPrefix(line, []byte("data:")) {
+			data := bytes.TrimPrefix(line, []byte("data:"))
+			// Strip exactly one leading space if present
+			if len(data) > 0 && data[0] == ' ' {
+				data = data[1:]
+			}
+			dataParts = append(dataParts, string(data))
+		} else if bytes.HasPrefix(line, []byte(":")) {
+			// Comment, skip
+			continue
+		} else if bytes.Contains(line, []byte(":")) {
+			// Other SSE fields (event, id, retry), skip for now
+			continue
+		} else if len(line) > 0 {
+			// Field without colon; treat as data
+			dataParts = append(dataParts, string(line))
+		}
+	}
+
+	if len(dataParts) == 0 {
+		// Empty event, skip
+		return false
+	}
+
+	payload := strings.Join(dataParts, "\n")
+
+	// Parse as JSON-RPC response
+	var msg map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &msg); err != nil {
+		return false
+	}
+
+	// Skip if it's a request/notification (has "method")
+	if _, hasMethod := msg["method"]; hasMethod {
+		return false
+	}
+
+	// Skip if no id or id doesn't match
+	respID, hasID := msg["id"]
+	if !hasID {
+		return false
+	}
+
+	if !jsonRPCIDMatches(w.id, respID) {
+		return false
+	}
+
+	// Check jsonrpc == "2.0"
+	jsonrpcRaw, hasJSONRPC := msg["jsonrpc"]
+	if !hasJSONRPC {
+		return false
+	}
+	var jsonrpc string
+	if err := json.Unmarshal(jsonrpcRaw, &jsonrpc); err != nil {
+		return false
+	}
+	if jsonrpc != "2.0" {
+		return false
+	}
+
+	// Check for error (must not be present)
+	if _, hasError := msg["error"]; hasError {
+		// This is an error response, reject
+		w.reject()
+		return false
+	}
+
+	// Check for result (must be present)
+	if _, hasResult := msg["result"]; !hasResult {
+		return false
+	}
+
+	// Valid success response! Commit.
+	return true
+}
+
+func (w *initWriter) reject() {
+	w.rejected = true
+}
+
+func (w *initWriter) commitSSE() {
+	w.upstreamID = w.header.Get("Mcp-Session-Id")
+	w.writeHeaders()
+	w.real.WriteHeader(w.status)
+	_, _ = w.real.Write(w.held.Bytes())
+	_ = http.NewResponseController(w.real).Flush()
+}
+
+func (w *initWriter) finalize() {
+	if w.mode == "buffer" {
+		// Validate buffered response
+		if w.overflow {
+			w.real.WriteHeader(http.StatusBadGateway)
+			_, _ = w.real.Write([]byte("response too large"))
+			return
+		}
+
+		contentType := w.header.Get("Content-Type")
+		body := w.held.Bytes()
+
+		if validateInitializeResponse(w.status, contentType, body, w.id) {
+			w.upstreamID = w.header.Get("Mcp-Session-Id")
+			w.writeHeaders()
+			w.real.WriteHeader(w.status)
+			if len(body) > 0 {
+				_, _ = w.real.Write(body)
+			}
+			w.committed = true
+		} else {
+			// Validation failed, write as-is without session id
+			w.writeHeadersNoSession()
+			w.real.WriteHeader(w.status)
+			if len(body) > 0 {
+				_, _ = w.real.Write(body)
+			}
+		}
+	} else if w.mode == "sse" {
+		// SSE with no decision by end of stream: reject
+		w.writeHeadersNoSession()
+		w.real.WriteHeader(w.status)
+		_, _ = w.real.Write(w.held.Bytes())
+	}
+}
+
+func (w *initWriter) writeHeaders() {
+	// Copy allowed headers and set session id
+	for _, h := range []string{"Content-Type", "Content-Length", "Mcp-Protocol-Version"} {
+		if v := w.header.Get(h); v != "" {
+			w.real.Header().Set(h, v)
+		}
+	}
+	w.real.Header().Set("Cache-Control", "no-store")
+	w.real.Header().Set("Mcp-Session-Id", w.sid)
+}
+
+func (w *initWriter) writeHeadersNoSession() {
+	// Copy allowed headers without session id
+	for _, h := range []string{"Content-Type", "Content-Length", "Mcp-Protocol-Version"} {
+		if v := w.header.Get(h); v != "" {
+			w.real.Header().Set(h, v)
+		}
+	}
+	w.real.Header().Set("Cache-Control", "no-store")
 }
 
 // validateInitializeResponse checks if the buffered response is a valid JSON-RPC
@@ -430,15 +653,39 @@ func extractFirstSSEMessage(body []byte) []byte {
 }
 
 // jsonRPCIDMatches reports whether respID is present and equals the id of the
-// request. Uses reflect.DeepEqual with number-aware decoding to handle large
-// integers correctly.
+// request, using number-aware comparison.
 func jsonRPCIDMatches(reqID, respID json.RawMessage) bool {
 	if respID == nil {
 		return false
 	}
 	reqIDVal, ok1 := decodeIDNumberAware(reqID)
 	respIDVal, ok2 := decodeIDNumberAware(respID)
-	return ok1 && ok2 && reflect.DeepEqual(reqIDVal, respIDVal)
+	return ok1 && ok2 && compareIDValues(reqIDVal, respIDVal)
+}
+
+// compareIDValues compares two id values with proper type handling.
+func compareIDValues(a, b interface{}) bool {
+	aNum, aIsNum := a.(json.Number)
+	bNum, bIsNum := b.(json.Number)
+
+	if aIsNum && bIsNum {
+		return aNum == bNum
+	}
+	if aIsNum || bIsNum {
+		return false
+	}
+
+	aStr, aIsStr := a.(string)
+	bStr, bIsStr := b.(string)
+	if aIsStr && bIsStr {
+		return aStr == bStr
+	}
+	if aIsStr || bIsStr {
+		return false
+	}
+
+	// Otherwise compare as-is (bool, nil, etc.)
+	return a == b
 }
 
 // decodeIDNumberAware decodes a JSON-RPC id with UseNumber so a large integer id
