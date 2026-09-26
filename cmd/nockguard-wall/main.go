@@ -90,6 +90,10 @@ type broker struct {
 	verifier *verifier
 	vmu      sync.Mutex
 	vsnap    verifyReport
+
+	// afterExportSnapshot is a test seam for replacing/appending the live file
+	// after export has captured it. Production leaves it nil.
+	afterExportSnapshot func()
 }
 
 func newBroker() *broker {
@@ -427,8 +431,12 @@ func loadEvents(path string) []event {
 		return nil
 	}
 	defer f.Close()
+	return loadEventsFrom(f)
+}
+
+func loadEventsFrom(r io.Reader) []event {
 	var evs []event
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), audit.MaxTrailLineBytes)
 	lineNo := 0
 	for sc.Scan() {
@@ -531,8 +539,21 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	since := parseTimeFilter(q.Get("since"))
 	until := parseTimeFilter(q.Get("until"))
-	rep := b.refreshSnapshot()
-	evs := filterEvents(loadEvents(b.auditPath), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
+	trail, err := os.ReadFile(b.auditPath)
+	if err != nil {
+		http.Error(w, "audit trail unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	hwm, err := os.ReadFile(b.auditPath + ".hwm")
+	if err != nil && !os.IsNotExist(err) {
+		http.Error(w, "audit checkpoint unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	rep := b.verifier.verifyBytes(trail, hwm)
+	if b.afterExportSnapshot != nil {
+		b.afterExportSnapshot()
+	}
+	evs := filterEvents(loadEventsFrom(bytes.NewReader(trail)), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
 	for i := range evs {
 		evs[i].Verification = exportVerification(rep, evs[i].auditLine)
 	}

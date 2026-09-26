@@ -130,6 +130,31 @@ func (v *verifier) verify(path string) verifyReport {
 	return classifyVerifyResult(n, err, now)
 }
 
+// verifyBytes verifies an immutable audit snapshot. Export uses this rather
+// than reopening path so the receipt and exported rows describe identical
+// bytes even if the live trail is rotated or appended concurrently.
+func (v *verifier) verifyBytes(trail, hwm []byte) verifyReport {
+	now := time.Now().Format(time.RFC3339)
+	if !v.enabled() {
+		return verifyReport{
+			LastVerifiedAt: now,
+			Status:         statusUnconfigured,
+			Detail:         strptr("audit signing not configured — chain not verified (set --verify-ed25519-pub-env or --verify-key-env)"),
+		}
+	}
+	var (
+		n   int
+		err error
+	)
+	switch v.mode {
+	case modeEd25519:
+		n, err = audit.VerifyEd25519Bytes(trail, hwm, v.pub)
+	default:
+		n, err = audit.VerifyBytes(trail, hwm, v.key)
+	}
+	return classifyVerifyResult(n, err, now)
+}
+
 // classifyVerifyResult folds internal/audit's (entries, err) contract into a
 // verifyReport, distinguishing a REAL tamper from a benign read/scan failure —
 // the crux of N9870. Only errors.Is(err, audit.ErrTamper) sets chain_intact=false

@@ -835,7 +835,24 @@ func Verify(path string, key []byte) (int, error) {
 	if herr != nil {
 		return 0, herr
 	}
-	sc := bufio.NewScanner(f)
+	return verifyHMACStream(f, hwm, key)
+}
+
+// VerifyBytes is Verify over an immutable in-memory trail and checkpoint.
+func VerifyBytes(trail, hwm, key []byte) (int, error) {
+	var mark *highWaterMark
+	if hwm != nil {
+		m, err := parseHighWaterMark(hwm, "(snapshot)")
+		if err != nil {
+			return 0, err
+		}
+		mark = m
+	}
+	return verifyHMACStream(bytes.NewReader(trail), mark, key)
+}
+
+func verifyHMACStream(r io.Reader, hwm *highWaterMark, key []byte) (int, error) {
+	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), scanBufferCap)
 	prev := ""
 	n := 0
