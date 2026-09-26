@@ -12,7 +12,7 @@ import "encoding/json"
 type Request struct {
 	Agent  string
 	Tool   string
-	Params json.RawMessage
+	Params json.RawMessage // MCP tools/call params, including name and arguments
 }
 
 // Verdict is the human (or fail-safe) answer. Reason is recorded in the audit

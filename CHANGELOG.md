@@ -5,6 +5,8 @@ All notable changes to NockGuard are documented here.
 ## Unreleased
 
 ### Fixed
+- Show redacted MCP argument scalars in approval prompts so amounts and targets
+  are visible, without exposing nested values or envelope metadata.
 - Preserve pagination and tool metadata when hiding denied tools; apply the same
   filtering to HTTP JSON and streamed SSE discovery responses, with bounded
   inspection and empty arrays when all tools are hidden.
