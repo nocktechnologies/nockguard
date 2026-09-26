@@ -112,12 +112,12 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 		return nil, nil, fmt.Errorf("home path %s is not a directory", home)
 	}
 
-	nockguardDir, err := openOrCreateObserveDir(int(homeDir.Fd()), ".nockguard", 0o700)
+	nockguardDir, err := openOrCreateObserveDir(int(homeDir.Fd()), ".nockguard", 0o700, unix.Fsync)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening nockguard state dir: %w", err)
 	}
 	defer nockguardDir.Close()
-	keyDir, err := openOrCreateObserveDir(int(nockguardDir.Fd()), "keys", 0o700)
+	keyDir, err := openOrCreateObserveDir(int(nockguardDir.Fd()), "keys", 0o700, unix.Fsync)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening observe key dir: %w", err)
 	}
@@ -208,32 +208,21 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 	return priv, pub, nil
 }
 
-// openOrCreateObserveDir Lstats one path component relative to parentFD, rejects
-// symlinks, then opens it with O_NOFOLLOW. The returned descriptor remains the
-// authority for all later operations under that directory, closing the
-// check/use gap path-based setup would leave open.
-func openOrCreateObserveDir(parentFD int, name string, perm uint32) (*os.File, error) {
-	var stat unix.Stat_t
-	err := unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW)
-	switch {
-	case err == nil:
-		if stat.Mode&unix.S_IFMT == unix.S_IFLNK {
-			return nil, fmt.Errorf("%s is a symlink", name)
-		}
-		if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
-			return nil, fmt.Errorf("%s is not a directory", name)
-		}
-	case errors.Is(err, unix.ENOENT):
-		if err := unix.Mkdirat(parentFD, name, perm); err != nil && !errors.Is(err, unix.EEXIST) {
-			return nil, err
-		} else if err == nil {
-			// Persist the new directory entry before relying on it for key state.
-			if err := unix.Fsync(parentFD); err != nil {
-				return nil, fmt.Errorf("syncing new directory parent: %w", err)
-			}
-		}
-	default:
+// openOrCreateObserveDir creates one state-path component when absent, then
+// validates it through a no-follow descriptor. It synchronizes parentFD after
+// both Mkdirat success and EEXIST: the latter can lose a race with the creator,
+// whose directory entry may not yet be durable.
+func openOrCreateObserveDir(parentFD int, name string, perm uint32, syncParent func(int) error) (*os.File, error) {
+	if err := unix.Mkdirat(parentFD, name, perm); err != nil && !errors.Is(err, unix.EEXIST) {
 		return nil, err
+	}
+
+	var lstat unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &lstat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return nil, err
+	}
+	if lstat.Mode&unix.S_IFMT == unix.S_IFLNK {
+		return nil, fmt.Errorf("%s is a symlink", name)
 	}
 
 	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
@@ -241,12 +230,26 @@ func openOrCreateObserveDir(parentFD int, name string, perm uint32) (*os.File, e
 		return nil, err
 	}
 	dir := os.NewFile(uintptr(fd), name)
-	if info, err := dir.Stat(); err != nil {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
 		_ = dir.Close()
 		return nil, err
-	} else if !info.IsDir() {
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
 		_ = dir.Close()
 		return nil, fmt.Errorf("%s is not a directory", name)
+	}
+	if stat.Uid != uint32(os.Geteuid()) {
+		_ = dir.Close()
+		return nil, fmt.Errorf("%s owner uid = %d, want %d", name, stat.Uid, os.Geteuid())
+	}
+	if uint32(stat.Mode)&0o7777 != perm {
+		_ = dir.Close()
+		return nil, fmt.Errorf("%s permissions = %o, want %o", name, uint32(stat.Mode)&0o7777, perm)
+	}
+	if err := syncParent(parentFD); err != nil {
+		_ = dir.Close()
+		return nil, fmt.Errorf("syncing directory parent: %w", err)
 	}
 	return dir, nil
 }

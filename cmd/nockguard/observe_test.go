@@ -16,6 +16,7 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 	"github.com/nocktechnologies/nockguard/internal/proxy"
+	"golang.org/x/sys/unix"
 )
 
 // TestObserveSetupSignsTrailAndReusesKey is the core proof: zero-config observe
@@ -183,6 +184,34 @@ func TestEnsureObserveKeyConcurrentFirstStart(t *testing.T) {
 	}
 	if _, _, err := loadSeedHex(seedPath, string(seed)); err != nil {
 		t.Fatalf("published seed is incomplete or invalid: %v", err)
+	}
+}
+
+func TestOpenOrCreateObserveDirExistingDirValidatesAndSyncsParent(t *testing.T) {
+	parentPath := t.TempDir()
+	parent, err := os.Open(parentPath)
+	if err != nil {
+		t.Fatalf("open parent: %v", err)
+	}
+	defer parent.Close()
+	if err := os.Mkdir(filepath.Join(parentPath, "keys"), 0o700); err != nil {
+		t.Fatalf("pre-create key dir: %v", err)
+	}
+
+	syncCalls := 0
+	dir, err := openOrCreateObserveDir(int(parent.Fd()), "keys", 0o700, func(fd int) error {
+		if fd != int(parent.Fd()) {
+			t.Fatalf("sync parent fd = %d, want %d", fd, parent.Fd())
+		}
+		syncCalls++ // The callback runs only after the no-follow descriptor validates.
+		return unix.Fsync(fd)
+	})
+	if err != nil {
+		t.Fatalf("open pre-existing key dir: %v", err)
+	}
+	defer dir.Close()
+	if syncCalls != 1 {
+		t.Fatalf("parent sync calls = %d, want 1 after Mkdirat EEXIST", syncCalls)
 	}
 }
 
