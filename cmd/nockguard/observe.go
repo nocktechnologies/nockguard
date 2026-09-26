@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/policy"
+	"golang.org/x/sys/unix"
 )
 
 // defaultObserveAgent is the agent identity used by zero-config observe mode when
@@ -95,24 +97,40 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 		return priv, pub, nil
 	}
 
-	// (2) Persisted per-agent key.
-	keyDir := filepath.Join(home, ".nockguard", "keys")
-	// Create the key directory hierarchy durably: os.MkdirAll may create both
-	// ~/.nockguard and ~/.nockguard/keys, and their new directory entries are
-	// only durable once each newly-created directory's parent is fsync'd. Without
-	// this a crash can lose the whole keys directory while the signed trail
-	// survives, and the next run's fresh key makes audit.New reject the chain.
-	if err := durableMkdirAll(keyDir, 0o700); err != nil {
-		return nil, nil, fmt.Errorf("creating key dir %s: %w", keyDir, err)
+	// (2) Persisted per-agent key. Keep directory handles open from validation
+	// through publication: path-based checks followed by os.MkdirAll, CreateTemp,
+	// or Link can be redirected by a swapped symlink. openat with O_NOFOLLOW
+	// binds every operation to the directory descriptor we validated instead.
+	homeDir, err := os.Open(home)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening home dir %s: %w", home, err)
 	}
-	keyPath := filepath.Join(keyDir, agent+".ed25519")
-	pubPath := keyPath + ".pub"
+	defer homeDir.Close()
+	if info, err := homeDir.Stat(); err != nil {
+		return nil, nil, fmt.Errorf("stating home dir %s: %w", home, err)
+	} else if !info.IsDir() {
+		return nil, nil, fmt.Errorf("home path %s is not a directory", home)
+	}
 
-	// Reuse an existing key if present.
-	if seedHex, rerr := os.ReadFile(keyPath); rerr == nil {
-		return loadSeedHex(keyPath, string(seedHex))
-	} else if !os.IsNotExist(rerr) {
+	nockguardDir, err := openOrCreateObserveDir(int(homeDir.Fd()), ".nockguard", 0o700)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening nockguard state dir: %w", err)
+	}
+	defer nockguardDir.Close()
+	keyDir, err := openOrCreateObserveDir(int(nockguardDir.Fd()), "keys", 0o700)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening observe key dir: %w", err)
+	}
+	defer keyDir.Close()
+
+	keyName := agent + ".ed25519"
+	keyPath := filepath.Join(home, ".nockguard", "keys", keyName)
+	// Reuse an existing key if present. The directory-relative Lstat and
+	// no-follow open reject symlinks both before and during this read.
+	if seedHex, exists, rerr := readObserveKey(int(keyDir.Fd()), keyName); rerr != nil {
 		return nil, nil, fmt.Errorf("reading persisted key %s: %w", keyPath, rerr)
+	} else if exists {
+		return loadSeedHex(keyPath, string(seedHex))
 	}
 
 	// Generate and persist once. Write the complete seed to a same-directory temp
@@ -123,28 +141,49 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 		return nil, nil, fmt.Errorf("generating observe key: %w", err)
 	}
 	seedHex := hex.EncodeToString(priv.Seed())
-	f, err := os.CreateTemp(keyDir, ".observe-key-*")
-	if err != nil {
-		return nil, nil, fmt.Errorf("creating temporary key in %s: %w", keyDir, err)
+	var (
+		f        *os.File
+		tempName string
+	)
+	for range 32 {
+		var suffix [16]byte
+		if _, err := rand.Read(suffix[:]); err != nil {
+			return nil, nil, fmt.Errorf("creating temporary key name: %w", err)
+		}
+		tempName = ".observe-key-" + hex.EncodeToString(suffix[:])
+		fd, err := unix.Openat(int(keyDir.Fd()), tempName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+		if errors.Is(err, unix.EEXIST) {
+			continue
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("creating temporary key in %s: %w", filepath.Dir(keyPath), err)
+		}
+		f = os.NewFile(uintptr(fd), tempName)
+		break
 	}
-	tempPath := f.Name()
-	defer os.Remove(tempPath)
-	if _, werr := f.WriteString(seedHex); werr != nil {
+	if f == nil {
+		return nil, nil, fmt.Errorf("creating temporary key in %s: could not choose a unique name", filepath.Dir(keyPath))
+	}
+	defer unix.Unlinkat(int(keyDir.Fd()), tempName, 0)
+	if _, werr := io.WriteString(f, seedHex); werr != nil {
 		_ = f.Close()
-		return nil, nil, fmt.Errorf("writing temporary key %s: %w", tempPath, werr)
+		return nil, nil, fmt.Errorf("writing temporary key %s: %w", keyPath, werr)
 	}
 	if serr := f.Sync(); serr != nil {
 		_ = f.Close()
-		return nil, nil, fmt.Errorf("syncing temporary key %s: %w", tempPath, serr)
+		return nil, nil, fmt.Errorf("syncing temporary key %s: %w", keyPath, serr)
 	}
 	if cerr := f.Close(); cerr != nil {
-		return nil, nil, fmt.Errorf("closing temporary key %s: %w", tempPath, cerr)
+		return nil, nil, fmt.Errorf("closing temporary key %s: %w", keyPath, cerr)
 	}
-	if lerr := os.Link(tempPath, keyPath); lerr != nil {
-		if os.IsExist(lerr) {
-			winner, rerr := os.ReadFile(keyPath)
+	if lerr := unix.Linkat(int(keyDir.Fd()), tempName, int(keyDir.Fd()), keyName, 0); lerr != nil {
+		if errors.Is(lerr, unix.EEXIST) {
+			winner, exists, rerr := readObserveKey(int(keyDir.Fd()), keyName)
 			if rerr != nil {
 				return nil, nil, fmt.Errorf("reading raced key %s: %w", keyPath, rerr)
+			}
+			if !exists {
+				return nil, nil, fmt.Errorf("raced key %s disappeared before it could be read", keyPath)
 			}
 			return loadSeedHex(keyPath, string(winner))
 		}
@@ -156,64 +195,95 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 	// run's freshly generated key makes audit.New reject the existing chain,
 	// permanently bricking observe. Fail loudly rather than persist a key whose
 	// directory entry is not durable (matches the temp-file Sync above).
-	if err := fsyncDir(keyDir); err != nil {
-		return nil, nil, fmt.Errorf("syncing key dir %s after publishing key: %w", keyDir, err)
+	if err := unix.Fsync(int(keyDir.Fd())); err != nil {
+		return nil, nil, fmt.Errorf("syncing key dir %s after publishing key: %w", filepath.Dir(keyPath), err)
 	}
 	// Best-effort: the public half alongside the seed, for convenience. Its
 	// absence is not fatal — the banner already prints the hex public key.
-	_ = os.WriteFile(pubPath, []byte(hex.EncodeToString(pub)), 0o644)
+	if fd, err := unix.Openat(int(keyDir.Fd()), keyName+".pub", unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o644); err == nil {
+		pubFile := os.NewFile(uintptr(fd), keyName+".pub")
+		_, _ = io.WriteString(pubFile, hex.EncodeToString(pub))
+		_ = pubFile.Close()
+	}
 	return priv, pub, nil
 }
 
-// fsyncDir opens dir and fsyncs it so directory-entry changes — a newly linked
-// file or a newly created subdirectory — are durable. A directory fsync persists
-// the entries (names) in that directory, not the contents of the files it holds.
-func fsyncDir(dir string) error {
-	f, err := os.Open(dir)
+// openOrCreateObserveDir Lstats one path component relative to parentFD, rejects
+// symlinks, then opens it with O_NOFOLLOW. The returned descriptor remains the
+// authority for all later operations under that directory, closing the
+// check/use gap path-based setup would leave open.
+func openOrCreateObserveDir(parentFD int, name string, perm uint32) (*os.File, error) {
+	var stat unix.Stat_t
+	err := unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW)
+	switch {
+	case err == nil:
+		if stat.Mode&unix.S_IFMT == unix.S_IFLNK {
+			return nil, fmt.Errorf("%s is a symlink", name)
+		}
+		if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+			return nil, fmt.Errorf("%s is not a directory", name)
+		}
+	case errors.Is(err, unix.ENOENT):
+		if err := unix.Mkdirat(parentFD, name, perm); err != nil && !errors.Is(err, unix.EEXIST) {
+			return nil, err
+		} else if err == nil {
+			// Persist the new directory entry before relying on it for key state.
+			if err := unix.Fsync(parentFD); err != nil {
+				return nil, fmt.Errorf("syncing new directory parent: %w", err)
+			}
+		}
+	default:
+		return nil, err
+	}
+
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if serr := f.Sync(); serr != nil {
-		_ = f.Close()
-		return serr
+	dir := os.NewFile(uintptr(fd), name)
+	if info, err := dir.Stat(); err != nil {
+		_ = dir.Close()
+		return nil, err
+	} else if !info.IsDir() {
+		_ = dir.Close()
+		return nil, fmt.Errorf("%s is not a directory", name)
 	}
-	return f.Close()
+	return dir, nil
 }
 
-// durableMkdirAll creates dir like os.MkdirAll and then fsyncs the parent of
-// each directory it had to create, so the new directory entries survive a
-// crash. os.MkdirAll's new entries otherwise live only in the page cache; a
-// crash can lose a freshly created ~/.nockguard or ~/.nockguard/keys while a
-// later-written signed trail survives, which would brick observe on the next
-// run. Directories that already exist are left untouched (nothing to persist).
-func durableMkdirAll(dir string, perm os.FileMode) error {
-	// Collect the not-yet-existing path components, deepest first.
-	var missing []string
-	for p := filepath.Clean(dir); ; {
-		if _, err := os.Stat(p); err == nil {
-			break
-		} else if !os.IsNotExist(err) {
-			return err
+// readObserveKey reads a persisted seed through a no-follow descriptor. Its
+// Lstat is relative to the already-validated keys directory; the Fstat after
+// opening detects a regular-file replacement during that small interval.
+func readObserveKey(dirFD int, name string) ([]byte, bool, error) {
+	var before unix.Stat_t
+	if err := unix.Fstatat(dirFD, name, &before, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil, false, nil
 		}
-		missing = append(missing, p)
-		if parent := filepath.Dir(p); parent != p {
-			p = parent
-		} else {
-			break // reached the filesystem root
-		}
+		return nil, false, err
 	}
-	if err := os.MkdirAll(dir, perm); err != nil {
-		return err
+	if before.Mode&unix.S_IFMT == unix.S_IFLNK {
+		return nil, true, fmt.Errorf("%s is a symlink", name)
 	}
-	// Persist each new entry by fsyncing its parent, shallowest first so each
-	// parent (and its own entry, already persisted by the previous iteration or
-	// pre-existing) is durable before we rely on it.
-	for i := len(missing) - 1; i >= 0; i-- {
-		if err := fsyncDir(filepath.Dir(missing[i])); err != nil {
-			return fmt.Errorf("syncing parent of %s: %w", missing[i], err)
-		}
+	if before.Mode&unix.S_IFMT != unix.S_IFREG {
+		return nil, true, fmt.Errorf("%s is not a regular file", name)
 	}
-	return nil
+
+	fd, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, true, err
+	}
+	f := os.NewFile(uintptr(fd), name)
+	defer f.Close()
+	var after unix.Stat_t
+	if err := unix.Fstat(fd, &after); err != nil {
+		return nil, true, err
+	}
+	if before.Dev != after.Dev || before.Ino != after.Ino {
+		return nil, true, fmt.Errorf("%s was replaced while being opened", name)
+	}
+	seedHex, err := io.ReadAll(f)
+	return seedHex, true, err
 }
 
 // loadSeedHex parses a persisted hex seed into a keypair.
