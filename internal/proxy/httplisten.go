@@ -27,6 +27,17 @@ import (
 // this cap; other responses stream without buffering.
 const httpListenerBodyCap = 10 * 1024 * 1024
 
+// httpListenerJSONReadTimeout bounds how long the buffered-JSON read in the
+// needsJSONVerification path (forward, below) will wait once upstream response
+// headers have already arrived. The transport's ResponseHeaderTimeout stops
+// applying the moment headers land, and http.Client.Timeout is intentionally
+// left unset on this listener's client so an SSE relay can stay open
+// indefinitely — so nothing else bounds a JSON response body that trickles in
+// or never arrives. Audits flush strictly in sequence order, so one stuck read
+// here stalls every request behind it, not just this one. A var, not a const,
+// so tests can shorten it.
+var httpListenerJSONReadTimeout = 30 * time.Second
+
 // HTTPListener is the N8761 Option-A local HTTP forward-proxy. It puts the SAME
 // enforcement gate the stdio proxy runs (StdioProxy.decide: policy → validate →
 // rate-limit → approval → Ed25519 audit) behind a local HTTP listener. Hosted
@@ -327,9 +338,27 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 			responseID = json.RawMessage("null")
 		}
 		// Read one byte past the cap so an oversized response is rejected before
-		// writing its headers or partial body to the connector.
+		// writing its headers or partial body to the connector. Bound the wall
+		// clock too: headers have already arrived, so nothing else stops an
+		// upstream that stalls or trickles its body from blocking this handler
+		// (and every audit queued behind it) forever — close the body once
+		// httpListenerJSONReadTimeout elapses so the read below unblocks.
 		var readErr error
+		timer := time.AfterFunc(httpListenerJSONReadTimeout, func() {
+			_ = resp.Body.Close()
+		})
 		respBody, readErr = io.ReadAll(io.LimitReader(resp.Body, httpListenerBodyCap+1))
+		timedOut := !timer.Stop()
+		if timedOut {
+			// The timer either already fired (closing the body, which is why
+			// ReadAll returned) or raced the read's own completion — either way
+			// treat it as a timeout, not a generic read error.
+			l.logger.Printf("UPSTREAM-RESPONSE-TIMEOUT agent=%s limit=%s", l.gate.agent, httpListenerJSONReadTimeout)
+			*resolved = true
+			l.gate.resolveAudit(seq)
+			l.writeJSONRPCError(w, responseID, -32603, "nockguard: upstream response timed out")
+			return
+		}
 		if readErr != nil {
 			l.logger.Printf("UPSTREAM-STREAM-ERROR agent=%s: read response body: %v", l.gate.agent, readErr)
 			*resolved = true
