@@ -8,9 +8,13 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"testing/iotest"
+	"time"
+
+	"github.com/nocktechnologies/nockguard/internal/audit"
 )
 
 const discoveryResponse = `{"jsonrpc":"2.0","id":9007199254740993,"_meta":{"vendor":"envelope"},"result":{"tools":[{"name":"safe_tool","title":"Safe","inputSchema":{"type":"object"},"outputSchema":{"type":"object"},"annotations":{"readOnlyHint":true},"_meta":{"vendor":9007199254740993}},{"name":"blocked"}],"nextCursor":"page2","_meta":{"vendor":"result"}}}`
@@ -114,7 +118,7 @@ func TestDiscoverySSEPreservesEventFieldsAndOtherMessages(t *testing.T) {
 	for _, ending := range []string{"\n", "\r", "\r\n"} {
 		input := strings.Join([]string{"\ufeff: heartbeat", "data:", "", other, "", "id: page-1", "retry: 3000", "event: message", "data: " + discoveryResponse, "", ""}, ending)
 		w := httptest.NewRecorder()
-		if err := l.streamToolList(w, iotest.OneByteReader(strings.NewReader(input)), []byte(discoveryRequest), 0); err != nil {
+		if err := l.streamToolList(w, iotest.OneByteReader(strings.NewReader(input)), []byte(discoveryRequest), 0, func() {}); err != nil {
 			t.Fatal(err)
 		}
 		out := w.Body.String()
@@ -142,11 +146,121 @@ func TestHTTPDiscoveryRejectsUninspectableResponses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
 			resp := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {tc.contentType}}, Body: io.NopCloser(strings.NewReader(tc.body))}
-			l.forwardToolList(w, resp, []byte(discoveryRequest), json.RawMessage("9007199254740993"), 0)
+			l.forwardToolList(w, resp, []byte(discoveryRequest), json.RawMessage("9007199254740993"), 0, func() {})
 			if strings.Contains(w.Body.String(), "blocked") || !strings.Contains(w.Body.String(), `"error"`) {
 				t.Errorf("uninspectable response did not fail closed")
 			}
 		})
+	}
+}
+
+// TestHTTPToolDiscoverySSEResolvesAuditBeforeStreamCloses verifies that the
+// audit sequence for a tools/list SSE discovery response resolves as soon as
+// the matching discovery event has been filtered and flushed, not only once
+// the upstream eventually closes the stream. Audits flush strictly in
+// sequence order, so an upstream that keeps the SSE connection open after
+// delivering the discovery result must never block a later request's audit
+// row from being written — that is the ordered-audit-frontier stall this
+// test pins down.
+func TestHTTPToolDiscoverySSEResolvesAuditBeforeStreamCloses(t *testing.T) {
+	release := make(chan struct{})
+	requestStarted := make(chan struct{})
+	// The only upstream call this test drives is the tools/list discovery
+	// request: the later tools/call below is denied at the gate and never
+	// reaches upstream, so this handler has a single branch.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Deliver the matching discovery event, then hold the stream open — a
+		// keep-alive upstream pattern that must never block a later request's
+		// audit from flushing.
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, "event: message\ndata: "+discoveryResponse+"\n\n")
+		w.(http.Flusher).Flush()
+		close(requestStarted)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer upstream.Close()
+
+	auditor, auditPath, _ := newEd25519Auditor(t)
+	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, auditor)
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	defer lsrv.Close()
+
+	go func() {
+		resp, err := http.Post(lsrv.URL, "application/json", strings.NewReader(discoveryRequest))
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("upstream never received the tools/list request")
+	}
+
+	// seq0 (tools/list) queued a "hide" audit for the blocked tool in the
+	// discovery event. seq1 (this denied tools/call) queues a "deny" audit.
+	// flushAuditsLocked only emits in sequence order, so both must flush
+	// promptly — without waiting for the still-open SSE stream to close.
+	status, _, _ := post(t, lsrv.URL, toolCall("2", "not_allowed_tool"))
+	if status != http.StatusOK {
+		t.Fatalf("denied tools/call status = %d, want 200 (JSON-RPC error body)", status)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	var evs []audit.Event
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(auditPath)
+		if err == nil {
+			evs = nil
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				if line == "" {
+					continue
+				}
+				var ev audit.Event
+				if json.Unmarshal([]byte(line), &ev) == nil {
+					evs = append(evs, ev)
+				}
+			}
+			if len(evs) >= 2 {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(evs) < 2 {
+		close(release)
+		t.Fatalf("audit queue stalled behind the open discovery SSE stream: got %d row(s) (want >=2: hide + deny) while the stream was still open: %+v", len(evs), evs)
+	}
+	var foundHide, foundDeny bool
+	for _, ev := range evs {
+		if ev.Decision == "hide" && ev.Tool == "blocked" {
+			foundHide = true
+		}
+		if ev.Decision == "deny" && ev.Tool == "not_allowed_tool" {
+			foundDeny = true
+		}
+	}
+	if !foundHide || !foundDeny {
+		close(release)
+		t.Fatalf("missing expected audit rows while stream open: hide=%v deny=%v rows=%+v", foundHide, foundDeny, evs)
+	}
+
+	// Ending the still-open SSE stream afterwards must not double-resolve the
+	// sequence or duplicate any audit row.
+	close(release)
+	time.Sleep(50 * time.Millisecond)
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	finalEvs := readAuditEvents(t, auditPath)
+	if len(finalEvs) != len(evs) {
+		t.Fatalf("stream close changed audit row count: before=%d after=%d (want no duplicate resolution)", len(evs), len(finalEvs))
 	}
 }
 
@@ -157,7 +271,7 @@ func TestHTTPDiscoveryErrorUsesBodyPermittingStatus(t *testing.T) {
 		t.Run(http.StatusText(upstreamStatus), func(t *testing.T) {
 			w := httptest.NewRecorder()
 			resp := &http.Response{StatusCode: upstreamStatus, Header: make(http.Header), Body: http.NoBody}
-			l.forwardToolList(w, resp, []byte(discoveryRequest), json.RawMessage("9007199254740993"), 0)
+			l.forwardToolList(w, resp, []byte(discoveryRequest), json.RawMessage("9007199254740993"), 0, func() {})
 			if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"error"`) {
 				t.Fatalf("want body-bearing JSON-RPC error, got status %d body %q", w.Code, w.Body.String())
 			}
@@ -166,7 +280,7 @@ func TestHTTPDiscoveryErrorUsesBodyPermittingStatus(t *testing.T) {
 	t.Run("valid response preserves status", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		resp := &http.Response{StatusCode: http.StatusCreated, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(discoveryResponse))}
-		l.forwardToolList(w, resp, []byte(discoveryRequest), json.RawMessage("9007199254740993"), 0)
+		l.forwardToolList(w, resp, []byte(discoveryRequest), json.RawMessage("9007199254740993"), 0, func() {})
 		if w.Code != http.StatusCreated {
 			t.Fatalf("want upstream status %d, got %d", http.StatusCreated, w.Code)
 		}

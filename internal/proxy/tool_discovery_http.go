@@ -16,7 +16,12 @@ import (
 
 // Discovery must be inspected before delivery. Bound each JSON response or SSE
 // event, while keeping an SSE stream incremental and preserving its event IDs.
-func (l *HTTPListener) forwardToolList(w http.ResponseWriter, resp *http.Response, request []byte, id json.RawMessage, seq uint64) {
+// resolveAudit resolves the audit sequence exactly once (the caller guards it
+// with sync.Once); the SSE path calls it as soon as the matching discovery
+// event has been filtered and flushed so a stream the upstream keeps open
+// afterwards never blocks a later request's audit. The JSON path leaves
+// resolveAudit to the caller, unchanged from before.
+func (l *HTTPListener) forwardToolList(w http.ResponseWriter, resp *http.Response, request []byte, id json.RawMessage, seq uint64, resolveAudit func()) {
 	forwardhttp.RemoveHopByHopHeaders(resp.Header)
 	for _, key := range []string{"Content-Length", "ETag", "Content-MD5", "Digest"} {
 		resp.Header.Del(key) // these describe the unfiltered representation
@@ -34,7 +39,7 @@ func (l *HTTPListener) forwardToolList(w http.ResponseWriter, resp *http.Respons
 	}
 	if ct == "text/event-stream" {
 		w.WriteHeader(resp.StatusCode)
-		if err := l.streamToolList(w, resp.Body, request, seq); err != nil {
+		if err := l.streamToolList(w, resp.Body, request, seq, resolveAudit); err != nil {
 			l.logger.Printf("UPSTREAM-STREAM-ERROR agent=%s: tools/list stream failed", l.gate.agent)
 			_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", invalid())
 			_ = http.NewResponseController(w).Flush()
@@ -61,7 +66,13 @@ func (l *HTTPListener) forwardToolList(w http.ResponseWriter, resp *http.Respons
 	_, _ = w.Write(out)
 }
 
-func (l *HTTPListener) streamToolList(w http.ResponseWriter, body io.Reader, request []byte, seq uint64) error {
+// streamToolList relays an SSE tools/list response event by event, filtering
+// only the event that matches the forwarded request. resolveAudit is called
+// right after that matching event is filtered, written and flushed — not at
+// EOF — so an upstream that keeps the stream open past discovery (a
+// keep-alive or unrelated follow-on traffic) never delays the audit sequence
+// this response reserved. resolveAudit is a no-op past the first call.
+func (l *HTTPListener) streamToolList(w http.ResponseWriter, body io.Reader, request []byte, seq uint64, resolveAudit func()) error {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 4096), httpListenerBodyCap+1)
 	// SSE accepts LF, CRLF and bare CR. Consume CR immediately so an upstream
@@ -117,12 +128,14 @@ func (l *HTTPListener) streamToolList(w http.ResponseWriter, body io.Reader, req
 			continue
 		}
 		// An empty data buffer dispatches no event under the SSE specification.
+		matched := false
 		if payload := []byte(strings.Join(data, "\n")); len(payload) > 0 {
 			var msg jsonrpc.Message
 			if json.Unmarshal(payload, &msg) != nil {
 				return fmt.Errorf("invalid SSE JSON-RPC message")
 			}
 			if msg.Method == "" && jsonRPCIDMatches(request, msg.ID) {
+				matched = true
 				filtered := l.gate.filterToolListResponse(payload, seq)
 				kept := make([]string, 0, len(lines))
 				for _, raw := range lines {
@@ -138,6 +151,13 @@ func (l *HTTPListener) streamToolList(w http.ResponseWriter, body io.Reader, req
 			return err
 		}
 		_ = http.NewResponseController(w).Flush()
+		if matched {
+			// The discovery result has been filtered, written and flushed to the
+			// connector — resolve the audit sequence now rather than waiting for
+			// this stream to end, so an upstream that keeps it open (keep-alive,
+			// unrelated later events) cannot stall every later request's audit.
+			resolveAudit()
+		}
 		lines, data, size = nil, nil, 0
 	}
 	return scanner.Err()
