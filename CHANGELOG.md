@@ -5,6 +5,8 @@ All notable changes to NockGuard are documented here.
 ## Unreleased
 
 ### Fixed
+- Recover the actual audit entry count after a lagging checkpoint, under the
+  writer lock, without accepting truncated or tampered trails.
 - Strip every inherited per-agent signing seed from upstream child processes,
   including keys belonging to agents absent from the active policy.
 - Canonicalize nested tool arguments before validation and forwarding, closing
