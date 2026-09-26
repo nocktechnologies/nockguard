@@ -33,7 +33,7 @@ func TestSSEFlushAndRotatedToken(t *testing.T) {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Mcp-Session-Id") == "" {
 				w.Header().Set("Mcp-Session-Id", "private")
-				fmt.Fprint(w, `{}`)
+				fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
 				return
 			}
 			if r.Header.Get("Authorization") != "" {
@@ -190,7 +190,7 @@ func TestRequestBoundaryAndDiscovery(t *testing.T) {
 	c := testConfig(t)
 	var authCalls atomic.Int32
 	g := newTestGateway(t, c, func(w http.ResponseWriter, r *http.Request) { authCalls.Add(1); validAuth(t, c)(w, r) }, func() http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{}`) })
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{}}`) })
 	})
 	for _, tc := range []struct {
 		name   string
@@ -366,7 +366,7 @@ func TestSessionBoundsExpiryOverlapAndRevocation(t *testing.T) {
 				<-release
 			}
 			w.Header().Set("Mcp-Session-Id", "private")
-			fmt.Fprint(w, `{}`)
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
 		})
 	})
 	w := request(g, initialize, "", nil)
@@ -406,4 +406,134 @@ func TestSessionBoundsExpiryOverlapAndRevocation(t *testing.T) {
 	if w = request(g, initialize, "", nil); w.Code != 429 {
 		t.Fatal("inflight cap ignored")
 	}
+}
+
+func TestInitializeSessionOnlyOnJSONRPCSuccess(t *testing.T) {
+	c := testConfig(t)
+
+	// Test (a): initialize where upstream returns 200 + JSON-RPC error
+	t.Run("upstream error", func(t *testing.T) {
+		g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid request"}}`)
+			})
+		})
+		w := request(g, initialize, "", nil)
+		if w.Code != 200 {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		if w.Header().Get("Mcp-Session-Id") != "" {
+			t.Fatal("session ID should not be set on JSON-RPC error")
+		}
+		// Verify session was not committed (follow-up request should fail)
+		g.mu.Lock()
+		if len(g.sessions) != 0 {
+			t.Fatal("session should have been deleted on error")
+		}
+		g.mu.Unlock()
+	})
+
+	// Test (b): initialize with upstream unreachable
+	t.Run("upstream unreachable", func(t *testing.T) {
+		g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+			server.Close()
+			// Return a handler that points to a closed server
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Simulate upstream unreachable by writing an error response
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"nockguard: upstream unreachable"}}`)
+			})
+		})
+		w := request(g, initialize, "", nil)
+		if w.Header().Get("Mcp-Session-Id") != "" {
+			t.Fatal("session ID should not be set on upstream failure")
+		}
+		g.mu.Lock()
+		if len(g.sessions) != 0 {
+			t.Fatal("session should have been deleted on upstream failure")
+		}
+		g.mu.Unlock()
+	})
+
+	// Test (c): initialize with id mismatch
+	t.Run("id mismatch", func(t *testing.T) {
+		g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				// Response id doesn't match request id (99 vs 1)
+				fmt.Fprint(w, `{"jsonrpc":"2.0","id":99,"result":{}}`)
+			})
+		})
+		w := request(g, initialize, "", nil)
+		if w.Header().Get("Mcp-Session-Id") != "" {
+			t.Fatal("session ID should not be set on id mismatch")
+		}
+		g.mu.Lock()
+		if len(g.sessions) != 0 {
+			t.Fatal("session should have been deleted on id mismatch")
+		}
+		g.mu.Unlock()
+	})
+
+	// Test (d): existing successful init tests still pass
+	t.Run("successful init", func(t *testing.T) {
+		g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Mcp-Session-Id", "upstream-session-id")
+				fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+			})
+		})
+		w := request(g, initialize, "", nil)
+		if w.Code != 200 {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		sid := w.Header().Get("Mcp-Session-Id")
+		if sid == "" || len(sid) == 0 {
+			t.Fatal("session ID should be set on successful init")
+		}
+		if strings.Contains(sid, "upstream") {
+			t.Fatal("gateway session ID should not contain upstream ID")
+		}
+		// Verify session was committed
+		g.mu.Lock()
+		s := g.sessions[sid]
+		if s == nil {
+			t.Fatal("session should have been committed")
+		}
+		if s.upstreamID != "upstream-session-id" {
+			t.Fatal("upstream ID should have been captured")
+		}
+		g.mu.Unlock()
+	})
+
+	// Optional: SSE-framed init success
+	t.Run("SSE init success", func(t *testing.T) {
+		g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Mcp-Session-Id", "sse-upstream-id")
+				fmt.Fprint(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n")
+			})
+		})
+		w := request(g, initialize, "", nil)
+		if w.Code != 200 {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		sid := w.Header().Get("Mcp-Session-Id")
+		if sid == "" {
+			t.Fatal("session ID should be set on successful SSE init")
+		}
+		g.mu.Lock()
+		s := g.sessions[sid]
+		if s == nil {
+			t.Fatal("session should have been committed for SSE init")
+		}
+		if s.upstreamID != "sse-upstream-id" {
+			t.Fatal("upstream ID should have been captured from SSE")
+		}
+		g.mu.Unlock()
+	})
 }

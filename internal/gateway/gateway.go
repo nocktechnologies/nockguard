@@ -10,7 +10,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -168,22 +170,60 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.upstreamID != "" {
 		forward.Header.Set("Mcp-Session-Id", s.upstreamID)
 	}
-	rw := &response{ResponseWriter: w, onHeader: func(status int) {
-		if initializing && status >= 200 && status < 300 {
-			s.upstreamID = w.Header().Get("Mcp-Session-Id")
+	if initializing {
+		// Buffer the response to validate it's a successful JSON-RPC initialize
+		buf := &buffered{header: make(http.Header)}
+		s.handler.ServeHTTP(buf, forward)
+
+		// Check if the response is a valid JSON-RPC success
+		if buf.overflow {
+			http.Error(w, "response too large", http.StatusBadGateway)
+			return
+		}
+
+		status := buf.getStatus()
+		body := buf.getBody()
+		contentType := buf.Header().Get("Content-Type")
+
+		if validateInitializeResponse(status, contentType, body, msg.ID) {
+			s.upstreamID = buf.Header().Get("Mcp-Session-Id")
 			success = true
 		}
-		for key := range w.Header() {
+
+		// Write the buffered response to the client
+		for key := range buf.Header() {
 			if key != "Content-Type" && key != "Content-Length" && key != "Mcp-Protocol-Version" {
-				w.Header().Del(key)
+				buf.Header().Del(key)
 			}
 		}
-		w.Header().Set("Cache-Control", "no-store")
+		buf.Header().Set("Cache-Control", "no-store")
 		if success {
-			w.Header().Set("Mcp-Session-Id", id)
+			buf.Header().Set("Mcp-Session-Id", id)
 		}
-	}}
-	s.handler.ServeHTTP(rw, forward)
+		for key, vals := range buf.Header() {
+			for _, v := range vals {
+				w.Header().Add(key, v)
+			}
+		}
+		w.WriteHeader(status)
+		if len(body) > 0 {
+			_, _ = w.Write(body)
+		}
+	} else {
+		// Non-initialize requests stream normally
+		rw := &response{ResponseWriter: w, onHeader: func(status int) {
+			for key := range w.Header() {
+				if key != "Content-Type" && key != "Content-Length" && key != "Mcp-Protocol-Version" {
+					w.Header().Del(key)
+				}
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			if success {
+				w.Header().Set("Mcp-Session-Id", id)
+			}
+		}}
+		s.handler.ServeHTTP(rw, forward)
+	}
 }
 
 func (g *Gateway) busy(w http.ResponseWriter) {
@@ -271,4 +311,146 @@ func (g *Gateway) Run(ctx context.Context) error {
 		}
 		return nil
 	}
+}
+
+// buffered wraps an http.ResponseWriter to buffer the status, headers, and body
+// of an initialize request before deciding whether to commit the session.
+type buffered struct {
+	header   http.Header
+	status   int
+	body     bytes.Buffer
+	overflow bool
+}
+
+func (b *buffered) Header() http.Header {
+	return b.header
+}
+
+func (b *buffered) WriteHeader(code int) {
+	if b.status == 0 {
+		b.status = code
+	}
+}
+
+func (b *buffered) Write(p []byte) (int, error) {
+	if b.overflow {
+		return 0, bytes.ErrTooLarge
+	}
+	// Check if writing would exceed the limit
+	if b.body.Len()+len(p) > bodyLimit {
+		b.overflow = true
+		return 0, bytes.ErrTooLarge
+	}
+	return b.body.Write(p)
+}
+
+// Flush is a no-op to satisfy http.Flusher without panicking
+func (b *buffered) Flush() {
+	// no-op: we buffer everything, so no need to flush
+}
+
+// getStatus returns the status code, defaulting to 200 if not set
+func (b *buffered) getStatus() int {
+	if b.status == 0 {
+		return http.StatusOK
+	}
+	return b.status
+}
+
+// getBody returns the buffered body bytes
+func (b *buffered) getBody() []byte {
+	return b.body.Bytes()
+}
+
+// validateInitializeResponse checks if the buffered response is a valid JSON-RPC
+// success response that matches the request ID. Returns true only if:
+// - status is 2xx
+// - body is a JSON-RPC 2.0 response with "result" (not "error")
+// - id matches the request's JSON-RPC id
+// For SSE responses, it parses the first data line.
+func validateInitializeResponse(status int, contentType string, body []byte, requestID json.RawMessage) bool {
+	if status < 200 || status >= 300 {
+		return false
+	}
+
+	// Handle SSE responses: parse the first data line
+	if strings.HasPrefix(contentType, "text/event-stream") {
+		body = extractFirstSSEMessage(body)
+		if len(body) == 0 {
+			return false
+		}
+	}
+
+	// Parse the JSON-RPC response
+	var msg struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Result  json.RawMessage `json:"result"`
+		Error   json.RawMessage `json:"error"`
+	}
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(body, &msg); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(body, &members); err != nil {
+		return false
+	}
+
+	// Validate JSON-RPC 2.0 success response
+	if msg.JSONRPC != "2.0" {
+		return false
+	}
+
+	// Check for error member (must not be present)
+	if _, hasError := members["error"]; hasError {
+		return false
+	}
+
+	// Check for result member (must be present)
+	if _, hasResult := members["result"]; !hasResult {
+		return false
+	}
+
+	// Validate ID matches request ID
+	return jsonRPCIDMatches(requestID, msg.ID)
+}
+
+// extractFirstSSEMessage extracts the first complete SSE data line from the body
+func extractFirstSSEMessage(body []byte) []byte {
+	lines := bytes.Split(body, []byte("\n"))
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("data:")) {
+			data := bytes.TrimPrefix(line, []byte("data:"))
+			data = bytes.TrimSpace(data)
+			return data
+		}
+	}
+	return nil
+}
+
+// jsonRPCIDMatches reports whether respID is present and equals the id of the
+// request. Uses reflect.DeepEqual with number-aware decoding to handle large
+// integers correctly.
+func jsonRPCIDMatches(reqID, respID json.RawMessage) bool {
+	if respID == nil {
+		return false
+	}
+	reqIDVal, ok1 := decodeIDNumberAware(reqID)
+	respIDVal, ok2 := decodeIDNumberAware(respID)
+	return ok1 && ok2 && reflect.DeepEqual(reqIDVal, respIDVal)
+}
+
+// decodeIDNumberAware decodes a JSON-RPC id with UseNumber so a large integer id
+// keeps its exact literal (json.Number) instead of collapsing to float64, where
+// distinct ids above 2^53 would compare equal. String and null ids keep their own
+// types, so a numeric id never matches a string id of the same text.
+func decodeIDNumberAware(raw json.RawMessage) (interface{}, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v interface{}
+	if err := dec.Decode(&v); err != nil {
+		return nil, false
+	}
+	return v, true
 }
