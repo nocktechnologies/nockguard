@@ -5,6 +5,8 @@ All notable changes to NockGuard are documented here.
 ## Unreleased
 
 ### Fixed
+- Strip every inherited per-agent signing seed from upstream child processes,
+  including keys belonging to agents absent from the active policy.
 - Canonicalize nested tool arguments before validation and forwarding, closing
   duplicate-object parser differences while preserving exact numeric literals.
 
