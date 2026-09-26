@@ -558,7 +558,7 @@ func TestHandleExportRejectsOversizedSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Truncate(maxExportSnapshotBytes + 1); err != nil {
+	if err := f.Truncate(maxExportTrailBytes + 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {
@@ -573,11 +573,134 @@ func TestHandleExportRejectsOversizedSnapshot(t *testing.T) {
 	b := newBroker()
 	b.auditPath = path
 	b.verifier = v
+	readStarted := false
+	b.beforeExportRead = func() { readStarted = true }
 	rec := httptest.NewRecorder()
 	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json", nil).WithContext(t.Context()))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("oversized export status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized export status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
 	}
+	if readStarted {
+		t.Fatal("oversized trail reached the read path")
+	}
+}
+
+func TestHandleExportAcceptsAtLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxExportTrailBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json", nil).WithContext(t.Context()))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("at-limit export status = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleExportRejectsGrowthPastLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxExportTrailBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.beforeExportRead = func() {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if _, err := f.Write([]byte{'x'}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json", nil).WithContext(t.Context()))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("grown export status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+func TestHandleExportMissingTrailIsEmpty(t *testing.T) {
+	b := newBroker()
+	b.auditPath = filepath.Join(t.TempDir(), "missing.jsonl")
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json", nil).WithContext(t.Context()))
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("missing trail export = (%d, %q), want (200, [])", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleExportCreatesNoTempFile(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+	before, err := filepath.Glob(filepath.Join(os.TempDir(), "nockguard-wall-export-*.jsonl*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = exportJSON(t, path, pub, nil, nil)
+	after, err := filepath.Glob(filepath.Join(os.TempDir(), "nockguard-wall-export-*.jsonl*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(before, "\n") != strings.Join(after, "\n") {
+		t.Fatalf("export changed temp-file set: before=%v after=%v", before, after)
+	}
+}
+
+func TestHandleExportSerializesConcurrentRequests(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	if err := os.WriteFile(path, []byte(`{"agent":"a","decision":"allow"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	b.afterExportCheckpoint = func() {
+		entered <- struct{}{}
+		<-release
+	}
+	done := make(chan struct{}, 2)
+	run := func() {
+		rec := httptest.NewRecorder()
+		b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json", nil))
+		done <- struct{}{}
+	}
+	go run()
+	<-entered
+	go run()
+	select {
+	case <-entered:
+		t.Fatal("second export entered capture while first was active")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release <- struct{}{}
+	<-done
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("second export did not enter after first completed")
+	}
+	release <- struct{}{}
+	<-done
 }
 
 func exportJSON(t *testing.T, path string, pub ed25519.PublicKey, afterCheckpoint, afterSnapshot func()) []event {
