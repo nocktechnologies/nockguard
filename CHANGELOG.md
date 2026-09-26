@@ -2,7 +2,9 @@
 
 All notable changes to NockGuard are documented here.
 
-## Unreleased
+## [Unreleased]
+
+## [0.2.0] - 2026-09-26
 
 ### Fixed
 - Correct hosted-connector deployment guidance: cloud clients need a reachable
