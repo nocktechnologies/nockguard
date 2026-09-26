@@ -22,8 +22,8 @@ import (
 // httpListenerBodyCap mirrors mcphttp's 10 MB scanner max-token cap: the largest
 // single JSON-RPC message the listener will read from the connector before
 // rejecting it. Large tool RESULTS (a long nock_list / identity doc) travel on
-// the RESPONSE path, which is streamed and uncapped; this bounds only the
-// inbound REQUEST the connector POSTs.
+// the RESPONSE path, which is streamed and uncapped except for tools/list:
+// discovery responses/events are inspected under this cap before delivery.
 const httpListenerBodyCap = 10 * 1024 * 1024
 
 // HTTPListener is the N8761 Option-A local HTTP forward-proxy. It puts the SAME
@@ -287,6 +287,14 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 		return
 	}
 	defer resp.Body.Close()
+
+	var request jsonrpc.Message
+	if json.Unmarshal(body, &request) == nil && request.Method == "tools/list" && request.ID != nil {
+		l.forwardToolList(w, resp, body, request.ID, seq)
+		*resolved = true
+		l.gate.resolveAudit(seq)
+		return
+	}
 
 	// Relay upstream response headers back unchanged, minus hop-by-hop headers
 	// (reused from forwardhttp). Carrying Content-Type and Mcp-Session-Id makes the

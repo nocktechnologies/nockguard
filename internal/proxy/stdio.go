@@ -957,41 +957,47 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 	return scanner.Err()
 }
 
+// filterToolListResponse replaces only result.tools, retaining extension fields,
+// pagination and tool metadata without decoding numbers through float64.
 func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64) []byte {
-	var resp struct {
-		JSONRPC string          `json:"jsonrpc"`
-		ID      json.RawMessage `json:"id"`
-		Result  *struct {
-			Tools []struct {
-				Name        string          `json:"name"`
-				Description string          `json:"description,omitempty"`
-				InputSchema json.RawMessage `json:"inputSchema,omitempty"`
-			} `json:"tools"`
-		} `json:"result,omitempty"`
+	var resp map[string]json.RawMessage
+	if json.Unmarshal(line, &resp) != nil || resp == nil {
+		return jsonrpc.ErrorResponse(json.RawMessage("null"), -32603, "nockguard: invalid tools/list response")
 	}
-	if err := json.Unmarshal(line, &resp); err != nil || resp.Result == nil {
-		return nil
+	invalid := func() []byte {
+		return jsonrpc.ErrorResponse(resp["id"], -32603, "nockguard: invalid tools/list response")
 	}
-
-	var filtered []struct {
-		Name        string          `json:"name"`
-		Description string          `json:"description,omitempty"`
-		InputSchema json.RawMessage `json:"inputSchema,omitempty"`
+	if _, hasError := resp["error"]; hasError {
+		if _, hasResult := resp["result"]; hasResult {
+			return invalid()
+		}
+		return line
 	}
-	for _, t := range resp.Result.Tools {
-		if dec := p.engine.Evaluate(p.agent, t.Name); dec.Allowed() {
-			filtered = append(filtered, t)
+	var result map[string]json.RawMessage
+	if json.Unmarshal(resp["result"], &result) != nil || result == nil {
+		return invalid()
+	}
+	var tools []map[string]json.RawMessage
+	if json.Unmarshal(result["tools"], &tools) != nil || tools == nil {
+		return invalid()
+	}
+	filtered := make([]map[string]json.RawMessage, 0, len(tools))
+	for _, tool := range tools {
+		var name string
+		if json.Unmarshal(tool["name"], &name) != nil || name == "" {
+			return invalid()
+		}
+		if dec := p.engine.Evaluate(p.agent, name); dec.Allowed() {
+			filtered = append(filtered, tool)
 		} else {
-			p.logger.Printf("HIDE agent=%s tool=%s reason=%q", p.agent, t.Name, dec.Reason)
-			p.appendAudit(seq, t.Name, "hide", dec.Reason, nil)
+			p.logger.Printf("HIDE agent=%s tool=%s reason=%q", p.agent, name, dec.Reason)
+			p.appendAudit(seq, name, "hide", dec.Reason, nil)
 		}
 	}
-
-	resp.Result.Tools = filtered
-	out, err := json.Marshal(resp)
-	if err != nil {
-		return nil
-	}
+	// All values below are validated RawMessages; marshaling cannot fail.
+	result["tools"], _ = json.Marshal(filtered)
+	resp["result"], _ = json.Marshal(result)
+	out, _ := json.Marshal(resp)
 	return out
 }
 
