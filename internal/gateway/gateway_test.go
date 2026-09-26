@@ -849,3 +849,103 @@ func TestSSEInitializeIncrementalParsing(t *testing.T) {
 	// the optimization wouldn't exist (each Write would reprocess all events).
 	t.Logf("Incremental parsing test passed: session created and committed")
 }
+
+// TestSSEParserLinearity verifies that the SSE parser has linear complexity.
+// It sends ~70 KiB of comment/notification preamble followed by a matching result,
+// one byte per Write call. The bytesExamined counter must stay well below O(n²).
+func TestSSEParserLinearity(t *testing.T) {
+	// Create an initWriter with direct construction
+	rec := httptest.NewRecorder()
+	iw := &initWriter{
+		real:   rec,
+		id:     json.RawMessage("1"),
+		header: make(http.Header),
+		mode:   "sse",
+	}
+	iw.header.Set("Content-Type", "text/event-stream")
+
+	// Build preamble: ~70 KiB of comments and notifications
+	var preamble []byte
+	for i := 0; i < 1000; i++ {
+		preamble = append(preamble, []byte(": comment line\n")...)
+		preamble = append(preamble, []byte("data: {\"jsonrpc\":\"2.0\",\"method\":\"notify\",\"params\":{}}\n\n")...)
+	}
+
+	resultEvent := []byte("data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n")
+
+	// Feed one byte at a time
+	totalData := append(preamble, resultEvent...)
+	for i := 0; i < len(totalData); i++ {
+		iw.Write([]byte{totalData[i]})
+		if iw.committed {
+			break
+		}
+	}
+
+	if !iw.committed {
+		t.Fatal("parser should commit on matching result")
+	}
+
+	// Linear complexity: O(n) ≈ n. Quadratic would be O(n²) ≈ n²/2
+	// For n ≈ 70000, linear is ~70000, quadratic is ~2×10⁹
+	// Allow 3× linear as upper bound
+	maxBytesExamined := 3 * len(totalData)
+	if iw.bytesExamined > maxBytesExamined {
+		t.Fatalf("bytesExamined=%d exceeds 3n=%d (linear: %d, quadratic estimate: %.0e)",
+			iw.bytesExamined, maxBytesExamined, len(totalData), float64(len(totalData)*len(totalData))/2)
+	}
+	t.Logf("Parser linearity verified: bytesExamined=%d (3n=%d, n=%d)", iw.bytesExamined, maxBytesExamined, len(totalData))
+}
+
+// TestSSEParserMultiLineDataSplitAcrossWrites verifies that events with multiple
+// data: lines, split at every byte boundary across Write calls, are parsed correctly.
+func TestSSEParserMultiLineDataSplitAcrossWrites(t *testing.T) {
+	rec := httptest.NewRecorder()
+	iw := &initWriter{
+		real:   rec,
+		id:     json.RawMessage("1"),
+		header: make(http.Header),
+		mode:   "sse",
+	}
+	iw.header.Set("Content-Type", "text/event-stream")
+
+	// Event with 5 data lines
+	eventData := []byte("data: line1\ndata: line2\ndata: line3\ndata: line4\ndata: line5\n\n")
+
+	// Feed one byte at a time
+	for i := 0; i < len(eventData); i++ {
+		iw.Write([]byte{eventData[i]})
+	}
+
+	// Should not commit (not a valid JSON-RPC response)
+	if iw.committed {
+		t.Fatal("should not commit on non-JSON event")
+	}
+	if iw.rejected {
+		t.Fatal("should not reject on malformed event (should skip)")
+	}
+}
+
+// TestSSEParserCRLFSplitAcrossWrites tests \r\n split across two Write calls.
+func TestSSEParserCRLFSplitAcrossWrites(t *testing.T) {
+	rec := httptest.NewRecorder()
+	iw := &initWriter{
+		real:   rec,
+		id:     json.RawMessage("1"),
+		header: make(http.Header),
+		mode:   "sse",
+	}
+	iw.header.Set("Content-Type", "text/event-stream")
+
+	// First write ends with \r (first half of \r\n)
+	iw.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\r"))
+	if iw.committed || iw.rejected {
+		t.Fatal("incomplete \\r at end should not commit or reject")
+	}
+
+	// Second write starts with \n (second half of \r\n)
+	iw.Write([]byte("\n\r\n"))
+	if !iw.committed {
+		t.Fatal("should commit after receiving \\n completing the \\r\\n")
+	}
+}

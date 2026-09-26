@@ -300,18 +300,21 @@ func (g *Gateway) Run(ctx context.Context) error {
 // - JSON responses: complete buffering and validation as before
 // - SSE responses: incremental event parsing, commit on first matching-id result
 type initWriter struct {
-	real       http.ResponseWriter
-	id         json.RawMessage
-	sid        string
-	header     http.Header
-	status     int
-	mode       string // "undecided", "buffer", or "sse"
-	held       bytes.Buffer
-	scanned    int
-	committed  bool
-	rejected   bool
-	upstreamID string
-	overflow   bool
+	real          http.ResponseWriter
+	id            json.RawMessage
+	sid           string
+	header        http.Header
+	status        int
+	mode          string // "undecided", "buffer", or "sse"
+	held          bytes.Buffer
+	pos           int // start of current event in held buffer
+	lineStart     int // start of current line in held buffer
+	searchFrom    int // offset to search from for next line terminator
+	bytesExamined int // for testing: count of bytes examined
+	committed     bool
+	rejected      bool
+	upstreamID    string
+	overflow      bool
 }
 
 func (w *initWriter) Header() http.Header {
@@ -392,8 +395,6 @@ func (w *initWriter) Flush() {
 	}
 }
 
-// parseSSEEvents parses complete SSE events. On each call, it avoids quadratic
-// rescanning by skipping lines that were already processed in previous calls.
 func (w *initWriter) parseSSEEvents() {
 	if w.committed || w.rejected {
 		return
@@ -404,59 +405,76 @@ func (w *initWriter) parseSSEEvents() {
 		return
 	}
 
-	lines := bytes.Split(data, []byte("\n"))
+	// Linear scan starting from searchFrom
+	i := w.searchFrom
+	for i < len(data) {
+		w.bytesExamined++
+		b := data[i]
 
-	// Skip lines that were already fully processed
-	// w.scanned tells us the byte position; find the corresponding line index
-	startLineIdx := 0
-	if w.scanned > 0 {
-		// Approximate the starting line by counting bytes
-		// This is an optimization to avoid re-processing old data
-		pos := 0
-		for i := 0; i < len(lines); i++ {
-			if pos >= w.scanned {
-				startLineIdx = i
-				break
-			}
-			pos += len(lines[i]) + 1 // +1 for the newline
-		}
-		// Make sure we don't start in the middle of an event
-		// If startLineIdx points to the middle of an event, go back to the event start
-		// For safety, just process from the last known complete event boundary
-		if startLineIdx > 0 {
-			startLineIdx = startLineIdx - 1
-		}
-	}
+		var termLen int
+		isTerminator := false
 
-	eventStart := startLineIdx
-	for i := startLineIdx; i < len(lines); i++ {
-		// Strip trailing \r if present
-		line := lines[i]
-		if len(line) > 0 && line[len(line)-1] == '\r' {
-			line = line[:len(line)-1]
-		}
-
-		// Empty line marks end of event
-		if len(line) == 0 && i > eventStart {
-			// We have accumulated event lines from eventStart to i-1
-			eventLines := lines[eventStart:i]
-			if w.processSSEEvent(eventLines) {
-				w.committed = true
+		// Detect line terminator: \n, \r\n, or bare \r
+		if b == '\n' {
+			isTerminator = true
+			termLen = 1
+		} else if b == '\r' {
+			if i+1 < len(data) && data[i+1] == '\n' {
+				isTerminator = true
+				termLen = 2
+			} else if i+1 < len(data) {
+				// bare \r followed by non-\n
+				isTerminator = true
+				termLen = 1
+			} else {
+				// \r at end of buffer: ambiguous, wait for more data
+				w.searchFrom = i
 				return
 			}
-			eventStart = i + 1
 		}
+
+		if !isTerminator {
+			i++
+			continue
+		}
+
+		// We have a line from w.lineStart to i
+		// Check if it's blank
+		isBlank := (w.lineStart == i)
+
+		if isBlank {
+			if w.lineStart > w.pos {
+				// Blank line marks end of event; dispatch it
+				eventData := data[w.pos:w.lineStart]
+				eventLines := bytes.Split(eventData, []byte("\n"))
+				// Clean up trailing \r from lines (from CRLF or bare CR)
+				for j := range eventLines {
+					if len(eventLines[j]) > 0 && eventLines[j][len(eventLines[j])-1] == '\r' {
+						eventLines[j] = eventLines[j][:len(eventLines[j])-1]
+					}
+				}
+
+				if w.processSSEEvent(eventLines) {
+					w.committed = true
+					return
+				}
+			}
+			// Blank line: move past it
+			w.pos = i + termLen
+			w.lineStart = i + termLen
+			w.searchFrom = i + termLen
+		} else {
+			// Non-blank line: move to next line
+			w.lineStart = i + termLen
+			w.searchFrom = i + termLen
+		}
+
+		i = w.searchFrom
 	}
 
-	// Save scanned position to know where we left off
-	if len(lines) > 0 && len(lines[len(lines)-1]) > 0 {
-		// If the last line is non-empty, we haven't reached the event end yet
-		w.scanned = len(data) - len(lines[len(lines)-1])
-	} else {
-		w.scanned = len(data)
-	}
+	// No more complete lines; update searchFrom for next call
+	w.searchFrom = len(data)
 }
-
 func (w *initWriter) processSSEEvent(lines [][]byte) bool {
 	// Collect data: lines and join with \n
 	var dataParts []string
