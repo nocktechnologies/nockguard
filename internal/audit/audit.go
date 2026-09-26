@@ -276,6 +276,7 @@ func (a *Auditor) Record(ev Event) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	var checkpointCount int
 	if a.signing() {
 		// Cross-process safety. The mutex only serializes writers within ONE
 		// process. Multiple proxy processes each seed prevSig from the tail at
@@ -294,6 +295,10 @@ func (a *Auditor) Record(ev Event) error {
 		last, err := lastSig(a.path)
 		if err != nil {
 			return err
+		}
+		checkpointCount, err = a.checkpointCount(last)
+		if err != nil {
+			return fmt.Errorf("audit checkpoint before append: %w", err)
 		}
 		canonical, err := json.Marshal(ev)
 		if err != nil {
@@ -315,7 +320,7 @@ func (a *Auditor) Record(ev Event) error {
 	// tail-truncation high-water-mark so a later removal of this entry is
 	// detectable (N8154). ev.Sig is this entry's signature.
 	if a.signing() {
-		return a.updateHighWaterMark(ev.Sig)
+		return a.updateHighWaterMark(checkpointCount+1, ev.Sig)
 	}
 	return nil
 }
@@ -332,6 +337,28 @@ func (a *Auditor) Close() error {
 	return err
 }
 
+// checkpointCount returns the current entry count under Record's flock. The
+// normal path is O(1). If a crash left the checkpoint behind, verify the whole
+// trail and recover its actual count before appending anything. Missing,
+// forged, or truncated checkpoints must not be repaired into a trusted state.
+func (a *Auditor) checkpointCount(last string) (int, error) {
+	prev, err := readHighWaterMark(a.path + hwmSuffix)
+	if err != nil {
+		return 0, err
+	}
+	if prev != nil && prev.Count > 0 && prev.LastSig == last {
+		want := a.sign(hwmSignedBytes(prev.Count, prev.LastSig), "")
+		if !hmac.Equal([]byte(want), []byte(prev.Sig)) {
+			return 0, fmt.Errorf("high-water-mark signature invalid")
+		}
+		return prev.Count, nil
+	}
+	if a.edPriv != nil {
+		return VerifyEd25519(a.path, a.edPriv.Public().(ed25519.PublicKey))
+	}
+	return Verify(a.path, a.key)
+}
+
 // updateHighWaterMark rewrites the signed sidecar after an entry is appended.
 // MUST be called under the same exclusive flock Record holds while signing, so
 // the count read -> increment -> write is atomic across processes. newSig is the
@@ -341,23 +368,8 @@ func (a *Auditor) Close() error {
 // accepts), never ahead (which would false-trip truncation). Best-effort: a
 // sidecar write failure is returned to Record but the entry is already durably
 // appended, so the chain itself is never compromised by a checkpoint problem.
-func (a *Auditor) updateHighWaterMark(newSig string) error {
+func (a *Auditor) updateHighWaterMark(count int, newSig string) error {
 	hwmPath := a.path + hwmSuffix
-	prev, err := readHighWaterMark(hwmPath)
-	if err != nil {
-		return err
-	}
-	var count int
-	if prev != nil {
-		count = prev.Count + 1
-	} else {
-		// First checkpoint on this trail: count the file once (it now includes
-		// the just-appended entry). O(n) one time; O(1) increments thereafter.
-		count, err = countEntries(a.path)
-		if err != nil {
-			return err
-		}
-	}
 	hwm := highWaterMark{Count: count, LastSig: newSig}
 	hwm.Sig = a.sign(hwmSignedBytes(count, newSig), "")
 	data, err := json.Marshal(hwm)
@@ -576,29 +588,6 @@ func parseHighWaterMark(data []byte, name string) (*highWaterMark, error) {
 		return nil, fmt.Errorf("high-water-mark %s is corrupt: %w", name, err)
 	}
 	return &hwm, nil
-}
-
-// countEntries returns the number of non-empty lines in a JSONL trail. Used once
-// when a high-water-mark is first written onto a pre-existing trail; thereafter
-// the count is incremented from the sidecar in O(1).
-func countEntries(path string) (int, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), scanBufferCap)
-	n := 0
-	for sc.Scan() {
-		if len(bytes.TrimSpace(sc.Bytes())) > 0 {
-			n++
-		}
-	}
-	return n, sc.Err()
 }
 
 // checkHighWaterMark validates a freshly-walked chain against the signed
