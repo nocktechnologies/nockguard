@@ -949,3 +949,53 @@ func TestSSEParserCRLFSplitAcrossWrites(t *testing.T) {
 		t.Fatal("should commit after receiving \\n completing the \\r\\n")
 	}
 }
+
+// TestSSEParserBareCRMultiLineEvent verifies that events with bare \r line endings
+// and JSON split across multiple data: lines are parsed and committed correctly.
+// The JSON is valid: {"jsonrpc":"2.0",\n"id":1,"result":{}} when the two data:
+// lines are joined with \n.
+func TestSSEParserBareCRMultiLineEvent(t *testing.T) {
+	t.Run("single write", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		iw := &initWriter{
+			real:   rec,
+			id:     json.RawMessage("1"),
+			header: make(http.Header),
+			mode:   "sse",
+		}
+		iw.header.Set("Content-Type", "text/event-stream")
+
+		// Event with bare \r line endings only, JSON split across two data: lines.
+		// When extracted and joined with \n, the JSON is:
+		// {"jsonrpc":"2.0",\n"id":1,"result":{}}
+		eventData := []byte("data: {\"jsonrpc\":\"2.0\",\rdata: \"id\":1,\"result\":{}}\r\r")
+
+		iw.Write(eventData)
+		iw.finalize()
+		if !iw.committed {
+			t.Fatalf("bare \\r-separated multi-line event should commit; committed=%v rejected=%v", iw.committed, iw.rejected)
+		}
+	})
+
+	t.Run("byte per write", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		iw := &initWriter{
+			real:   rec,
+			id:     json.RawMessage("1"),
+			header: make(http.Header),
+			mode:   "sse",
+		}
+		iw.header.Set("Content-Type", "text/event-stream")
+
+		// Same event, delivered one byte at a time
+		eventData := []byte("data: {\"jsonrpc\":\"2.0\",\rdata: \"id\":1,\"result\":{}}\r\r")
+		for i := 0; i < len(eventData); i++ {
+			iw.Write([]byte{eventData[i]})
+		}
+		iw.finalize()
+
+		if !iw.committed {
+			t.Fatalf("bare \\r-separated event (byte-per-write) should commit; committed=%v rejected=%v", iw.committed, iw.rejected)
+		}
+	})
+}
