@@ -5,6 +5,9 @@ All notable changes to NockGuard are documented here.
 ## Unreleased
 
 ### Fixed
+- Preserve pagination and tool metadata when hiding denied tools; apply the same
+  filtering to HTTP JSON and streamed SSE discovery responses, with bounded
+  inspection and empty arrays when all tools are hidden.
 - Recover the actual audit entry count after a lagging checkpoint, under the
   writer lock, without accepting truncated or tampered trails.
 - Strip every inherited per-agent signing seed from upstream child processes,

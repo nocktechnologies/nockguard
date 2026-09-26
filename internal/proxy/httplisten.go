@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,8 +23,8 @@ import (
 // httpListenerBodyCap mirrors mcphttp's 10 MB scanner max-token cap: the largest
 // single JSON-RPC message the listener will read from the connector before
 // rejecting it. Large tool RESULTS (a long nock_list / identity doc) travel on
-// the RESPONSE path, which is streamed and uncapped; this bounds only the
-// inbound REQUEST the connector POSTs.
+// the RESPONSE path, which is streamed and uncapped except for tools/list:
+// discovery responses/events are inspected under this cap before delivery.
 const httpListenerBodyCap = 10 * 1024 * 1024
 
 // HTTPListener is the N8761 Option-A local HTTP forward-proxy. It puts the SAME
@@ -287,6 +288,30 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 		return
 	}
 	defer resp.Body.Close()
+
+	var request jsonrpc.Message
+	if json.Unmarshal(body, &request) == nil && request.Method == "tools/list" && request.ID != nil {
+		// A tools/list SSE response can stay open indefinitely after delivering
+		// the matching discovery event (keep-alive upstream). Audits flush
+		// strictly in sequence order, so resolveOnce lets forwardToolList
+		// resolve seq as soon as that event is filtered and flushed — instead
+		// of only after the whole stream ends — without blocking every later
+		// request's audit behind an upstream that never closes. The sync.Once
+		// guard makes the early resolve and this unconditional fallback call
+		// safe together: only the first one takes effect (resolveAudit itself
+		// is also idempotent past the flush frontier, so a double call here is
+		// belt-and-suspenders, not load-bearing).
+		var once sync.Once
+		resolveOnce := func() {
+			once.Do(func() {
+				*resolved = true
+				l.gate.resolveAudit(seq)
+			})
+		}
+		l.forwardToolList(w, resp, body, request.ID, seq, resolveOnce)
+		resolveOnce()
+		return
+	}
 
 	// Relay upstream response headers back unchanged, minus hop-by-hop headers
 	// (reused from forwardhttp). Carrying Content-Type and Mcp-Session-Id makes the
