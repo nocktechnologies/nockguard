@@ -124,13 +124,14 @@ func (p *StdioProxy) Probe(line []byte) (forwarded bool, reply []byte, err error
 	// even without a trailing newline — so the raw bytes need no terminator.
 	perr := p.agentToUpstream(bytes.NewReader(line), &upstream, pending)
 
-	// For Probe, emit any deferred audits immediately since there's no response path
+	// For Probe, resolve queued forwarded-call audits immediately since there's no
+	// upstream response path. This exercises the same audit queue as live traffic.
 	pending.Range(func(key, val interface{}) bool {
 		if cardVal, ok := val.(pendingCard); ok {
-			// Emit deferred audits (assume success since this is a probe)
-			for _, aud := range cardVal.audits {
-				p.audit(cardVal.auditToolName, aud.decision, aud.reason, cardVal.auditRefs)
+			if cardVal.tool != "" {
+				p.updateCardState(cardVal.auditSeq, cardVal.tool, &cardVal.refs)
 			}
+			p.resolveAudit(cardVal.auditSeq)
 		}
 		return true
 	})
@@ -558,12 +559,9 @@ type deferredAudit struct {
 }
 
 type pendingCard struct {
-	tool          string
-	refs          extract.References  // for card state updates (claim/release only) - COPY, not pointer
-	audits        []deferredAudit     // audit decisions to emit after response is verified
-	auditToolName string              // tool name for auditing
-	auditRefs     *extract.References // extracted refs for auditing (all tools) - NOTE: used immediately in response processing
-	auditSeq      uint64              // sequence number for audit ordering
+	tool     string
+	refs     extract.References // for card state updates (claim/release only) - COPY, not pointer
+	auditSeq uint64             // sequence number for audit ordering
 }
 type toolsListSeq struct {
 	seq uint64
@@ -641,12 +639,9 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 					refsCopy = *d.refsForState
 				}
 				pending.Store(string(d.forwardID), pendingCard{
-					tool:          d.toolForState,
-					refs:          refsCopy,
-					audits:        d.deferredAudits,
-					auditToolName: d.tool,         // tool name for auditing
-					auditRefs:     d.refsForAudit, // extracted refs for auditing
-					auditSeq:      seq,            // sequence number for audit ordering
+					tool:     d.toolForState,
+					refs:     refsCopy,
+					auditSeq: seq, // sequence number for audit ordering
 				})
 			}
 		}
