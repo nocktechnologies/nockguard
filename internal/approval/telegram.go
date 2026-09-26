@@ -55,7 +55,13 @@ type tgResponse struct {
 func (t *TelegramApprover) Ask(req Request) Verdict {
 	id := t.nonce()
 	text := fmt.Sprintf("🔒 NockGuard — approval needed\n\nAgent: %s\nTool: %s", req.Agent, req.Tool)
-	if summary := summarizeParams(req.Params); summary != "" {
+	var call struct {
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	// Params is the MCP tools/call envelope. Summarize only its arguments;
+	// summarizing the envelope would hide every useful scalar behind {…}.
+	_ = json.Unmarshal(req.Params, &call)
+	if summary := summarizeParams(call.Arguments); summary != "" {
 		text += "\n" + summary
 	}
 	text += "\n\nApprove this call?"

@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,36 @@ import (
 	"testing"
 	"time"
 )
+
+func TestTelegramPromptSummarizesMCPArguments(t *testing.T) {
+	prompt := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		prompt <- r.Form.Get("text")
+		http.Error(w, "test stops before polling", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	v := newTestApprover(srv.URL, time.Second).Ask(Request{
+		Agent: "kit", Tool: "spend",
+		Params: json.RawMessage(`{"name":"spend","_meta":{"private":"envelope-secret"},"arguments":{"amount":5000,"currency":"usd","target":"prod-fleet","api_key":"hidden-value","config":{"password":"nested-secret"}}}`),
+	})
+	if v.Approved {
+		t.Fatal("failed send must deny")
+	}
+	got := <-prompt
+	for _, want := range []string{"amount: 5000", `currency: "usd"`, `target: "prod-fleet"`, "api_key: [redacted]", "config: {…}"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q from prompt: %s", want, got)
+		}
+	}
+	for _, secret := range []string{"hidden-value", "nested-secret", "envelope-secret"} {
+		if strings.Contains(got, secret) {
+			t.Error("prompt exposed secret")
+		}
+	}
+}
 
 // mockTelegram serves the three Bot API endpoints the approver uses. callbackData
 // is returned once from getUpdates (empty string = never any callback, to drive
