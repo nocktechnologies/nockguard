@@ -40,6 +40,71 @@ func TestTelegramPromptSummarizesMCPArguments(t *testing.T) {
 	}
 }
 
+func TestTelegramPromptSummarizesBareArguments(t *testing.T) {
+	// Params here is the arguments object itself, no MCP envelope wrapper —
+	// another non-envelope shape the fallback must handle.
+	prompt := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		prompt <- r.Form.Get("text")
+		http.Error(w, "test stops before polling", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	v := newTestApprover(srv.URL, time.Second).Ask(Request{
+		Agent: "kit", Tool: "spend",
+		Params: json.RawMessage(`{"amount":5000,"currency":"usd","api_key":"hidden-value"}`),
+	})
+	if v.Approved {
+		t.Fatal("failed send must deny")
+	}
+	got := <-prompt
+	for _, want := range []string{"amount: 5000", `currency: "usd"`, "api_key: [redacted]"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q from prompt: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "hidden-value") {
+		t.Error("prompt exposed secret")
+	}
+}
+
+func TestTelegramPromptFallsBackWithoutArgumentsEnvelope(t *testing.T) {
+	// This mirrors what decideToolCall's fail-closed "unextractable-name" path
+	// hands to Ask: the WHOLE JSON-RPC line, which has no top-level
+	// "arguments" field at all — only params.arguments, nested one level too
+	// deep for the envelope decode to find.
+	prompt := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		prompt <- r.Form.Get("text")
+		http.Error(w, "test stops before polling", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	v := newTestApprover(srv.URL, time.Second).Ask(Request{
+		Agent: "kit", Tool: "",
+		Params: json.RawMessage(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"","arguments":{"amount":5,"api_key":"hidden-value"}}}`),
+	})
+	if v.Approved {
+		t.Fatal("failed send must deny")
+	}
+	got := <-prompt
+	if !strings.Contains(got, "Args:") {
+		t.Fatalf("expected a params summary, prompt was argument-free: %s", got)
+	}
+	for _, want := range []string{"method", `"tools/call"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q from top-level fallback summary: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "hidden-value") {
+		t.Error("prompt exposed secret")
+	}
+}
+
 // mockTelegram serves the three Bot API endpoints the approver uses. callbackData
 // is returned once from getUpdates (empty string = never any callback, to drive
 // the timeout path).
