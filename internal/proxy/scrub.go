@@ -135,8 +135,8 @@ func (s *scrubSet) scrub(line []byte) []byte {
 }
 
 // maxEncodingLength returns the longest representation tracked by the scrubber.
-// HTTP streaming retains this many trailing bytes so a credential split across
-// two upstream writes cannot reach the agent before it is redacted.
+// HTTP response handling uses it to decide whether upstream Content-Length can
+// be relayed without risking a length mismatch after scrubbing.
 func (s *scrubSet) maxEncodingLength() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -146,6 +146,28 @@ func (s *scrubSet) maxEncodingLength() int {
 		for _, value := range []string{enc.value, enc.jsonEsc, enc.urlEsc, enc.urlEscLower, enc.b64Std, enc.b64StdNp, enc.b64URL, enc.b64URLNp} {
 			if len(value) > max {
 				max = len(value)
+			}
+		}
+	}
+	return max
+}
+
+// streamTailPrefixLength returns the longest trailing byte sequence that could
+// become a tracked encoding when the next upstream chunk arrives. A complete
+// encoding is deliberately excluded because scrub has already replaced it.
+func (s *scrubSet) streamTailPrefixLength(data []byte) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	max := 0
+	for _, enc := range s.encodings {
+		for _, value := range []string{enc.value, enc.jsonEsc, enc.urlEsc, enc.urlEscLower, enc.b64Std, enc.b64StdNp, enc.b64URL, enc.b64URLNp} {
+			limit := min(len(data), len(value)-1)
+			for n := limit; n > max; n-- {
+				if bytes.HasSuffix(data, []byte(value[:n])) {
+					max = n
+					break
+				}
 			}
 		}
 	}

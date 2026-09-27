@@ -410,21 +410,14 @@ func TestSessionBoundsExpiryOverlapAndRevocation(t *testing.T) {
 
 func TestUnauthenticatedRequestsDoNotConsumeInflightSlots(t *testing.T) {
 	c := testConfig(t)
-	attackersEntered := make(chan struct{}, sessionLimit)
-	legitimateAuthenticated := make(chan struct{})
+	attackersEntered := make(chan struct{}, authLimit)
 	releaseAttackers := make(chan struct{})
 	var attackers sync.WaitGroup
 
 	g := newTestGateway(t, c, func(w http.ResponseWriter, r *http.Request) {
-		switch r.FormValue("token") {
-		case "legitimate-token":
-			close(legitimateAuthenticated)
-			_ = json.NewEncoder(w).Encode(validClaims(c))
-		default:
-			attackersEntered <- struct{}{}
-			<-releaseAttackers
-			_ = json.NewEncoder(w).Encode(map[string]bool{"active": false})
-		}
+		attackersEntered <- struct{}{}
+		<-releaseAttackers
+		_ = json.NewEncoder(w).Encode(map[string]bool{"active": false})
 	}, func() http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -436,36 +429,46 @@ func TestUnauthenticatedRequestsDoNotConsumeInflightSlots(t *testing.T) {
 		attackers.Wait()
 	}()
 
-	for i := 0; i < sessionLimit; i++ {
+	for i := 0; i < authLimit; i++ {
 		attackers.Add(1)
 		go func() {
 			defer attackers.Done()
 			request(g, initialize, "", nil)
 		}()
 	}
-	for i := 0; i < sessionLimit; i++ {
+	for i := 0; i < authLimit; i++ {
 		select {
 		case <-attackersEntered:
 		case <-time.After(time.Second):
 			t.Fatal("unauthenticated request did not reach introspection")
 		}
 	}
-
-	legitimate := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		legitimate <- request(g, initialize, "", func(r *http.Request) {
-			r.Header.Set("Authorization", "Bearer legitimate-token")
-		})
-	}()
-	select {
-	case <-legitimateAuthenticated:
-	case response := <-legitimate:
-		t.Fatalf("legitimate request was rejected before authentication: status=%d", response.Code)
-	case <-time.After(time.Second):
-		t.Fatal("legitimate request did not reach authentication")
+	if got := len(g.inflight); got != 0 {
+		t.Fatalf("unauthenticated requests consumed %d session slots", got)
 	}
-	if response := <-legitimate; response.Code != http.StatusOK {
-		t.Fatalf("legitimate request status = %d, want 200", response.Code)
+}
+
+func TestAuthGuardBusySkipsIntrospection(t *testing.T) {
+	c := testConfig(t)
+	var introspections atomic.Int32
+	g := newTestGateway(t, c, func(w http.ResponseWriter, r *http.Request) {
+		introspections.Add(1)
+		_ = json.NewEncoder(w).Encode(validClaims(c))
+	}, func() http.Handler {
+		return http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	})
+	for i := 0; i < cap(g.authInflight); i++ {
+		g.authInflight <- struct{}{}
+	}
+
+	if w := request(g, initialize, "", nil); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", w.Code)
+	}
+	if got := introspections.Load(); got != 0 {
+		t.Fatalf("introspection calls = %d, want 0", got)
+	}
+	if got := len(g.inflight); got != 0 {
+		t.Fatalf("busy authentication consumed %d session slots", got)
 	}
 }
 

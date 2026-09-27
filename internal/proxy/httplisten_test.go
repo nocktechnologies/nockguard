@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -105,6 +106,24 @@ func (r *chunkReader) Read(p []byte) (int, error) {
 	n := copy(p, r.chunks[0])
 	r.chunks = r.chunks[1:]
 	return n, nil
+}
+
+type notifyRecorder struct {
+	*httptest.ResponseRecorder
+	written chan struct{}
+	once    sync.Once
+}
+
+func (w *notifyRecorder) Write(p []byte) (int, error) {
+	n, err := w.ResponseRecorder.Write(p)
+	if n > 0 {
+		w.once.Do(func() { close(w.written) })
+	}
+	return n, err
+}
+
+func (w *notifyRecorder) Flush() {
+	w.ResponseRecorder.Flush()
 }
 
 // TestHTTPListener_AllowForwardsAndAudits: an allowed tools/call reaches the
@@ -208,6 +227,48 @@ func TestHTTPListener_StreamBodyScrubsCredentialAcrossChunks(t *testing.T) {
 	}
 	if !strings.Contains(response, "[nockguard:redacted]") {
 		t.Fatalf("streamed response did not contain the redaction marker: %s", response)
+	}
+}
+
+func TestHTTPListener_StreamBodyDeliversCompleteSSEEventWithoutTailHold(t *testing.T) {
+	const secret = "split-response-secret-0001"
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    inject:\n      - tools: [test_tool]\n        ref: env:TEST_SECRET\n        arg: auth\n", nil, nil).
+		WithResolver(&mockResolver{values: map[string]string{"env:TEST_SECRET": secret}})
+	if d := gate.decide([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{}}}`), 0); d.reject {
+		t.Fatalf("injected call was rejected: %s", d.rejectMsg)
+	}
+
+	listener := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
+	reader, writer := io.Pipe()
+	w := &notifyRecorder{ResponseRecorder: httptest.NewRecorder(), written: make(chan struct{})}
+	done := make(chan struct{})
+	go func() {
+		listener.streamBody(w, reader)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		_ = writer.Close()
+		<-done
+	})
+
+	if _, err := io.WriteString(writer, "data: ready\n\n"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-w.written:
+		if got := w.Body.String(); got != "data: ready\n\n" {
+			t.Fatalf("delivered SSE event = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("complete SSE event was held awaiting another upstream write")
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stream body did not finish after upstream close")
 	}
 }
 

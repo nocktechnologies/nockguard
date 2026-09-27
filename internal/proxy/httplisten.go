@@ -475,10 +475,6 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 func (l *HTTPListener) streamBody(w http.ResponseWriter, body io.Reader) {
 	rc := http.NewResponseController(w)
 	buf := make([]byte, 32*1024)
-	keep := 0
-	if l.gate.scrubber != nil {
-		keep = l.gate.scrubber.maxEncodingLength()
-	}
 	var pending []byte
 	write := func(chunk []byte) bool {
 		if len(chunk) == 0 {
@@ -495,13 +491,14 @@ func (l *HTTPListener) streamBody(w http.ResponseWriter, body io.Reader) {
 	for {
 		n, rerr := body.Read(buf)
 		if n > 0 {
-			if keep == 0 {
+			if l.gate.scrubber == nil {
 				if !write(buf[:n]) {
 					return
 				}
 			} else {
 				pending = append(pending, buf[:n]...)
 				scrubbed := l.gate.scrubber.scrub(pending)
+				keep := l.gate.scrubber.streamTailPrefixLength(scrubbed)
 				if len(scrubbed) > keep {
 					if !write(scrubbed[:len(scrubbed)-keep]) {
 						return
@@ -513,7 +510,7 @@ func (l *HTTPListener) streamBody(w http.ResponseWriter, body io.Reader) {
 			}
 		}
 		if rerr != nil {
-			if keep > 0 && !write(l.gate.scrubber.scrub(pending)) {
+			if l.gate.scrubber != nil && !write(pending) {
 				return
 			}
 			if rerr != io.EOF {
