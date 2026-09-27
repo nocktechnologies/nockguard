@@ -663,7 +663,8 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 func (p *StdioProxy) decide(line []byte, seq uint64) mcpDecision {
 	// Canonicalize the TOP-LEVEL message before doing anything else. Unmarshal
 	// into a map so any duplicate top-level keys (method, id, params, ...)
-	// collapse to Go's last-wins value, then re-marshal: the bytes the proxy
+	// collapse to Go's last-wins value. Canonicalize case-folded params aliases
+	// (or reject a conflict) before re-marshaling, so the bytes the proxy
 	// gates and the bytes the upstream receives are now identical, so a
 	// first-key-wins upstream cannot read a different "method" (e.g. a second
 	// "method":"tools/list" hiding a "method":"tools/call"). A line that is not
@@ -673,6 +674,18 @@ func (p *StdioProxy) decide(line []byte, seq uint64) mcpDecision {
 		p.logger.Printf("REJECT agent=%s reason=undecodable-or-batch", p.agent)
 		return mcpDecision{reject: true, rejectID: json.RawMessage("null"), rejectCode: -32700,
 			rejectMsg: "nockguard: rejected — only single well-formed JSON-RPC objects are accepted (batch arrays are not gated)"}
+	}
+	for key, value := range topLevel {
+		if key == "params" || !strings.EqualFold(key, "params") {
+			continue
+		}
+		if _, exists := topLevel["params"]; exists {
+			p.logger.Printf("REJECT agent=%s reason=ambiguous-params-key", p.agent)
+			return mcpDecision{reject: true, rejectID: json.RawMessage("null"), rejectCode: -32600,
+				rejectMsg: "nockguard: rejected — ambiguous params key"}
+		}
+		topLevel["params"] = value
+		delete(topLevel, key)
 	}
 	canonicalLine, err := json.Marshal(topLevel)
 	if err != nil {

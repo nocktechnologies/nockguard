@@ -408,6 +408,70 @@ func TestSessionBoundsExpiryOverlapAndRevocation(t *testing.T) {
 	}
 }
 
+func TestUnauthenticatedRequestsDoNotConsumeInflightSlots(t *testing.T) {
+	c := testConfig(t)
+	attackersEntered := make(chan struct{}, authLimit)
+	releaseAttackers := make(chan struct{})
+	var attackers sync.WaitGroup
+
+	g := newTestGateway(t, c, func(w http.ResponseWriter, r *http.Request) {
+		attackersEntered <- struct{}{}
+		<-releaseAttackers
+		_ = json.NewEncoder(w).Encode(map[string]bool{"active": false})
+	}, func() http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		})
+	})
+	defer func() {
+		close(releaseAttackers)
+		attackers.Wait()
+	}()
+
+	for i := 0; i < authLimit; i++ {
+		attackers.Add(1)
+		go func() {
+			defer attackers.Done()
+			request(g, initialize, "", nil)
+		}()
+	}
+	for i := 0; i < authLimit; i++ {
+		select {
+		case <-attackersEntered:
+		case <-time.After(time.Second):
+			t.Fatal("unauthenticated request did not reach introspection")
+		}
+	}
+	if got := len(g.inflight); got != 0 {
+		t.Fatalf("unauthenticated requests consumed %d session slots", got)
+	}
+}
+
+func TestAuthGuardBusySkipsIntrospection(t *testing.T) {
+	c := testConfig(t)
+	var introspections atomic.Int32
+	g := newTestGateway(t, c, func(w http.ResponseWriter, r *http.Request) {
+		introspections.Add(1)
+		_ = json.NewEncoder(w).Encode(validClaims(c))
+	}, func() http.Handler {
+		return http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	})
+	for i := 0; i < cap(g.authInflight); i++ {
+		g.authInflight <- struct{}{}
+	}
+
+	if w := request(g, initialize, "", nil); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", w.Code)
+	}
+	if got := introspections.Load(); got != 0 {
+		t.Fatalf("introspection calls = %d, want 0", got)
+	}
+	if got := len(g.inflight); got != 0 {
+		t.Fatalf("busy authentication consumed %d session slots", got)
+	}
+}
+
 func TestInitializeSessionOnlyOnJSONRPCSuccess(t *testing.T) {
 	c := testConfig(t)
 
@@ -923,6 +987,17 @@ func TestSSEParserMultiLineDataSplitAcrossWrites(t *testing.T) {
 	}
 	if iw.rejected {
 		t.Fatal("should not reject on malformed event (should skip)")
+	}
+}
+
+func TestCompareIDValuesRejectsCompositeValuesWithoutPanicking(t *testing.T) {
+	for _, id := range []interface{}{
+		[]interface{}{json.Number("1")},
+		map[string]interface{}{"id": json.Number("1")},
+	} {
+		if compareIDValues(id, id) {
+			t.Fatalf("composite JSON-RPC id matched: %#v", id)
+		}
 	}
 }
 

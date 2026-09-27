@@ -388,11 +388,19 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 		}
 	}
 
-	// Relay upstream response headers back unchanged, minus hop-by-hop headers
-	// (reused from forwardhttp). Carrying Content-Type and Mcp-Session-Id makes the
-	// response indistinguishable from a direct NockCC call.
+	// Relay upstream response headers, minus hop-by-hop headers and a stale
+	// Content-Length when scrubbing (reused from forwardhttp). Carrying Content-Type
+	// and Mcp-Session-Id makes the response indistinguishable from a direct NockCC
+	// call.
 	forwardhttp.RemoveHopByHopHeaders(resp.Header)
+	// Scrubbing may change the response body's byte length, so the upstream's
+	// Content-Length would become false and could truncate the redaction marker.
+	// Let net/http frame the response when this session has injected credentials.
+	scrubbing := l.gate.scrubber != nil && l.gate.scrubber.maxEncodingLength() > 0
 	for k, vals := range resp.Header {
+		if scrubbing && k == "Content-Length" {
+			continue
+		}
 		for _, v := range vals {
 			w.Header().Add(k, v)
 		}
@@ -427,7 +435,10 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 				}
 			}
 		}
-		// Write the buffered response bytes unchanged.
+		if l.gate.scrubber != nil {
+			respBody = l.gate.scrubber.scrub(respBody)
+		}
+		// Write the buffered response bytes after credential scrubbing.
 		if _, werr := w.Write(respBody); werr != nil {
 			return
 		}
@@ -464,17 +475,44 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 func (l *HTTPListener) streamBody(w http.ResponseWriter, body io.Reader) {
 	rc := http.NewResponseController(w)
 	buf := make([]byte, 32*1024)
+	var pending []byte
+	write := func(chunk []byte) bool {
+		if len(chunk) == 0 {
+			return true
+		}
+		if _, werr := w.Write(chunk); werr != nil {
+			return false
+		}
+		// Best-effort flush: not every ResponseWriter supports it (returns
+		// ErrNotSupported), in which case the copy still completes, just buffered.
+		_ = rc.Flush()
+		return true
+	}
 	for {
 		n, rerr := body.Read(buf)
 		if n > 0 {
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				return
+			if l.gate.scrubber == nil {
+				if !write(buf[:n]) {
+					return
+				}
+			} else {
+				pending = append(pending, buf[:n]...)
+				scrubbed := l.gate.scrubber.scrub(pending)
+				keep := l.gate.scrubber.streamTailPrefixLength(scrubbed)
+				if len(scrubbed) > keep {
+					if !write(scrubbed[:len(scrubbed)-keep]) {
+						return
+					}
+					pending = append(pending[:0], scrubbed[len(scrubbed)-keep:]...)
+				} else {
+					pending = append(pending[:0], scrubbed...)
+				}
 			}
-			// Best-effort flush: not every ResponseWriter supports it (returns
-			// ErrNotSupported), in which case the copy still completes, just buffered.
-			_ = rc.Flush()
 		}
 		if rerr != nil {
+			if l.gate.scrubber != nil && !write(pending) {
+				return
+			}
 			if rerr != io.EOF {
 				l.logger.Printf("UPSTREAM-STREAM-ERROR agent=%s: %v", l.gate.agent, rerr)
 			}
