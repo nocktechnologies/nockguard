@@ -408,6 +408,67 @@ func TestSessionBoundsExpiryOverlapAndRevocation(t *testing.T) {
 	}
 }
 
+func TestUnauthenticatedRequestsDoNotConsumeInflightSlots(t *testing.T) {
+	c := testConfig(t)
+	attackersEntered := make(chan struct{}, sessionLimit)
+	legitimateAuthenticated := make(chan struct{})
+	releaseAttackers := make(chan struct{})
+	var attackers sync.WaitGroup
+
+	g := newTestGateway(t, c, func(w http.ResponseWriter, r *http.Request) {
+		switch r.FormValue("token") {
+		case "legitimate-token":
+			close(legitimateAuthenticated)
+			_ = json.NewEncoder(w).Encode(validClaims(c))
+		default:
+			attackersEntered <- struct{}{}
+			<-releaseAttackers
+			_ = json.NewEncoder(w).Encode(map[string]bool{"active": false})
+		}
+	}, func() http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		})
+	})
+	defer func() {
+		close(releaseAttackers)
+		attackers.Wait()
+	}()
+
+	for i := 0; i < sessionLimit; i++ {
+		attackers.Add(1)
+		go func() {
+			defer attackers.Done()
+			request(g, initialize, "", nil)
+		}()
+	}
+	for i := 0; i < sessionLimit; i++ {
+		select {
+		case <-attackersEntered:
+		case <-time.After(time.Second):
+			t.Fatal("unauthenticated request did not reach introspection")
+		}
+	}
+
+	legitimate := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		legitimate <- request(g, initialize, "", func(r *http.Request) {
+			r.Header.Set("Authorization", "Bearer legitimate-token")
+		})
+	}()
+	select {
+	case <-legitimateAuthenticated:
+	case response := <-legitimate:
+		t.Fatalf("legitimate request was rejected before authentication: status=%d", response.Code)
+	case <-time.After(time.Second):
+		t.Fatal("legitimate request did not reach authentication")
+	}
+	if response := <-legitimate; response.Code != http.StatusOK {
+		t.Fatalf("legitimate request status = %d, want 200", response.Code)
+	}
+}
+
 func TestInitializeSessionOnlyOnJSONRPCSuccess(t *testing.T) {
 	c := testConfig(t)
 
@@ -923,6 +984,17 @@ func TestSSEParserMultiLineDataSplitAcrossWrites(t *testing.T) {
 	}
 	if iw.rejected {
 		t.Fatal("should not reject on malformed event (should skip)")
+	}
+}
+
+func TestCompareIDValuesRejectsCompositeValuesWithoutPanicking(t *testing.T) {
+	for _, id := range []interface{}{
+		[]interface{}{json.Number("1")},
+		map[string]interface{}{"id": json.Number("1")},
+	} {
+		if compareIDValues(id, id) {
+			t.Fatalf("composite JSON-RPC id matched: %#v", id)
+		}
 	}
 }
 

@@ -134,6 +134,24 @@ func (s *scrubSet) scrub(line []byte) []byte {
 	return result
 }
 
+// maxEncodingLength returns the longest representation tracked by the scrubber.
+// HTTP streaming retains this many trailing bytes so a credential split across
+// two upstream writes cannot reach the agent before it is redacted.
+func (s *scrubSet) maxEncodingLength() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	max := 0
+	for _, enc := range s.encodings {
+		for _, value := range []string{enc.value, enc.jsonEsc, enc.urlEsc, enc.urlEscLower, enc.b64Std, enc.b64StdNp, enc.b64URL, enc.b64URLNp} {
+			if len(value) > max {
+				max = len(value)
+			}
+		}
+	}
+	return max
+}
+
 // jsonEscapeWithoutQuotes returns the JSON-escaped form of a string WITHOUT the
 // surrounding double quotes (as json.Marshal would produce them). This is needed
 // to scrub the escaped value when it appears embedded in JSON.

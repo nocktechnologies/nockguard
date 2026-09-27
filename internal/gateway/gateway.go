@@ -88,19 +88,19 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	select {
-	case g.inflight <- struct{}{}:
-		defer func() { <-g.inflight }()
-	default:
-		g.busy(w)
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
 	c, err := g.authenticate(ctx, r)
 	if err != nil {
 		w.Header().Set("WWW-Authenticate", fmt.Sprintf("Bearer resource_metadata=%q, scope=%q", g.metadataURL, g.config.Scope))
 		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	select {
+	case g.inflight <- struct{}{}:
+		defer func() { <-g.inflight }()
+	default:
+		g.busy(w)
 		return
 	}
 	ctx, expire := context.WithDeadline(ctx, time.Unix(c.Expires, 0))
@@ -757,8 +757,7 @@ func compareIDValues(a, b interface{}) bool {
 		return false
 	}
 
-	// Otherwise compare as-is (bool, nil, etc.)
-	return a == b
+	return a == nil && b == nil
 }
 
 // decodeIDNumberAware decodes a JSON-RPC id with UseNumber so a large integer id
