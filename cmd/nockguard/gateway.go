@@ -96,7 +96,8 @@ func serveMCPGateway(ctx context.Context, path string) error {
 	g, err := gateway.New(c, func() http.Handler {
 		gate := proxy.NewStdioProxy(nil, c.Agent, engine, validator, limiter, auditor, forwarder, logger).
 			WithTrust(trustAccumulator).WithApprover(approver)
-		return proxy.NewHTTPListener("", c.Upstream, gate, logger).WithUpstreamAgentToken(upstreamToken)
+		return proxy.NewHTTPListener("", c.Upstream, gate, logger).
+			WithUpstreamAgentToken(upstreamToken).WithRequiredAudit()
 	})
 	if err != nil {
 		return err

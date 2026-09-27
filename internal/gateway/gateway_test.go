@@ -280,7 +280,8 @@ func TestSessionIsolationPolicyAndSignedAudit(t *testing.T) {
 	limiter := ratelimit.New(ratelimit.Config{SpendCap: 4})
 	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
 		gate := proxy.NewStdioProxy(nil, c.Agent, engine, nil, limiter, auditor, nil, logger)
-		return proxy.NewHTTPListener("", upstream.URL, gate, logger).WithUpstreamAgentToken("test-upstream-credential")
+		return proxy.NewHTTPListener("", upstream.URL, gate, logger).
+			WithUpstreamAgentToken("test-upstream-credential").WithRequiredAudit()
 	})
 	init := func() string {
 		w := request(g, initialize, "", nil)

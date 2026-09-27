@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/jsonrpc"
 	"github.com/nocktechnologies/nockguard/internal/proxy/forwardhttp"
@@ -22,6 +23,12 @@ import (
 // afterwards never blocks a later request's audit. The JSON path leaves
 // resolveAudit to the caller, unchanged from before.
 func (l *HTTPListener) forwardToolList(w http.ResponseWriter, resp *http.Response, request []byte, id json.RawMessage, seq uint64, resolveAudit func()) {
+	if l.requiredAudit {
+		// Both JSON and SSE discovery must release the serialized gate even
+		// when the upstream never finishes delivering its matching response.
+		timer := time.AfterFunc(l.streamResponseTimeout, func() { _ = resp.Body.Close() })
+		defer timer.Stop()
+	}
 	forwardhttp.RemoveHopByHopHeaders(resp.Header)
 	for _, key := range []string{"Content-Length", "ETag", "Content-MD5", "Digest"} {
 		resp.Header.Del(key) // these describe the unfiltered representation
@@ -31,7 +38,12 @@ func (l *HTTPListener) forwardToolList(w http.ResponseWriter, resp *http.Respons
 			w.Header().Add(key, value)
 		}
 	}
-	invalid := func() []byte { return jsonrpc.ErrorResponse(id, -32603, "nockguard: invalid tools/list response") }
+	invalid := func() []byte {
+		if l.auditError() != nil {
+			return jsonrpc.ErrorResponse(id, -32603, auditAfterForwardError)
+		}
+		return jsonrpc.ErrorResponse(id, -32603, "nockguard: invalid tools/list response")
+	}
 	ct, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if encoding := resp.Header.Get("Content-Encoding"); encoding != "" && encoding != "identity" {
 		w.Header().Del("Content-Encoding")
@@ -81,6 +93,13 @@ func (l *HTTPListener) forwardToolList(w http.ResponseWriter, resp *http.Respons
 		out = invalid()
 		status = http.StatusOK
 	}
+	if l.requiredAudit {
+		resolveAudit()
+		if l.auditError() != nil {
+			out = invalid()
+			status = http.StatusOK
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(out)
@@ -101,6 +120,21 @@ func statusHasNoBody(status int) bool {
 // keep-alive or unrelated follow-on traffic) never delays the audit sequence
 // this response reserved. resolveAudit is a no-op past the first call.
 func (l *HTTPListener) streamToolList(w http.ResponseWriter, body io.Reader, request []byte, seq uint64, resolveAudit func()) error {
+	return l.streamMCPResponse(w, body, request, func(payload []byte) ([]byte, error) {
+		filtered := l.gate.filterToolListResponse(payload, seq)
+		if l.requiredAudit {
+			resolveAudit()
+			if err := l.auditError(); err != nil {
+				return nil, err
+			}
+		}
+		return filtered, nil
+	}, resolveAudit)
+}
+
+// streamMCPResponse inspects complete, bounded SSE events before releasing the
+// matching response. The callback persists required audits before publication.
+func (l *HTTPListener) streamMCPResponse(w http.ResponseWriter, body io.Reader, request []byte, transform func([]byte) ([]byte, error), afterMatched func()) error {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 4096), httpListenerBodyCap+1)
 	// SSE accepts LF, CRLF and bare CR. Consume CR immediately so an upstream
@@ -178,7 +212,10 @@ func (l *HTTPListener) streamToolList(w http.ResponseWriter, body io.Reader, req
 				} else {
 					matched = true
 					answered = true
-					filtered := l.gate.filterToolListResponse(payload, seq)
+					filtered, err := transform(payload)
+					if err != nil {
+						return err
+					}
 					kept := make([]string, 0, len(lines))
 					for _, raw := range lines {
 						field, _, _ := strings.Cut(raw, ":")
@@ -208,7 +245,12 @@ func (l *HTTPListener) streamToolList(w http.ResponseWriter, body io.Reader, req
 			// connector — resolve the audit sequence now rather than waiting for
 			// this stream to end, so an upstream that keeps it open (keep-alive,
 			// unrelated later events) cannot stall every later request's audit.
-			resolveAudit()
+			afterMatched()
+			// A required-audit listener serializes requests. End this POST after
+			// its response so an upstream keep-alive cannot hold the gate busy.
+			if l.requiredAudit {
+				return nil
+			}
 		}
 		lines, data, size = nil, nil, 0
 	}

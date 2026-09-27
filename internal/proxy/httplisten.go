@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"reflect"
@@ -59,12 +60,23 @@ type HTTPListener struct {
 	// gate carries the enforcement pipeline (engine, validator, limiter, auditor,
 	// forwarder, trust, approver). Its stdio upstream field is unused here — only
 	// decide() is called, which never touches it.
-	gate               *StdioProxy
-	listen             string
-	upstream           string
-	client             *http.Client
-	logger             *log.Logger
-	upstreamAgentToken *string
+	gate                  *StdioProxy
+	listen                string
+	upstream              string
+	client                *http.Client
+	logger                *log.Logger
+	upstreamAgentToken    *string
+	requiredAudit         bool
+	auditMu               sync.Mutex
+	streamResponseTimeout time.Duration
+}
+
+// WithRequiredAudit requires durable local decision records before forwarding
+// and before releasing tool results. Configure before serving requests.
+func (l *HTTPListener) WithRequiredAudit() *HTTPListener {
+	l.requiredAudit = true
+	l.gate.requiredAudit = true
+	return l
 }
 
 // WithUpstreamAgentToken selects the gateway's separate upstream identity.
@@ -93,11 +105,12 @@ func NewHTTPListener(listen, upstream string, gate *StdioProxy, logger *log.Logg
 	// stream mid-flight); the streamed body stays uncapped.
 	transport.ResponseHeaderTimeout = 60 * time.Second
 	return &HTTPListener{
-		gate:     gate,
-		listen:   listen,
-		upstream: upstream,
-		logger:   logger,
-		client:   &http.Client{Transport: transport},
+		gate:                  gate,
+		listen:                listen,
+		upstream:              upstream,
+		logger:                logger,
+		client:                &http.Client{Transport: transport},
+		streamResponseTimeout: 30 * time.Second,
 	}
 }
 
@@ -174,6 +187,20 @@ func (l *HTTPListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		l.writeJSONRPCError(w, json.RawMessage("null"), -32600, "nockguard: request body exceeds the 10MB limit")
 		return
 	}
+	if l.requiredAudit {
+		// Deferred audit queues are ordered within this gate. An overlapping
+		// request must not publish its result while its audit is still queued.
+		if !l.auditMu.TryLock() {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "audit gate busy", http.StatusTooManyRequests)
+			return
+		}
+		defer l.auditMu.Unlock()
+		if l.auditError() != nil {
+			l.writeAuditError(w, body, false)
+			return
+		}
+	}
 
 	seq := atomic.AddUint64(&l.gate.auditSeq, 1) - 1
 
@@ -187,6 +214,10 @@ func (l *HTTPListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	d := l.gate.decide(body, seq)
+	if l.auditError() != nil {
+		l.writeAuditError(w, body, false)
+		return
+	}
 
 	if d.reject {
 		if d.rejectID == nil {
@@ -205,6 +236,19 @@ func (l *HTTPListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		l.gate.resolveAudit(seq)
 		l.writeJSONRPCError(w, d.rejectID, d.rejectCode, d.rejectMsg)
 		return
+	}
+	if l.requiredAudit {
+		var request jsonrpc.Message
+		_ = json.Unmarshal(d.forward, &request)
+		if request.Method == "tools/call" {
+			// This is an actual durable record of the forwarding decision, not
+			// a readiness probe. It says nothing about execution or completion.
+			l.gate.audit(d.tool, "dispatch", "required-audit-before-forward", d.refsForAudit)
+			if l.auditError() != nil {
+				l.writeAuditError(w, body, false)
+				return
+			}
+		}
 	}
 
 	// Cleared the gate (or non-tools/call traffic like initialize/tools/list):
@@ -262,6 +306,10 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 		l.logger.Printf("UPSTREAM-ERROR agent=%s: build request: %v", l.gate.agent, err)
 		*resolved = true
 		l.gate.resolveAudit(seq)
+		if l.auditError() != nil {
+			l.writeAuditError(w, body, false)
+			return
+		}
 		l.writeJSONRPCError(w, json.RawMessage("null"), -32603, "nockguard: upstream request build failed")
 		return
 	}
@@ -309,6 +357,10 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 		l.logger.Printf("UPSTREAM-ERROR agent=%s: %v", l.gate.agent, err)
 		*resolved = true
 		l.gate.resolveAudit(seq)
+		if l.auditError() != nil {
+			l.writeAuditError(w, body, true)
+			return
+		}
 		l.writeJSONRPCError(w, json.RawMessage("null"), -32603, "nockguard: upstream unreachable")
 		return
 	}
@@ -337,13 +389,33 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 		resolveOnce()
 		return
 	}
+	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if l.requiredAudit && request.Method == "tools/call" && request.ID != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		encoding := resp.Header.Get("Content-Encoding")
+		if statusHasNoBody(resp.StatusCode) || (encoding != "" && encoding != "identity") ||
+			(mediaType != "application/json" && mediaType != "text/event-stream") {
+			*resolved = true
+			l.gate.resolveAudit(seq)
+			if l.auditError() != nil {
+				l.writeAuditError(w, body, true)
+			} else {
+				l.writeRequestError(w, body, unverifiedToolResponseError)
+			}
+			return
+		}
+	}
+	if l.requiredAudit && request.Method == "tools/call" && request.ID != nil &&
+		resp.StatusCode >= 200 && resp.StatusCode < 300 && mediaType == "text/event-stream" {
+		l.forwardRequiredToolSSE(w, resp, body, seq, toolForState, refsForState, resolved)
+		return
+	}
 
 	// Card state commit and audit emission are gated on JSON-RPC-level success, not HTTP status.
 	// For JSON responses, buffer and parse to check for errors before committing/auditing.
 	// For SSE streams, pass through byte-faithful without buffering (no state updates over SSE).
 	needsJSONVerification := (toolForState != "" || len(deferredAudits) > 0) &&
 		resp.StatusCode >= 200 && resp.StatusCode < 300 &&
-		strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json")
+		((l.requiredAudit && mediaType == "application/json") || strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json"))
 	var respBody []byte
 	if needsJSONVerification {
 		responseID := request.ID
@@ -369,6 +441,10 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 			l.logger.Printf("UPSTREAM-RESPONSE-TIMEOUT agent=%s limit=%s", l.gate.agent, httpListenerJSONReadTimeout)
 			*resolved = true
 			l.gate.resolveAudit(seq)
+			if l.auditError() != nil {
+				l.writeAuditError(w, body, true)
+				return
+			}
 			l.writeJSONRPCError(w, responseID, -32603, "nockguard: upstream response timed out")
 			return
 		}
@@ -376,6 +452,10 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 			l.logger.Printf("UPSTREAM-STREAM-ERROR agent=%s: read response body: %v", l.gate.agent, readErr)
 			*resolved = true
 			l.gate.resolveAudit(seq)
+			if l.auditError() != nil {
+				l.writeAuditError(w, body, true)
+				return
+			}
 			l.writeJSONRPCError(w, responseID, -32603, "nockguard: could not read upstream response")
 			return
 		}
@@ -383,7 +463,23 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 			l.logger.Printf("UPSTREAM-RESPONSE-TOO-LARGE agent=%s limit=%d", l.gate.agent, httpListenerBodyCap)
 			*resolved = true
 			l.gate.resolveAudit(seq)
+			if l.auditError() != nil {
+				l.writeAuditError(w, body, true)
+				return
+			}
 			l.writeJSONRPCError(w, responseID, -32603, "nockguard: upstream response exceeds the 10MB limit")
+			return
+		}
+	}
+
+	if l.requiredAudit {
+		if needsJSONVerification {
+			l.commitToolResult(body, respBody, seq, toolForState, refsForState)
+		}
+		*resolved = true
+		l.gate.resolveAudit(seq)
+		if l.auditError() != nil {
+			l.writeAuditError(w, body, true)
 			return
 		}
 	}
@@ -400,40 +496,13 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 	w.WriteHeader(resp.StatusCode)
 
 	if needsJSONVerification {
-		// Commit card state only on a genuine JSON-RPC 2.0 success response for
-		// THIS request: version "2.0", a response shape (no method), an id that
-		// matches the forwarded request, a present "result" member, and no
-		// "error" member at all (absent, not merely null). A 2xx body such as
-		// {} or null unmarshals cleanly but carries no result/id and must NOT
-		// commit — it would corrupt currentCard as a false success.
-		shouldCommit := false
-		var msg jsonrpc.Message
-		var members map[string]json.RawMessage
-		if json.Unmarshal(respBody, &msg) == nil && json.Unmarshal(respBody, &members) == nil {
-			// Use raw member presence to distinguish an ABSENT error member from
-			// an explicit "error": null — a response carrying an error member at
-			// all must not commit — and to require a present "result" member.
-			_, hasError := members["error"]
-			resultRaw, hasResult := members["result"]
-			if msg.JSONRPC == "2.0" && msg.Method == "" && !hasError && hasResult && jsonRPCIDMatches(body, msg.ID) {
-				shouldCommit = true
-				// A tool-level failure (MCP result.isError=true) is a success
-				// envelope but a failed tool call — do not commit.
-				var result map[string]interface{}
-				if json.Unmarshal(resultRaw, &result) == nil {
-					if toolErr, ok := result["isError"].(bool); ok && toolErr {
-						shouldCommit = false
-					}
-				}
-			}
-		}
 		// Write the buffered response bytes unchanged.
 		if _, werr := w.Write(respBody); werr != nil {
 			return
 		}
 		// Commit card state only if JSON-RPC succeeded.
-		if shouldCommit {
-			l.gate.updateCardState(seq, toolForState, refsForState)
+		if !l.requiredAudit {
+			l.commitToolResult(body, respBody, seq, toolForState, refsForState)
 		}
 		// Resolve audits unconditionally to ensure the queue doesn't stall.
 		*resolved = true

@@ -20,8 +20,8 @@
 // records the decision (agent, tool, outcome, reason), not the payload.
 //
 // Auditing is opt-in: an empty path yields a disabled, nil-safe Auditor, and a
-// disabled Auditor's Record is a no-op. Audit writes never block or fail a tool
-// call — a write error is returned to the caller (which logs and proceeds);
+// disabled Auditor's Record is a no-op. Record returns errors for the caller's
+// policy to handle; RecordRequired additionally syncs storage and latches errors.
 // Package audit implements NockGuard Phase 4: a structured, append-only audit
 // trail of policy decisions, written as JSON Lines.
 //
@@ -53,9 +53,9 @@
 // references are an exception: they are typed, declared, and never raw arguments.
 //
 // Auditing is opt-in: an empty path yields a disabled, nil-safe Auditor, and a
-// disabled Auditor's Record is a no-op. Audit writes never block or fail a tool
-// call — a write error is returned to the caller (which logs and proceeds);
-// auditing is fail-open by design.
+// disabled Auditor's Record is a no-op. RecordRequired rejects a disabled writer,
+// syncs the trail and checkpoint, and latches write failures. The caller decides
+// whether an audit failure must stop a tool call.
 
 package audit
 
@@ -99,7 +99,7 @@ type Event struct {
 	Time           string `json:"ts"`
 	Agent          string `json:"agent"`
 	Tool           string `json:"tool"`
-	Decision       string `json:"decision"` // allow | deny | block | ratelimit | hide
+	Decision       string `json:"decision"` // dispatch | allow | deny | block | ratelimit | hide
 	Reason         string `json:"reason,omitempty"`
 	NockID         int    `json:"nock_id,omitempty"`          // NockCC card id, extracted from nockcc_nock_* tools or set by session stamp
 	PR             string `json:"pr,omitempty"`               // GitHub PR reference owner/repo#n, extracted from gh_* tools
@@ -122,12 +122,14 @@ const nocklockSessionIDEnv = "NOCKLOCK_SESSION_ID"
 type Auditor struct {
 	clock func() time.Time
 
-	mu     sync.Mutex
-	f      *os.File
-	path   string             // audit file path; used to re-read the on-disk chain head under the flock
-	key    []byte             // HMAC signing key; empty = unsigned trail
-	edPriv ed25519.PrivateKey // Ed25519 signing key; non-nil = non-repudiable trail (takes precedence over key)
-	keyID  string             // hex(sha256(pub)) of edPriv's public key; stamped on Events when edPriv is set
+	mu          sync.Mutex
+	f           *os.File
+	path        string             // audit file path; used to re-read the on-disk chain head under the flock
+	key         []byte             // HMAC signing key; empty = unsigned trail
+	edPriv      ed25519.PrivateKey // Ed25519 signing key; non-nil = non-repudiable trail (takes precedence over key)
+	keyID       string             // hex(sha256(pub)) of edPriv's public key; stamped on Events when edPriv is set
+	closed      bool
+	requiredErr error
 }
 
 // Option configures an Auditor at construction.
@@ -239,7 +241,12 @@ func (a *Auditor) verifyExisting(path string) error {
 // Enabled reports whether the Auditor is writing to a file. Nil-safe, so callers
 // can guard with `if a.Enabled()` exactly like the validator and limiter.
 func (a *Auditor) Enabled() bool {
-	return a != nil && a.f != nil
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.f != nil && !a.closed
 }
 
 // Record stamps the event with the current time and appends it as one JSON line.
@@ -248,9 +255,73 @@ func (a *Auditor) Enabled() bool {
 // flock so that concurrent records never interleave within a line and the
 // signature chain stays consistent end to end.
 func (a *Auditor) Record(ev Event) error {
-	if !a.Enabled() {
+	return a.record(ev, false)
+}
+
+// RecordRequired writes an event and waits until the trail, and its signed
+// high-water mark when signing is enabled, have been synchronized to storage.
+// Any record or durability failure is latched: callers must close and reopen
+// the auditor, which verifies the on-disk trail, before required writes resume.
+func (a *Auditor) RecordRequired(ev Event) error {
+	return a.record(ev, true)
+}
+
+// RequiredError reports known writer failures. A nil result means the writer is
+// open and has not latched a failure, not that the next write will succeed.
+// RecordRequired must persist the event before its caller forwards a tool call.
+func (a *Auditor) RequiredError() error {
+	if a == nil {
+		return fmt.Errorf("required audit writer unavailable: nil auditor")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.requiredErr != nil {
+		return a.requiredErr
+	}
+	if a.closed {
+		return fmt.Errorf("required audit writer closed")
+	}
+	if a.f == nil {
+		return fmt.Errorf("required audit writer unavailable")
+	}
+	return nil
+}
+
+func (a *Auditor) record(ev Event, required bool) (err error) {
+	if a == nil {
+		if required {
+			return fmt.Errorf("required audit writer unavailable: nil auditor")
+		}
 		return nil
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.requiredErr != nil && required {
+		return fmt.Errorf("required audit writer failed; close and reopen it: %w", a.requiredErr)
+	}
+	if a.closed {
+		if required {
+			return fmt.Errorf("required audit writer closed")
+		}
+		return nil
+	}
+	if a.f == nil {
+		if required {
+			return fmt.Errorf("required audit writer unavailable")
+		}
+		return nil
+	}
+	defer func() {
+		if required && err != nil {
+			a.requiredErr = err
+		}
+	}()
+	if required {
+		if err = a.checkPathIdentity(); err != nil {
+			return err
+		}
+	}
+
 	ev.Time = a.clock().Format(time.RFC3339)
 	ev.Sig = "" // canonical content never includes the signature itself
 
@@ -272,9 +343,6 @@ func (a *Auditor) Record(ev Event) error {
 	if a.edPriv != nil {
 		ev.KeyID = a.keyID
 	}
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
 
 	var checkpointCount int
 	if a.signing() {
@@ -313,27 +381,79 @@ func (a *Auditor) Record(ev Event) error {
 		return err
 	}
 	line = append(line, '\n')
-	if _, err = a.f.Write(line); err != nil {
+	if required {
+		// Recheck directly before append: the signed tail is read by path while
+		// the append uses the already-open descriptor, so replacement or unlink
+		// must fail closed instead of forking the chain.
+		if err = a.checkPathIdentity(); err != nil {
+			return err
+		}
+	}
+	if err = writeAll(a.f, line); err != nil {
 		return err
+	}
+	if required {
+		if err = a.f.Sync(); err != nil {
+			return fmt.Errorf("sync audit trail: %w", err)
+		}
+		if err = syncDirectory(filepath.Dir(a.path)); err != nil {
+			return fmt.Errorf("sync audit trail directory: %w", err)
+		}
 	}
 	// Signing mode only, still under the flock held above: advance the
 	// tail-truncation high-water-mark so a later removal of this entry is
 	// detectable (N8154). ev.Sig is this entry's signature.
 	if a.signing() {
-		return a.updateHighWaterMark(checkpointCount+1, ev.Sig)
+		return a.updateHighWaterMark(checkpointCount+1, ev.Sig, required)
 	}
 	return nil
 }
 
+func (a *Auditor) checkPathIdentity() error {
+	opened, err := a.f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat open audit trail: %w", err)
+	}
+	if !opened.Mode().IsRegular() {
+		return fmt.Errorf("open audit trail is not a regular file")
+	}
+	current, err := os.Stat(a.path)
+	if err != nil {
+		return fmt.Errorf("stat audit trail path: %w", err)
+	}
+	if !current.Mode().IsRegular() || !os.SameFile(opened, current) {
+		return fmt.Errorf("audit trail path no longer refers to the open file")
+	}
+	return nil
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	syncErr := dir.Sync()
+	closeErr := dir.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
+}
+
 // Close flushes and closes the underlying file. Safe to call on a disabled Auditor.
 func (a *Auditor) Close() error {
-	if !a.Enabled() {
+	if a == nil {
 		return nil
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.f == nil {
+		a.closed = true
+		return nil
+	}
 	err := a.f.Close()
 	a.f = nil
+	a.closed = true
 	return err
 }
 
@@ -365,10 +485,10 @@ func (a *Auditor) checkpointCount(last string) (int, error) {
 // signature of the just-appended entry and becomes the checkpoint's last_sig.
 // The sidecar is written AFTER the trail append (never before): a crash between
 // the two leaves the sidecar one entry BEHIND the trail (n >= count, which Verify
-// accepts), never ahead (which would false-trip truncation). Best-effort: a
-// sidecar write failure is returned to Record but the entry is already durably
-// appended, so the chain itself is never compromised by a checkpoint problem.
-func (a *Auditor) updateHighWaterMark(count int, newSig string) error {
+// accepts), never ahead (which would false-trip truncation). A sidecar failure
+// is returned after the trail append. RecordRequired treats it as a failure even
+// if the trail itself was already synced; Record leaves handling to its caller.
+func (a *Auditor) updateHighWaterMark(count int, newSig string, durable bool) error {
 	hwmPath := a.path + hwmSuffix
 	hwm := highWaterMark{Count: count, LastSig: newSig}
 	hwm.Sig = a.sign(hwmSignedBytes(count, newSig), "")
@@ -376,12 +496,59 @@ func (a *Auditor) updateHighWaterMark(count int, newSig string) error {
 	if err != nil {
 		return err
 	}
-	// Atomic replace so a reader never sees a half-written checkpoint.
+	// Atomic replace so a reader never sees a half-written checkpoint. Required
+	// records sync the temp file before rename and the containing directory after
+	// rename; syncing the trail alone would leave the signed anchor volatile.
 	tmp := hwmPath + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, hwmPath)
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if err := writeAll(f, append(data, '\n')); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if durable {
+		if err := f.Sync(); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("sync audit checkpoint: %w", err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, hwmPath); err != nil {
+		return err
+	}
+	removeTmp = false
+	if durable {
+		if err := syncDirectory(filepath.Dir(hwmPath)); err != nil {
+			return fmt.Errorf("sync audit checkpoint directory: %w", err)
+		}
+	}
+	return nil
+}
+
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if n > 0 {
+			data = data[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
 }
 
 // signLine computes the hex HMAC-SHA256 of an entry's canonical bytes chained to
