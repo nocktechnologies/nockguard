@@ -10,6 +10,9 @@ All notable changes to NockGuard are documented here.
   keep shared sessions stopped until the writer is reopened after repair.
   Errors after forwarding explicitly warn against automatically retrying an
   action that may already have executed.
+- Reject malformed or mismatched JSON tool responses in required-audit mode;
+  transport failures and unreadable, oversized or timed-out JSON results also
+  warn that the tool may have executed and must not be retried automatically.
 
 ### Added
 - `mcp-gateway`: a loopback OAuth resource gateway with authenticated token

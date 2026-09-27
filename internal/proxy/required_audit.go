@@ -94,6 +94,39 @@ func (l *HTTPListener) writeRequestError(w http.ResponseWriter, request []byte, 
 	l.writeJSONRPCError(w, msg.ID, -32603, reason)
 }
 
+// validToolResponse checks the JSON-RPC response envelope, separately from
+// whether its result is successful enough to commit card state. Matching
+// JSON-RPC errors must still reach the caller, but malformed envelopes must not.
+func validToolResponse(request, response []byte) bool {
+	var members map[string]json.RawMessage
+	if json.Unmarshal(response, &members) != nil {
+		return false
+	}
+	var version string
+	if json.Unmarshal(members["jsonrpc"], &version) != nil || version != "2.0" || !jsonRPCIDMatches(request, members["id"]) {
+		return false
+	}
+	if _, hasMethod := members["method"]; hasMethod {
+		return false
+	}
+	_, hasResult := members["result"]
+	errRaw, hasError := members["error"]
+	if hasResult == hasError {
+		return false // exactly one of result and error is required
+	}
+	if hasError {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(errRaw, &fields) != nil {
+			return false
+		}
+		var code *int
+		var message *string
+		return json.Unmarshal(fields["code"], &code) == nil && code != nil &&
+			json.Unmarshal(fields["message"], &message) == nil && message != nil
+	}
+	return true
+}
+
 // commitToolResult preserves the existing state rule: only a matching genuine
 // JSON-RPC success can change the session's current card. Audit allow rows are
 // policy decisions, not proof that an upstream action succeeded.

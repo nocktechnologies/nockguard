@@ -361,6 +361,13 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 			l.writeAuditError(w, body, true)
 			return
 		}
+		if l.requiredAudit {
+			var request jsonrpc.Message
+			if json.Unmarshal(body, &request) == nil && request.Method == "tools/call" {
+				l.writeRequestError(w, body, unverifiedToolResponseError)
+				return
+			}
+		}
 		l.writeJSONRPCError(w, json.RawMessage("null"), -32603, "nockguard: upstream unreachable")
 		return
 	}
@@ -445,6 +452,10 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 				l.writeAuditError(w, body, true)
 				return
 			}
+			if l.requiredAudit && request.Method == "tools/call" {
+				l.writeRequestError(w, body, unverifiedToolResponseError)
+				return
+			}
 			l.writeJSONRPCError(w, responseID, -32603, "nockguard: upstream response timed out")
 			return
 		}
@@ -454,6 +465,10 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 			l.gate.resolveAudit(seq)
 			if l.auditError() != nil {
 				l.writeAuditError(w, body, true)
+				return
+			}
+			if l.requiredAudit && request.Method == "tools/call" {
+				l.writeRequestError(w, body, unverifiedToolResponseError)
 				return
 			}
 			l.writeJSONRPCError(w, responseID, -32603, "nockguard: could not read upstream response")
@@ -467,12 +482,26 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 				l.writeAuditError(w, body, true)
 				return
 			}
+			if l.requiredAudit && request.Method == "tools/call" {
+				l.writeRequestError(w, body, unverifiedToolResponseError)
+				return
+			}
 			l.writeJSONRPCError(w, responseID, -32603, "nockguard: upstream response exceeds the 10MB limit")
 			return
 		}
 	}
 
 	if l.requiredAudit {
+		if needsJSONVerification && request.Method == "tools/call" && request.ID != nil && !validToolResponse(body, respBody) {
+			*resolved = true
+			l.gate.resolveAudit(seq)
+			if l.auditError() != nil {
+				l.writeAuditError(w, body, true)
+			} else {
+				l.writeRequestError(w, body, unverifiedToolResponseError)
+			}
+			return
+		}
 		if needsJSONVerification {
 			l.commitToolResult(body, respBody, seq, toolForState, refsForState)
 		}
