@@ -207,3 +207,57 @@ func verifyRequiredAudit(t *testing.T, auditor *audit.Auditor, path string, pub 
 		t.Fatalf("verified audit entries = %d, want dispatch and decision records", n)
 	}
 }
+
+func TestHTTPListener_RequiredSSEResponsesRequireValidJSONRPCEnvelope(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		valid    bool
+		wantCard int
+	}{
+		{name: "both result and error", body: `{"jsonrpc":"2.0","id":1,"result":{},"error":{"code":-1,"message":"bad"}}`},
+		{name: "empty method", body: `{"jsonrpc":"2.0","id":1,"method":"","result":{}}`},
+		{name: "nonempty method", body: `{"jsonrpc":"2.0","id":1,"method":"tools/call","result":{}}`},
+		{name: "null error", body: `{"jsonrpc":"2.0","id":1,"error":null}`},
+		{name: "missing error code", body: `{"jsonrpc":"2.0","id":1,"error":{"message":"bad"}}`},
+		{name: "missing error message", body: `{"jsonrpc":"2.0","id":1,"error":{"code":-1}}`},
+		{name: "valid result", body: `{"jsonrpc":"2.0","id":1,"result":{}}`, valid: true, wantCard: 12345},
+		{name: "valid error", body: `{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"bad"}}`, valid: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			auditor, auditPath, pub := newEd25519Auditor(t)
+			defer auditor.Close()
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "data: "+tc.body+"\n\n")
+			}))
+			defer upstream.Close()
+			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+			listener := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithRequiredAudit())
+			defer listener.Close()
+			status, body, contentType := post(t, listener.URL, requiredClaimCall)
+			if status != http.StatusOK || !strings.HasPrefix(contentType, "text/event-stream") {
+				t.Fatalf("response = %d %q %s", status, contentType, body)
+			}
+			if tc.valid {
+				if body != "data: "+tc.body+"\n\n" {
+					t.Fatalf("valid SSE response changed: %s", body)
+				}
+			} else {
+				if strings.Contains(body, tc.body) {
+					t.Fatalf("invalid SSE payload escaped: %s", body)
+				}
+				payload := strings.TrimSuffix(strings.TrimPrefix(body, "event: message\ndata: "), "\n\n")
+				assertRequiredUnknownOutcome(t, payload)
+			}
+			gate.cardMu.Lock()
+			card := gate.currentCard
+			gate.cardMu.Unlock()
+			if card != tc.wantCard {
+				t.Fatalf("current card = %d, want %d", card, tc.wantCard)
+			}
+			verifyRequiredAudit(t, auditor, auditPath, pub)
+		})
+	}
+}

@@ -52,8 +52,8 @@ headers and body reads have deadlines. GET streaming and DELETE termination
 remain unsupported (405). POST SSE ends after its matching result. Once upstream
 headers arrive, a tool-call SSE result or JSON/SSE discovery response must arrive
 within 30 seconds; heartbeats do not extend that deadline. Buffered JSON tool
-results have the same 30-second limit. Buffered tool responses must carry a
-matching JSON-RPC 2.0 result or error envelope. Invalid envelopes, transport
+results have the same 30-second limit. Buffered JSON and matching SSE tool
+responses must carry a matching JSON-RPC 2.0 result or error envelope. Invalid envelopes, transport
 failures and unreadable, oversized or timed-out responses report that execution
 may have occurred and must not be retried automatically.
 Origins, when supplied, must be explicitly allowed. The configured public host

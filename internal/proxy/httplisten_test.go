@@ -206,6 +206,51 @@ func TestHTTPListener_ScrubsInjectedCredentialFromResponse(t *testing.T) {
 	}
 }
 
+func TestHTTPListener_RequiredAuditScrubsInjectedCredentialFromResponse(t *testing.T) {
+	for _, mediaType := range []string{"application/json", "text/event-stream"} {
+		t.Run(mediaType, func(t *testing.T) {
+			auditor, auditPath, pub := newEd25519Auditor(t)
+			defer auditor.Close()
+			const secret = "http-response-secret-0001"
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(body), secret) {
+					t.Fatalf("upstream did not receive injected credential: %s", body)
+				}
+				w.Header().Set("Content-Type", mediaType)
+				if mediaType == "text/event-stream" {
+					_, _ = io.WriteString(w, "data: ")
+				}
+				_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"upstream echoed %s"}]}}`, secret)
+				if mediaType == "text/event-stream" {
+					_, _ = io.WriteString(w, "\n\n")
+				}
+			}))
+			defer upstream.Close()
+
+			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    inject:\n      - tools: [test_tool]\n        ref: env:TEST_SECRET\n        arg: auth\n", nil, auditor).
+				WithResolver(&mockResolver{values: map[string]string{"env:TEST_SECRET": secret}})
+			listener := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithRequiredAudit())
+			defer listener.Close()
+
+			status, response, _ := post(t, listener.URL, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{}}}`)
+			if status != http.StatusOK {
+				t.Fatalf("status = %d, want 200", status)
+			}
+			if strings.Contains(response, secret) {
+				t.Fatalf("gateway response leaked injected credential: %s", response)
+			}
+			if !strings.Contains(response, "[nockguard:redacted]") {
+				t.Fatalf("gateway response did not contain the redaction marker: %s", response)
+			}
+			verifyRequiredAudit(t, auditor, auditPath, pub)
+		})
+	}
+}
+
 func TestHTTPListener_StreamBodyScrubsCredentialAcrossChunks(t *testing.T) {
 	const secret = "split-response-secret-0001"
 	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    inject:\n      - tools: [test_tool]\n        ref: env:TEST_SECRET\n        arg: auth\n", nil, nil).

@@ -45,6 +45,9 @@ func (l *HTTPListener) forwardRequiredToolSSE(w http.ResponseWriter, resp *http.
 	}
 	w.WriteHeader(resp.StatusCode)
 	err := l.streamMCPResponse(w, resp.Body, request, func(payload []byte) ([]byte, error) {
+		if !validToolResponse(request, payload) {
+			return nil, fmt.Errorf("invalid tool response envelope")
+		}
 		l.commitToolResult(request, payload, seq, tool, refs)
 		*resolved = true
 		l.gate.resolveAudit(seq)

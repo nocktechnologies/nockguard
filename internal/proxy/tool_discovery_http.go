@@ -135,6 +135,9 @@ func (l *HTTPListener) streamToolList(w http.ResponseWriter, body io.Reader, req
 // streamMCPResponse inspects complete, bounded SSE events before releasing the
 // matching response. The callback persists required audits before publication.
 func (l *HTTPListener) streamMCPResponse(w http.ResponseWriter, body io.Reader, request []byte, transform func([]byte) ([]byte, error), afterMatched func()) error {
+	var requestMessage jsonrpc.Message
+	_ = json.Unmarshal(request, &requestMessage)
+	requiredToolCall := l.requiredAudit && requestMessage.Method == "tools/call"
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 4096), httpListenerBodyCap+1)
 	// SSE accepts LF, CRLF and bare CR. Consume CR immediately so an upstream
@@ -206,7 +209,9 @@ func (l *HTTPListener) streamMCPResponse(w http.ResponseWriter, body io.Reader, 
 			if json.Unmarshal(payload, &msg) != nil {
 				return fmt.Errorf("invalid SSE JSON-RPC message")
 			}
-			if msg.Method == "" && jsonRPCIDMatches(request, msg.ID) {
+			// Required tool replies must reach envelope validation even when an
+			// invalid method member makes them look like a server request.
+			if (msg.Method == "" || requiredToolCall) && jsonRPCIDMatches(request, msg.ID) {
 				if answered {
 					drop = true
 				} else {
@@ -236,7 +241,11 @@ func (l *HTTPListener) streamMCPResponse(w http.ResponseWriter, body io.Reader, 
 			lines, data, size = nil, nil, 0
 			continue
 		}
-		if _, err := io.WriteString(w, strings.Join(lines, "\n")+"\n\n"); err != nil {
+		event := []byte(strings.Join(lines, "\n") + "\n\n")
+		if requiredToolCall && l.gate.scrubber != nil {
+			event = l.gate.scrubber.scrub(event)
+		}
+		if _, err := w.Write(event); err != nil {
 			return err
 		}
 		_ = http.NewResponseController(w).Flush()
