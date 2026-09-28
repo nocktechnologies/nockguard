@@ -228,7 +228,7 @@ func (l *HTTPListener) streamMCPResponse(w http.ResponseWriter, body io.Reader, 
 							kept = append(kept, raw)
 						}
 					}
-					lines = append(kept, "data: "+string(filtered))
+					lines = append(kept, "data: "+strings.ReplaceAll(string(filtered), "\n", "\ndata: "))
 				}
 			}
 		}

@@ -397,9 +397,10 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 		return
 	}
 	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if l.requiredAudit && request.Method == "tools/call" && request.ID != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+	if l.requiredAudit && request.Method == "tools/call" && request.ID != nil {
 		encoding := resp.Header.Get("Content-Encoding")
-		if statusHasNoBody(resp.StatusCode) || (encoding != "" && encoding != "identity") ||
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 || statusHasNoBody(resp.StatusCode) ||
+			(encoding != "" && encoding != "identity") ||
 			(mediaType != "application/json" && mediaType != "text/event-stream") {
 			*resolved = true
 			l.gate.resolveAudit(seq)

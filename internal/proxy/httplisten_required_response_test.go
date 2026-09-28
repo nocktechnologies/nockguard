@@ -25,6 +25,14 @@ func TestHTTPListener_RequiredUnverifiedJSONTransportAndBodyFailuresAreUncertain
 		serve func(http.ResponseWriter, *http.Request, *atomic.Int32, <-chan struct{})
 	}{
 		{
+			name: "upstream executed before HTTP 502",
+			serve: func(w http.ResponseWriter, _ *http.Request, calls *atomic.Int32, _ <-chan struct{}) {
+				calls.Add(1)
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = io.WriteString(w, "upstream-success-marker")
+			},
+		},
+		{
 			name: "JSON body timeout",
 			serve: func(w http.ResponseWriter, _ *http.Request, calls *atomic.Int32, release <-chan struct{}) {
 				calls.Add(1)
@@ -222,6 +230,7 @@ func TestHTTPListener_RequiredSSEResponsesRequireValidJSONRPCEnvelope(t *testing
 		{name: "missing error code", body: `{"jsonrpc":"2.0","id":1,"error":{"message":"bad"}}`},
 		{name: "missing error message", body: `{"jsonrpc":"2.0","id":1,"error":{"code":-1}}`},
 		{name: "valid result", body: `{"jsonrpc":"2.0","id":1,"result":{}}`, valid: true, wantCard: 12345},
+		{name: "valid multiline result", body: "{\n\"jsonrpc\":\"2.0\",\n\"id\":1,\n\"result\":{}\n}", valid: true, wantCard: 12345},
 		{name: "valid error", body: `{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"bad"}}`, valid: true},
 	}
 	for _, tc := range cases {
@@ -230,7 +239,7 @@ func TestHTTPListener_RequiredSSEResponsesRequireValidJSONRPCEnvelope(t *testing
 			defer auditor.Close()
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = io.WriteString(w, "data: "+tc.body+"\n\n")
+				_, _ = io.WriteString(w, "data: "+strings.ReplaceAll(tc.body, "\n", "\ndata: ")+"\n\n")
 			}))
 			defer upstream.Close()
 			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
@@ -241,7 +250,7 @@ func TestHTTPListener_RequiredSSEResponsesRequireValidJSONRPCEnvelope(t *testing
 				t.Fatalf("response = %d %q %s", status, contentType, body)
 			}
 			if tc.valid {
-				if body != "data: "+tc.body+"\n\n" {
+				if body != "data: "+strings.ReplaceAll(tc.body, "\n", "\ndata: ")+"\n\n" {
 					t.Fatalf("valid SSE response changed: %s", body)
 				}
 			} else {
