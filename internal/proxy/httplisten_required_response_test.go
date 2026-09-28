@@ -278,9 +278,11 @@ func TestHTTPListener_RequiredSSEResponsesRequireValidJSONRPCEnvelope(t *testing
 	}
 }
 
-// Non-2xx replies retain transport recovery signals without trusting their body.
-func TestHTTPListener_RequiredNon2xxPreservesRecovery(t *testing.T) {
-	for _, status := range []int{401, 404, 429, 500} {
+// Non-2xx replies retain transport recovery signals without trusting their
+// body; bodyless statuses (1xx, 204, 304) collapse to a plain 200 instead,
+// since they cannot carry the relayed JSON-RPC error.
+func TestHTTPListener_RequiredNon2xxStatusHandling(t *testing.T) {
+	for _, status := range []int{101, 204, 304, 401, 404, 429, 500} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			auditor, auditPath, pub := newEd25519Auditor(t)
 			defer auditor.Close()
@@ -312,11 +314,15 @@ func TestHTTPListener_RequiredNon2xxPreservesRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer response.Body.Close()
-			if response.StatusCode != status {
-				t.Errorf("status = %d, want %d", response.StatusCode, status)
+			wantStatus, wantHeaders := status, headers
+			if status == 101 || status == 204 || status == 304 {
+				wantStatus, wantHeaders = http.StatusOK, nil
 			}
-			for key, want := range headers {
-				if got := response.Header.Values(key); !slices.Equal(got, want) {
+			if response.StatusCode != wantStatus {
+				t.Errorf("status = %d, want %d", response.StatusCode, wantStatus)
+			}
+			for key := range headers {
+				if got, want := response.Header.Values(key), wantHeaders[key]; !slices.Equal(got, want) {
 					t.Errorf("%s = %q, want %q", key, got, want)
 				}
 			}
@@ -349,5 +355,44 @@ func TestHTTPListener_RequiredNon2xxPreservesRecovery(t *testing.T) {
 			}
 			verifyRequiredAudit(t, auditor, auditPath, pub)
 		})
+	}
+}
+
+func TestHTTPListener_RequiredNon2xxAuditFailureTakesPrecedence(t *testing.T) {
+	auditor, _, _ := newEd25519Auditor(t)
+	defer auditor.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Dispatch has persisted; fail the deferred allow write after forwarding.
+		if err := auditor.Close(); err != nil {
+			t.Error(err)
+		}
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, "unverified-upstream-body")
+	}))
+	defer upstream.Close()
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	server := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithRequiredAudit())
+	defer server.Close()
+	status, body, _ := post(t, server.URL, requiredClaimCall)
+	if status != http.StatusOK {
+		t.Errorf("status = %d, want 200", status)
+	}
+	assertRequiredUnknownOutcome(t, body)
+	if !strings.Contains(body, "audit") {
+		t.Errorf("missing post-forward audit failure warning: %s", body)
+	}
+	if strings.Contains(body, "unverified-upstream-body") {
+		t.Errorf("upstream response escaped: %s", body)
+	}
+	gate.cardMu.Lock()
+	card := gate.currentCard
+	gate.cardMu.Unlock()
+	if card != 0 {
+		t.Errorf("unverified reply committed card %d", card)
+	}
+	_, next, _ := post(t, server.URL, requiredClaimCall)
+	if !strings.Contains(next, "audit") {
+		t.Errorf("audit failure was not latched: %s", next)
 	}
 }

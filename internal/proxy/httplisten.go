@@ -400,12 +400,15 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 	if l.requiredAudit && request.Method == "tools/call" && request.ID != nil {
 		encoding := resp.Header.Get("Content-Encoding")
 		nonSuccess := resp.StatusCode < 200 || resp.StatusCode >= 300
-		if nonSuccess || statusHasNoBody(resp.StatusCode) ||
+		bodyless := statusHasNoBody(resp.StatusCode)
+		if nonSuccess || bodyless ||
 			(encoding != "" && encoding != "identity") ||
 			(mediaType != "application/json" && mediaType != "text/event-stream") {
 			*resolved = true
 			l.gate.resolveAudit(seq)
-			if nonSuccess {
+			if l.auditError() != nil {
+				l.writeAuditError(w, body, true)
+			} else if nonSuccess && !bodyless {
 				// Keep transport recovery signals, but never release an unverified body.
 				for _, key := range []string{"WWW-Authenticate", "Retry-After", "Mcp-Session-Id"} {
 					for _, value := range resp.Header.Values(key) {
@@ -415,8 +418,6 @@ func (l *HTTPListener) forward(w http.ResponseWriter, r *http.Request, body []by
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(resp.StatusCode)
 				_, _ = w.Write(jsonrpc.ErrorResponse(request.ID, -32603, unverifiedToolResponseError))
-			} else if l.auditError() != nil {
-				l.writeAuditError(w, body, true)
 			} else {
 				l.writeRequestError(w, body, unverifiedToolResponseError)
 			}
