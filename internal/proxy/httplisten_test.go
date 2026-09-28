@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -88,8 +90,40 @@ func post(t *testing.T, srvURL, body string) (int, string, string) {
 		t.Fatalf("POST: %v", err)
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
 	return resp.StatusCode, string(b), resp.Header.Get("Content-Type")
+}
+
+type chunkReader struct{ chunks [][]byte }
+
+func (r *chunkReader) Read(p []byte) (int, error) {
+	if len(r.chunks) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.chunks[0])
+	r.chunks = r.chunks[1:]
+	return n, nil
+}
+
+type notifyRecorder struct {
+	*httptest.ResponseRecorder
+	written chan struct{}
+	once    sync.Once
+}
+
+func (w *notifyRecorder) Write(p []byte) (int, error) {
+	n, err := w.ResponseRecorder.Write(p)
+	if n > 0 {
+		w.once.Do(func() { close(w.written) })
+	}
+	return n, err
+}
+
+func (w *notifyRecorder) Flush() {
+	w.ResponseRecorder.Flush()
 }
 
 // TestHTTPListener_AllowForwardsAndAudits: an allowed tools/call reaches the
@@ -137,6 +171,104 @@ func TestHTTPListener_AllowForwardsAndAudits(t *testing.T) {
 	}
 	if evs[0].Decision != "allow" || evs[0].Tool != "nockcc_nock_list" || evs[0].Agent != "mira" {
 		t.Errorf("audit row = %+v, want allow/nockcc_nock_list/mira", evs[0])
+	}
+}
+
+func TestHTTPListener_ScrubsInjectedCredentialFromResponse(t *testing.T) {
+	const secret = "http-response-secret-0001"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), secret) {
+			t.Fatalf("upstream did not receive injected credential: %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"upstream echoed %s"}]}}`, secret)
+	}))
+	defer upstream.Close()
+
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    inject:\n      - tools: [test_tool]\n        ref: env:TEST_SECRET\n        arg: auth\n", nil, nil).
+		WithResolver(&mockResolver{values: map[string]string{"env:TEST_SECRET": secret}})
+	listener := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	defer listener.Close()
+
+	status, response, _ := post(t, listener.URL, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{}}}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if strings.Contains(response, secret) {
+		t.Fatalf("gateway response leaked injected credential: %s", response)
+	}
+	if !strings.Contains(response, "[nockguard:redacted]") {
+		t.Fatalf("gateway response did not contain the redaction marker: %s", response)
+	}
+}
+
+func TestHTTPListener_StreamBodyScrubsCredentialAcrossChunks(t *testing.T) {
+	const secret = "split-response-secret-0001"
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    inject:\n      - tools: [test_tool]\n        ref: env:TEST_SECRET\n        arg: auth\n", nil, nil).
+		WithResolver(&mockResolver{values: map[string]string{"env:TEST_SECRET": secret}})
+	if d := gate.decide([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{}}}`), 0); d.reject {
+		t.Fatalf("injected call was rejected: %s", d.rejectMsg)
+	}
+
+	w := httptest.NewRecorder()
+	listener := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
+	listener.streamBody(w, &chunkReader{chunks: [][]byte{
+		[]byte("data: upstream echoed " + secret[:12]),
+		[]byte(secret[12:] + "\n\n"),
+	}})
+
+	response := w.Body.String()
+	if strings.Contains(response, secret) {
+		t.Fatalf("streamed response leaked split credential: %s", response)
+	}
+	if !strings.Contains(response, "[nockguard:redacted]") {
+		t.Fatalf("streamed response did not contain the redaction marker: %s", response)
+	}
+}
+
+func TestHTTPListener_StreamBodyDeliversCompleteSSEEventWithoutTailHold(t *testing.T) {
+	const secret = "split-response-secret-0001"
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    inject:\n      - tools: [test_tool]\n        ref: env:TEST_SECRET\n        arg: auth\n", nil, nil).
+		WithResolver(&mockResolver{values: map[string]string{"env:TEST_SECRET": secret}})
+	if d := gate.decide([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{}}}`), 0); d.reject {
+		t.Fatalf("injected call was rejected: %s", d.rejectMsg)
+	}
+
+	listener := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
+	reader, writer := io.Pipe()
+	w := &notifyRecorder{ResponseRecorder: httptest.NewRecorder(), written: make(chan struct{})}
+	done := make(chan struct{})
+	go func() {
+		listener.streamBody(w, reader)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		_ = writer.Close()
+		<-done
+	})
+
+	if _, err := io.WriteString(writer, "data: ready\n\n"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-w.written:
+		if got := w.Body.String(); got != "data: ready\n\n" {
+			t.Fatalf("delivered SSE event = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("complete SSE event was held awaiting another upstream write")
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stream body did not finish after upstream close")
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 
 const bodyLimit = 10 * 1024 * 1024
 const sessionLimit = 64
+const authLimit = 16
 const sessionTTL = 30 * time.Minute
 const requestTimeout = 5 * time.Minute
 
@@ -38,6 +39,7 @@ type Gateway struct {
 	introspectionToken string
 	authClient         *http.Client
 	newHandler         func() http.Handler
+	authInflight       chan struct{}
 	inflight           chan struct{}
 	mu                 sync.Mutex
 	sessions           map[string]*session
@@ -57,7 +59,7 @@ func New(c Config, newHandler func() http.Handler) (*Gateway, error) {
 	u, _ := url.Parse(c.Resource)
 	return &Gateway{config: c, host: u.Host, metadataURL: "https://" + u.Host + "/.well-known/oauth-protected-resource/mcp", introspectionToken: token,
 		authClient: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		newHandler: newHandler, inflight: make(chan struct{}, sessionLimit), sessions: make(map[string]*session)}, nil
+		newHandler: newHandler, authInflight: make(chan struct{}, authLimit), inflight: make(chan struct{}, sessionLimit), sessions: make(map[string]*session)}, nil
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -88,19 +90,26 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+	defer cancel()
+	select {
+	case g.authInflight <- struct{}{}:
+	default:
+		g.busy(w)
+		return
+	}
+	c, err := g.authenticate(ctx, r)
+	<-g.authInflight
+	if err != nil {
+		w.Header().Set("WWW-Authenticate", fmt.Sprintf("Bearer resource_metadata=%q, scope=%q", g.metadataURL, g.config.Scope))
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
 	select {
 	case g.inflight <- struct{}{}:
 		defer func() { <-g.inflight }()
 	default:
 		g.busy(w)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
-	defer cancel()
-	c, err := g.authenticate(ctx, r)
-	if err != nil {
-		w.Header().Set("WWW-Authenticate", fmt.Sprintf("Bearer resource_metadata=%q, scope=%q", g.metadataURL, g.config.Scope))
-		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return
 	}
 	ctx, expire := context.WithDeadline(ctx, time.Unix(c.Expires, 0))
@@ -757,8 +766,7 @@ func compareIDValues(a, b interface{}) bool {
 		return false
 	}
 
-	// Otherwise compare as-is (bool, nil, etc.)
-	return a == b
+	return a == nil && b == nil
 }
 
 // decodeIDNumberAware decodes a JSON-RPC id with UseNumber so a large integer id

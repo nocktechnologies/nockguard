@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -48,5 +49,31 @@ func TestCanonicalArgumentsPreserveNumberLiterals(t *testing.T) {
 	_, got, ok := canonicalToolCall(json.RawMessage(`{"name":"safe_tool","arguments":{"big":9007199254740993,"decimal":1.2300,"exponent":1e400}}`))
 	if !ok || string(got) != `{"arguments":{"big":9007199254740993,"decimal":1.2300,"exponent":1e400},"name":"safe_tool"}` {
 		t.Fatalf("numeric literals changed: %s", got)
+	}
+}
+
+func TestCaseFoldedParamsKeyIsNotForwardedAlongsideCanonicalParams(t *testing.T) {
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	request := []byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"param\\u017f\":{\"name\":\"safe_tool\",\"arguments\":{\"safe\":true}}}")
+	d := gate.decide(request, 0)
+	if d.reject {
+		t.Fatalf("case-folded params key should be canonicalized, got rejection: %s", d.rejectMsg)
+	}
+	var forwarded map[string]json.RawMessage
+	if err := json.Unmarshal(d.forward, &forwarded); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := forwarded["params"]; !ok {
+		t.Fatalf("canonical params key missing from forwarded request: %s", d.forward)
+	}
+	for key := range forwarded {
+		if key != "params" && strings.EqualFold(key, "params") {
+			t.Fatalf("forwarded request retained case-folded params key %q: %s", key, d.forward)
+		}
+	}
+
+	conflicting := []byte("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"safe_tool\"},\"param\\u017f\":{\"name\":\"other_tool\"}}")
+	if d := gate.decide(conflicting, 1); !d.reject {
+		t.Fatalf("conflicting canonical and case-folded params keys were forwarded: %s", d.forward)
 	}
 }
