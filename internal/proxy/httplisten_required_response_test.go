@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,11 +22,13 @@ const requiredOutcomeWarning = "tool may have executed; do not retry automatical
 
 func TestHTTPListener_RequiredUnverifiedJSONTransportAndBodyFailuresAreUncertain(t *testing.T) {
 	cases := []struct {
-		name  string
-		serve func(http.ResponseWriter, *http.Request, *atomic.Int32, <-chan struct{})
+		name       string
+		wantStatus int
+		serve      func(http.ResponseWriter, *http.Request, *atomic.Int32, <-chan struct{})
 	}{
 		{
-			name: "upstream executed before HTTP 502",
+			name:       "upstream executed before HTTP 502",
+			wantStatus: http.StatusBadGateway,
 			serve: func(w http.ResponseWriter, _ *http.Request, calls *atomic.Int32, _ <-chan struct{}) {
 				calls.Add(1)
 				w.WriteHeader(http.StatusBadGateway)
@@ -97,7 +100,11 @@ func TestHTTPListener_RequiredUnverifiedJSONTransportAndBodyFailuresAreUncertain
 
 			status, body, contentType := post(t, lsrv.URL, requiredClaimCall)
 			releaseOnce.Do(func() { close(release) })
-			if status != http.StatusOK || !strings.HasPrefix(contentType, "application/json") {
+			wantStatus := tc.wantStatus
+			if wantStatus == 0 {
+				wantStatus = http.StatusOK
+			}
+			if status != wantStatus || !strings.HasPrefix(contentType, "application/json") {
 				t.Fatalf("connector response = status %d content-type %q body %s; want visible JSON-RPC error", status, contentType, body)
 			}
 			assertRequiredUnknownOutcome(t, body)
@@ -265,6 +272,80 @@ func TestHTTPListener_RequiredSSEResponsesRequireValidJSONRPCEnvelope(t *testing
 			gate.cardMu.Unlock()
 			if card != tc.wantCard {
 				t.Fatalf("current card = %d, want %d", card, tc.wantCard)
+			}
+			verifyRequiredAudit(t, auditor, auditPath, pub)
+		})
+	}
+}
+
+// Non-2xx replies retain transport recovery signals without trusting their body.
+func TestHTTPListener_RequiredNon2xxPreservesRecovery(t *testing.T) {
+	for _, status := range []int{401, 404, 429, 500} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			auditor, auditPath, pub := newEd25519Auditor(t)
+			defer auditor.Close()
+			headers := http.Header{
+				"Www-Authenticate": {`Bearer realm="mcp"`, `Bearer error="invalid_token"`},
+				"Retry-After":      {"60"},
+				"Mcp-Session-Id":   {"recovery-session"},
+			}
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				for key, values := range headers {
+					for _, value := range values {
+						w.Header().Add(key, value)
+					}
+				}
+				w.Header().Set("Content-Type", "text/plain")
+				w.Header().Set("Content-Encoding", "gzip")
+				w.Header().Set("Set-Cookie", "untrusted-cookie")
+				w.Header().Set("X-Upstream-Private", "untrusted-header")
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, "unverified-upstream-body")
+			}))
+			defer upstream.Close()
+			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+			listener := NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithRequiredAudit()
+			server := httptest.NewServer(listener)
+			defer server.Close()
+			response, err := http.Post(server.URL, "application/json", strings.NewReader(requiredClaimCall))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != status {
+				t.Errorf("status = %d, want %d", response.StatusCode, status)
+			}
+			for key, want := range headers {
+				if got := response.Header.Values(key); !slices.Equal(got, want) {
+					t.Errorf("%s = %q, want %q", key, got, want)
+				}
+			}
+			for _, key := range []string{"Content-Encoding", "Set-Cookie", "X-Upstream-Private"} {
+				if got := response.Header.Get(key); got != "" {
+					t.Errorf("untrusted %s escaped: %q", key, got)
+				}
+			}
+			if got := response.Header.Get("Content-Type"); got != "application/json" {
+				t.Errorf("Content-Type = %q", got)
+			}
+			data, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := string(data)
+			assertRequiredUnknownOutcome(t, body)
+			if strings.Contains(body, "unverified-upstream-body") {
+				t.Errorf("upstream body escaped: %s", body)
+			}
+			gate.cardMu.Lock()
+			card := gate.currentCard
+			gate.cardMu.Unlock()
+			if card != 0 {
+				t.Errorf("unverified reply committed card %d", card)
+			}
+			events := readAuditEvents(t, auditPath)
+			if len(events) != 2 || events[0].Decision != "dispatch" || events[1].Decision != "allow" {
+				t.Fatalf("audit decisions before close = %+v, want dispatch followed by allow", events)
 			}
 			verifyRequiredAudit(t, auditor, auditPath, pub)
 		})

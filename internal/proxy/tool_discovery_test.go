@@ -489,3 +489,25 @@ func TestHTTPDiscoveryErrorUsesBodyPermittingStatus(t *testing.T) {
 		assertDiscovery(t, w.Body.Bytes())
 	})
 }
+
+// The transformed payload can contain literal newlines even when the input is compact.
+func TestStreamMCPResponseFramesMultilineFilteredPayload(t *testing.T) {
+	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
+	listener := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
+	filtered := "{\n\"jsonrpc\":\"2.0\",\n\"id\":9007199254740993,\n\"result\":{\"tools\":[]}\n}"
+	response := httptest.NewRecorder()
+	matched := 0
+	err := listener.streamMCPResponse(response, strings.NewReader("data: "+discoveryResponse+"\n\n"), []byte(discoveryRequest),
+		func([]byte) ([]byte, error) { return []byte(filtered), nil },
+		func() { matched++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "data: " + strings.ReplaceAll(filtered, "\n", "\ndata: ") + "\n\n"
+	if got := response.Body.String(); got != want {
+		t.Fatalf("SSE framing = %q, want %q", got, want)
+	}
+	if matched != 1 {
+		t.Fatalf("matched callbacks = %d, want 1", matched)
+	}
+}
