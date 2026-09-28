@@ -213,7 +213,16 @@ Each decision is one JSON object per line (JSON Lines):
 {"ts":"2026-06-03T18:30:01Z","agent":"coder","tool":"read_file","decision":"allow","reason":"allow-rule \"read_*\""}
 ```
 
-`decision` is one of `allow`, `deny`, `would-deny` (shadow dry-run miss), `block` (input validation), `ratelimit`, `approval-granted`, `approval-denied`, `state-write`, or `hide` (filtered from `tools/list`). Auditing is opt-in (absent or `enabled: false` keeps Phase 1–3 behavior) and fail-open — an audit write error is logged but never blocks or fails a tool call.
+`decision` is one of `allow`, `deny`, `would-deny` (shadow dry-run miss), `block` (input validation), `ratelimit`, `approval-granted`, `approval-denied`, `state-write`, `hide` (filtered from `tools/list`), or `dispatch` (required-audit permission to forward).
+
+Auditing in the existing stdio proxy and local `mcp-listen` is opt-in and
+best-effort: a write error is logged without blocking the call. `mcp-gateway`
+requires auditing instead: it synchronizes a dispatch record before forwarding
+and deferred decisions before releasing the response. A failure blocks later
+requests across its sessions until storage is repaired and the process restarted.
+If a failure happens after forwarding, the response warns that the tool may have
+executed and must not be retried automatically. A dispatch row is not proof of
+execution or success. See the [gateway recovery contract](docs/design/hosted-gateway.md).
 
 `reason` names the specific policy rule behind each decision — `deny-rule "…"`, `allow-rule "…"`, `no allow-rule matched`, `default-allow (no allow list)`, or `no policy for agent (fail-closed)` — so the trail is *explainable* rather than an opaque `policy`. The matched rule is recorded operator-side only; the error returned to the agent stays minimal (`denied by policy`), so a hostile agent cannot map the policy surface from rejections.
 

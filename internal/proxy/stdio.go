@@ -27,16 +27,17 @@ import (
 )
 
 type StdioProxy struct {
-	upstream  []string
-	agent     string
-	engine    *policy.Engine
-	validator *validate.Validator
-	limiter   *ratelimit.Limiter
-	auditor   *audit.Auditor
-	forwarder *forward.Forwarder
-	trust     *trust.Accumulator
-	approver  approval.Approver // Phase 5; nil = no approval gate (Phase 1-4 behavior)
-	logger    *log.Logger
+	upstream      []string
+	agent         string
+	engine        *policy.Engine
+	validator     *validate.Validator
+	limiter       *ratelimit.Limiter
+	auditor       *audit.Auditor
+	requiredAudit bool // enabled only by a serialized HTTP listener
+	forwarder     *forward.Forwarder
+	trust         *trust.Accumulator
+	approver      approval.Approver // Phase 5; nil = no approval gate (Phase 1-4 behavior)
+	logger        *log.Logger
 
 	// Phase 6: credential injection (opt-in). resolver handles secret schemes;
 	// scrubber redacts injected values from upstream responses. Nil resolver
@@ -291,11 +292,7 @@ func (p *StdioProxy) flushAuditsLocked() {
 		// Emit all audits for this sequence.
 		for _, ev := range audits {
 			// Record to audit trail
-			if p.auditor.Enabled() {
-				if err := p.auditor.Record(*ev); err != nil {
-					p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, ev.Tool, err)
-				}
-			}
+			p.recordAudit(*ev)
 		}
 
 		// Clean up and move to next sequence.
@@ -325,8 +322,9 @@ func (p *StdioProxy) flushAuditsLocked() {
 
 // audit records a policy decision to the local trail with auditable references,
 // and for enforcement decisions, forwards it to the NockCC ops-log. Both sinks are
-// independent and fail-open: a write or forward problem is logged but never blocks or
-// fails the tool call. refs may be nil (non-tools/call traffic or unknown tools).
+// independent. Local writes use required mode when selected by the HTTP listener;
+// remote forwarding remains best-effort. refs may be nil (non-tools/call traffic
+// or unknown tools).
 //
 // For request-path audits (denied, blocked, ratelimited), we track sequence order
 // to ensure they're emitted after any preceding deferred audits.
@@ -369,11 +367,7 @@ func (p *StdioProxy) audit(tool, decision, reason string, refs *extract.Referenc
 		}
 	}
 
-	if p.auditor.Enabled() {
-		if err := p.auditor.Record(ev); err != nil {
-			p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, tool, err)
-		}
-	}
+	p.recordAudit(ev)
 	if p.forwarder.Enabled() && isEnforcement(decision) {
 		p.forwarder.Enqueue(forward.Event{Agent: p.agent, Tool: tool, Decision: decision, Reason: reason})
 	}

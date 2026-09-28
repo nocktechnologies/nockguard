@@ -1,7 +1,11 @@
-# Hosted MCP gateway contract
+# Customer-run HTTP MCP gateway contract
 
-Status: local implementation and validation; no deployed hostname or live
-connector cutover. One gateway process serves one configured agent and one
+Nock Command is a downloadable, self-hosted application. NockGuard can ship
+with it or be installed separately for free. Credentials and infrastructure
+belong to the customer. This document describes the optional remote HTTP path;
+it does not require a public gateway or an OAuth server for local stdio use.
+
+Status: local implementation and validation. One gateway process serves one configured agent and one
 OAuth subject/client pair. Tracking: N10745. This extends the N8761 deployment
 design. Session gates run in-process; the only network listener is loopback.
 
@@ -45,7 +49,13 @@ session, returning 429 for overlap. Busy sessions are never evicted. A global
 64-request limit also bounds authentication work. Requests expire after five
 minutes or token expiry, whichever is first. Bodies are capped at 10 MiB;
 headers and body reads have deadlines. GET streaming and DELETE termination
-remain unsupported (405). POST SSE is supported within the request deadline.
+remain unsupported (405). POST SSE ends after its matching result. Once upstream
+headers arrive, a tool-call SSE result or JSON/SSE discovery response must arrive
+within 30 seconds; heartbeats do not extend that deadline. Buffered JSON tool
+results have the same 30-second limit. Buffered JSON and matching SSE tool
+responses must carry a matching JSON-RPC 2.0 result or error envelope. Invalid envelopes, transport
+failures and unreadable, oversized or timed-out responses report that execution
+may have occurred and must not be retried automatically.
 Origins, when supplied, must be explicitly allowed. The configured public host
 must match; forwarded identity/host headers are not trusted.
 
@@ -60,16 +70,33 @@ included. NockCC's existing `nockcc-mcp` audience is not a gateway audience;
 its current MCP auth also needs scoped Agent-token support before this route
 can use NockCC. These are deployment prerequisites, not fallback paths.
 
-Audit writes retain the existing fail-open-on-write-error behavior; SSE tool
-results retain the existing card-state limitation. Operators must resolve
-those limitations for the intended workload before cutover. Local acceptance
-must prove auth failures never reach upstream, credential separation, policy
-denial/discovery filtering, session separation, quota sharing, bounded failure
-handling and signed audit verification. A separate cloud test connector and
-Kevin's approval are required before changing Mira's live connection. Rollback
-is restoring the original connector endpoint and its original auth setup.
+The gateway requires durable local auditing at runtime. Before forwarding a
+tool call it writes and synchronizes a `dispatch` decision; this proves that
+forwarding was authorized, not that the tool executed. Deferred decision rows
+are synchronized before a JSON result or matching SSE result is released.
+SSE results update card state only on a matching successful JSON-RPC response.
+Discovery hide decisions are also recorded before the filtered result leaves.
 
-## Operator setup after prerequisites are approved
+A write, checkpoint or synchronization failure stops new requests across every
+session sharing that auditor. If the failure occurs after forwarding, the
+response says the tool **may have executed** and must not be retried
+automatically. NockGuard cannot roll back an upstream side effect. In-flight
+calls may have run; an operator must inspect their actual upstream state.
+Repair storage, verify the signed trail, and restart the gateway to reopen its
+writer; repairing the filesystem alone does not clear the failure. A dispatch
+entry without the later decision is an unresolved attempt, not proof of success.
+Required auditing uses filesystem synchronization; it cannot guarantee against
+hardware or filesystems that falsely report durable writes, nor atomically
+commit a remote action and a local audit record.
+
+Local acceptance must prove auth failures never reach upstream, credential separation, policy
+denial/discovery filtering, session separation, quota sharing, bounded failure
+handling and signed audit verification. Validate the customer's selected HTTP
+client and server together before switching their endpoint. Rollback restores
+the previous endpoint and its authentication setup. The internal Mira pilot in
+N8761 is a separate deployment, not a prerequisite for the downloadable product.
+
+## Customer setup
 
 1. Start from [`gateway.example.yaml`](../gateway.example.yaml). Select the
    public resource URL, authorization server, registered client and permitted
@@ -88,10 +115,10 @@ is restoring the original connector endpoint and its original auth setup.
    secrets from ingress access logs. The HTTP port must stay private. Process
    restart drops sessions; clients must initialize again. For another agent or
    caller identity, deploy a separate process/configuration.
-5. Use a separate Claude test connector with that registered client. Prove
+5. Use a separate test connector with that registered client. Prove
    reachability, login, allow/deny behavior, JSON/SSE responses, token renewal,
-   and audit verification; then test rollback. Record that evidence and obtain
-   the live-cutover decision. No production-ready claim follows from local tests.
+   and audit verification, including an audit-storage failure; then test rollback.
+   Record that evidence before switching the customer's working endpoint.
 
 References: [MCP authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization),
 [RFC 7662](https://www.rfc-editor.org/rfc/rfc7662), and
