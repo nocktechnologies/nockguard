@@ -264,7 +264,7 @@ func TestValidAgentName(t *testing.T) {
 			t.Errorf("ValidAgentName(%q) = false, want true", name)
 		}
 	}
-	invalid := []string{"", "../etc", "../../foo", "kit/bar", "a b", "kit\x00", "foo\\bar"}
+	invalid := []string{"", ".", "..", "a..b", "../etc", "../../foo", "kit/bar", "a b", "kit\x00", "foo\\bar"}
 	for _, name := range invalid {
 		if ValidAgentName(name) {
 			t.Errorf("ValidAgentName(%q) = true, want false", name)

@@ -32,6 +32,7 @@ import (
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/forward"
+	"github.com/nocktechnologies/nockguard/internal/policy"
 )
 
 // maxWindow bounds how many recent decisions the wall works with: the history
@@ -767,6 +768,7 @@ func defaultAuditPath() string {
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8787", "address to serve the wall on (loopback = private)")
+	agent := flag.String("agent", "", "agent whose per-agent audit trail and public key to watch")
 	auditPath := flag.String("audit", defaultAuditPath(), "path to the NockGuard audit JSONL")
 	demoMode := flag.Bool("demo", false, "synthesize a sample event stream (use when there is no live traffic)")
 	verifyPubEnv := flag.String("verify-ed25519-pub-env", "NOCKGUARD_AUDIT_ED25519_PUB",
@@ -774,6 +776,28 @@ func main() {
 	verifyKeyEnv := flag.String("verify-key-env", "",
 		"env var holding the HMAC key that verifies the audit chain (alternative to Ed25519; server-side trust)")
 	flag.Parse()
+	var agentSet, auditSet, pubEnvSet bool
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "agent":
+			agentSet = true
+		case "audit":
+			auditSet = true
+		case "verify-ed25519-pub-env":
+			pubEnvSet = true
+		}
+	})
+	if agentSet {
+		if !policy.ValidAgentName(*agent) {
+			log.Fatalf("invalid agent name %q: use letters, digits, hyphens, or dots; exclude '.' as the whole name and '..' anywhere", *agent)
+		}
+		if !auditSet {
+			*auditPath = policy.AgentAuditPath(defaultAuditPath(), *agent)
+		}
+		if !pubEnvSet {
+			*verifyPubEnv = policy.AgentPubKeyEnvName(*agent)
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
