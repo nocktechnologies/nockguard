@@ -15,6 +15,7 @@ All notable changes to NockGuard are documented here.
   warn that the tool may have executed and must not be retried automatically.
 
 ### Added
+- `nockguard-wall --agent <name>` selects the agent's signed audit trail and public key environment variable by default.
 - `mcp-gateway`: a loopback OAuth resource gateway with authenticated token
   introspection, fixed agent identity, isolated bounded MCP sessions, shared
   quotas and separate upstream Agent credentials. Requires Ed25519 audit

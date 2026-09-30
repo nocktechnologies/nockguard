@@ -322,19 +322,19 @@ All three rows carry `nock_id:12345` — the claim sets it, the update extracts 
 Extraction is conservative: only known tools and typed parameter patterns are recognized. Unknown tools, missing parameters, or malformed arguments yield no extracted field for that row. The feature never guesses. This keeps the audit trail faithful to what actually happened.
 
 ## Live Wall
-```
-
-## Live Wall
 
 The audit trail is a file; the **Live Wall** makes it something you watch. `nockguard-wall` tails the audit JSONL and streams each policy decision to a local browser dashboard in real time, color-coded by outcome — every tool call an agent attempted and exactly what the firewall did about it. It is the visible layer over NockGuard's invisible enforcement: visceral proof of the accountability moat.
 
 ```bash
 go run ./cmd/nockguard-wall                 # serves http://127.0.0.1:8787 (loopback = private)
+go run ./cmd/nockguard-wall --agent local-agent # watch this agent's signed audit trail
 go run ./cmd/nockguard-wall --demo          # synthesize a sample stream when there's no live traffic
 go run ./cmd/nockguard-wall --audit <path>  # point at a specific audit JSONL
 ```
 
 It binds to loopback by default (private), embeds its own page (single binary, no assets to ship), and replays the existing audit record on open so the wall is populated immediately, then streams new decisions as they land. The wall reads only the recorded decision (agent, tool, outcome, reason) — never raw tool-call parameters, consistent with the audit trail's no-payload rule.
+
+With `--agent`, the wall reads `~/.nockguard/logs/<agent>.audit.jsonl` and verifies it using `NOCKGUARD_AGENT_<AGENT>_ED25519_PUB`. Explicit `--audit` and `--verify-ed25519-pub-env` values take precedence.
 
 ## How It Works
 

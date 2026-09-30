@@ -789,7 +789,7 @@ func (e *Engine) auditorAt(path string) (*audit.Auditor, error) {
 // are accepted — this matches every real fleet agent name (kit, mira-nockos,
 // mar-nockos, …) and excludes path separators or traversal sequences.
 func ValidAgentName(agent string) bool {
-	if agent == "" {
+	if agent == "" || agent == "." || strings.Contains(agent, "..") {
 		return false
 	}
 	for _, r := range agent {
