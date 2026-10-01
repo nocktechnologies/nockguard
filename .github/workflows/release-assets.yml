@@ -1,0 +1,72 @@
+name: release-assets
+
+# Builds and checksums nockguard binaries. A published release gets the four
+# archives plus SHA256SUMS attached; workflow_dispatch is a dry run that only
+# uploads workflow artifacts and never writes to a release.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Dry run, nothing is published. Builds the selected ref and labels it with this tag; must match the version in cmd/nockguard/main.go."
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: build archives and SHA256SUMS
+        run: scripts/build-release-assets.sh "$TAG" dist
+
+      - name: tag must match the shipped linux/amd64 binary's version
+        run: |
+          tar -xzf "dist/nockguard_${TAG#v}_linux_amd64.tar.gz" -C "$RUNNER_TEMP"
+          scripts/check-release-version.sh "$TAG" "$RUNNER_TEMP/nockguard"
+
+      - name: version check rejects a mismatched tag (negative control)
+        run: |
+          if out=$(scripts/check-release-version.sh v9.9.9 "$RUNNER_TEMP/nockguard" 2>&1); then
+            echo "negative control failed: a mismatched tag was accepted" >&2
+            exit 1
+          fi
+          grep -q "version mismatch" <<<"$out" || { echo "control failed for the wrong reason: $out" >&2; exit 1; }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets
+          path: dist
+
+      - name: re-verify checksums
+        run: cd dist && sha256sum -c SHA256SUMS
+
+      - name: attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/nockguard_*.tar.gz dist/SHA256SUMS --repo "$GITHUB_REPOSITORY"
