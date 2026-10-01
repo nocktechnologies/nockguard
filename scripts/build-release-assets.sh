@@ -2,7 +2,11 @@
 # Usage: build-release-assets.sh <tag> <outdir>
 # Builds nockguard for four targets into <outdir>/nockguard_<version>_<os>_<arch>.tar.gz
 # and writes <outdir>/SHA256SUMS. <version> is the tag without its leading "v".
+# Needs GNU tar and coreutils sha256sum (Linux, as CI runs it).
 set -euo pipefail
+
+tar --version 2>/dev/null | grep -q 'GNU tar' || { echo "needs GNU tar (Linux)" >&2; exit 1; }
+command -v sha256sum >/dev/null || { echo "needs coreutils sha256sum (Linux)" >&2; exit 1; }
 
 if [ "$#" -ne 2 ]; then
   echo "usage: $0 <tag> <outdir>" >&2
