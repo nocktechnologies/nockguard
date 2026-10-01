@@ -4,26 +4,48 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
-### Fixed
-- Require durable audit decisions on the HTTP gateway: block forwarding when
-  recording fails, withhold JSON/SSE results on deferred audit failure, and
-  keep shared sessions stopped until the writer is reopened after repair.
-  Errors after forwarding explicitly warn against automatically retrying an
-  action that may already have executed.
-- Reject malformed or mismatched JSON tool responses in required-audit mode;
-  transport failures and unreadable, oversized or timed-out JSON results also
-  warn that the tool may have executed and must not be retried automatically.
+## [0.3.0] - 2026-10-01
+
+First release with binary assets attached.
 
 ### Added
+- `nockguard mcp-gateway --config <path>`: an authenticated single-agent MCP
+  gateway, run as an OAuth protected resource on loopback. Each request is
+  checked by RFC 7662 token introspection (issuer, audience, subject, client,
+  scope, active and unexpired) before any policy or upstream work, and NockCC
+  tokens are not accepted. Sessions are bounded and isolated while the agent's
+  quotas, trust score and audit trail are shared. Startup requires Ed25519
+  audit signing. Inbound credentials are stripped, and only an
+  environment-backed `X-Agent-Token` goes upstream. Nothing is deployed by this
+  change; limits and the cutover are in `docs/design/hosted-gateway.md`.
+- `nockguard-wall --agent <name>` selects that agent's audit trail and Ed25519
+  public key environment variable. Explicit `-audit` and
+  `-verify-ed25519-pub-env` values take precedence. Agent names go through the
+  shared policy validator, which now also rejects `.` and `..` for proxy
+  callers as well as the Wall.
 - `release-assets` workflow: when a release is published, builds nockguard for
-  linux/darwin x amd64/arm64, writes `SHA256SUMS`, and attaches the archives to
-  the release; fails if the tag differs from `nockguard version`. Manual
+  linux and darwin on amd64 and arm64, writes `SHA256SUMS`, and attaches the
+  four `nockguard_<version>_<os>_<arch>.tar.gz` archives. It fails the run if
+  the tag differs from the output of `nockguard version`. Manual
   `workflow_dispatch` runs are a dry run that only uploads workflow artifacts.
-- `nockguard-wall --agent <name>` selects the agent's signed audit trail and public key environment variable by default.
-- `mcp-gateway`: a loopback OAuth resource gateway with authenticated token
-  introspection, fixed agent identity, isolated bounded MCP sessions, shared
-  quotas and separate upstream Agent credentials. Requires Ed25519 audit
-  signing; includes local integration coverage and deployment prerequisites.
+
+### Fixed
+- Gateway: record audit decisions durably before forwarding a tool call and
+  before returning its result. A writer failure stops every session sharing it
+  until storage is repaired and the gateway restarted, and errors after
+  forwarding say the tool may have executed and must not be retried
+  automatically. Stdio and `mcp-listen` audit behavior is unchanged.
+- Gateway: in required-audit mode, withhold JSON and SSE tool replies that are
+  not a matching JSON-RPC result or error, or that fail in transport, and
+  return an error that keeps the request ID and warns against automatic retry.
+  Non-2xx replies keep the upstream status and its `WWW-Authenticate`,
+  `Retry-After` and `Mcp-Session-Id` headers.
+- Gateway: scrub injected credentials from buffered and streaming responses,
+  authenticate a request before it reserves an inflight slot, reject
+  conflicting case-folded `params` keys, and fail closed on composite JSON-RPC
+  IDs.
+- CI: allow the `nock-fleet` GitHub App to trigger Claude Code Review. Wildcard
+  bot access stays disabled.
 
 ## [0.2.0] - 2026-09-26
 
