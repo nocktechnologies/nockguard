@@ -30,8 +30,8 @@ fixed fake string, `FAKE-SSH-KEY-aaaa-0001`, and `send_email` only echoes what i
 The agent talks to the server through `nockguard proxy`, governed by `policy.yaml`.
 
 Protected run: the read of `~/.ssh/id_rsa` is blocked by the first `block_params` rule before it
-reaches the server, so the agent has nothing to send. The email goes out with an error message
-as its body. The audit trail shows `DENY read_file`.
+reaches the server, so the agent has nothing to send. The email still goes out, but its body is just
+`(read failed)`. The audit trail shows `DENY read_file`.
 
 Unprotected run: the fake key comes back from `read_file` and shows up as the body of the
 `send_email` call. That is the leak.

@@ -13,12 +13,17 @@ HOME and NOCKGUARD_AUDIT_KEY to throwaway values).
 """
 import json
 import os
+import queue
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 
 ATTACKER = "attacker@example.invalid"
 KEY_PATH = "~/.ssh/id_rsa"
+READ_TIMEOUT = 15  # seconds to wait for one proxy response
+EXIT_TIMEOUT = 10  # seconds to wait for the proxy to exit after stdin closes
 
 
 class Session:
@@ -29,8 +34,22 @@ class Session:
              "--agent", "demo", "--policy", policy],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
             text=True, cwd=os.path.dirname(os.path.abspath(__file__)),
+            start_new_session=True,  # own process group, so close() can stop the server too
         )
         self.next_id = 1
+        # A reader thread feeds stdout lines into a queue, so a stalled proxy
+        # fails the demo after READ_TIMEOUT instead of hanging it.
+        self.lines = queue.Queue()
+        threading.Thread(target=self._read_stdout, daemon=True).start()
+
+    def _read_stdout(self):
+        for line in self.proc.stdout:
+            self.lines.put(line)
+        self.lines.put("")  # EOF
+
+    def _stderr_text(self):
+        self.stderr.seek(0)
+        return self.stderr.read()
 
     def send(self, method, params=None, notify=False):
         msg = {"jsonrpc": "2.0", "method": method}
@@ -43,18 +62,41 @@ class Session:
         self.proc.stdin.flush()
         if notify:
             return None
-        line = self.proc.stdout.readline()
+        try:
+            line = self.lines.get(timeout=READ_TIMEOUT)
+        except queue.Empty:
+            # Print now: close() runs next in main's finally and may exit with its own message.
+            print("proxy did not answer %s within %ds" % (method, READ_TIMEOUT), file=sys.stderr)
+            sys.exit(1)
         if not line:
-            self.stderr.seek(0)
-            sys.exit("proxy closed the connection:\n" + self.stderr.read())
+            sys.exit("proxy closed the connection:\n" + self._stderr_text())
         return json.loads(line)
 
     def call(self, tool, arguments):
         return self.send("tools/call", {"name": tool, "arguments": arguments})
 
     def close(self):
-        self.proc.stdin.close()
-        self.proc.wait(timeout=10)
+        """Stop the proxy and its upstream; fail loudly if the proxy did not exit cleanly."""
+        try:
+            self.proc.stdin.close()
+        except BrokenPipeError:
+            pass
+        try:
+            self.proc.wait(timeout=EXIT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            for sig, grace in ((signal.SIGTERM, 3), (signal.SIGKILL, None)):
+                try:
+                    os.killpg(self.proc.pid, sig)
+                except ProcessLookupError:
+                    break
+                try:
+                    self.proc.wait(timeout=grace)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            sys.exit("proxy did not exit within %ds and was killed:\n%s" % (EXIT_TIMEOUT, self._stderr_text()))
+        if self.proc.returncode != 0:
+            sys.exit("proxy exited with status %d:\n%s" % (self.proc.returncode, self._stderr_text()))
 
 
 def show_call(resp):
