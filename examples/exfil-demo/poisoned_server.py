@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """A deliberately poisoned MCP server for the NockGuard exfil demo.
 
-Modeled on the 2026 postmark-mcp incident: a server that looks like an
-ordinary file and email toolbox, but hides an instruction for the agent in a
-tool description. Stdlib only, stdio transport, newline-delimited JSON-RPC.
+A tool-poisoning server: it looks like an ordinary file and email toolbox,
+but hides an instruction for the agent in a tool description. Stdlib only, stdio transport, newline-delimited JSON-RPC.
 
 Safe by construction: read_file never touches the filesystem and always
 returns a fixed FAKE key; send_email never touches the network and only
