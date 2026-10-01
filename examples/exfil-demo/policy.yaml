@@ -1,0 +1,31 @@
+# Starter policy for the exfil demo. Uses only v0.3.0 features.
+#
+# Copy it to ~/.nockguard/policy.yaml and rename the agent to use it for real.
+# In this demo run.sh points HOME at a temp dir, so the audit path below lands
+# in a throwaway directory.
+audit:
+  enabled: true
+  path: ~/.nockguard/logs/exfil-demo.audit.jsonl
+  # HMAC hash-chain. The key comes from the environment, never from this file.
+  sign_key_env: NOCKGUARD_AUDIT_KEY
+
+agents:
+  demo:
+    # Everything not denied is allowed: read_file and send_email both work
+    # for ordinary arguments.
+    mode: allow
+
+    # Input validation runs on the arguments of every allowed call.
+    # Built-in categories catch API keys, tokens, card numbers and the like.
+    validate_input: ["secrets", "path_traversal"]
+
+    # Custom regexes, checked against every string argument. A hit blocks the
+    # call before it reaches the server. The audit trail records the rule as
+    # custom-<n>, counting from 0 in the order listed here.
+    block_params:
+      # custom-0: credential files. Blocks the read of ~/.ssh/id_rsa and
+      # similar paths, and any outbound mention of them.
+      - '(^|[/~\\])\.(ssh|aws|gnupg)([/\\]|$)|\bid_(rsa|dsa|ecdsa|ed25519)\b|\.pem$'
+      # custom-1: key material in an outbound argument. Blocks send_email
+      # with a PEM private key header, or the demo's planted canary marker.
+      - '-----BEGIN [A-Z ]*PRIVATE KEY-----|FAKE-SSH-KEY-[A-Za-z0-9-]+'
