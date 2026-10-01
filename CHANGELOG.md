@@ -15,6 +15,10 @@ All notable changes to NockGuard are documented here.
   warn that the tool may have executed and must not be retried automatically.
 
 ### Added
+- `release-assets` workflow: when a release is published, builds nockguard for
+  linux/darwin x amd64/arm64, writes `SHA256SUMS`, and attaches the archives to
+  the release; fails if the tag differs from `nockguard version`. Manual
+  `workflow_dispatch` runs are a dry run that only uploads workflow artifacts.
 - `nockguard-wall --agent <name>` selects the agent's signed audit trail and public key environment variable by default.
 - `mcp-gateway`: a loopback OAuth resource gateway with authenticated token
   introspection, fixed agent identity, isolated bounded MCP sessions, shared

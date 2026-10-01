@@ -22,6 +22,7 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 
 export CGO_ENABLED=0
+archives=()
 for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
   os=${target%/*}
   arch=${target#*/}
@@ -31,6 +32,7 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
 
   tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 \
     -C "$dir" -cf - nockguard | gzip -n >"$out/nockguard_${version}_${os}_${arch}.tar.gz"
+  archives+=("nockguard_${version}_${os}_${arch}.tar.gz")
 done
 
-(cd "$out" && sha256sum nockguard_*.tar.gz >SHA256SUMS && sha256sum -c SHA256SUMS)
+(cd "$out" && sha256sum "${archives[@]}" >SHA256SUMS && sha256sum -c SHA256SUMS)

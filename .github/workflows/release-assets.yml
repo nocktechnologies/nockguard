@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build as (dry run; nothing is published). Must match the version in cmd/nockguard/main.go."
+        description: "Dry run, nothing is published. Builds the selected ref and labels it with this tag; must match the version in cmd/nockguard/main.go."
         required: true
 
 permissions:
@@ -38,10 +38,11 @@ jobs:
 
       - name: version check rejects a mismatched tag (negative control)
         run: |
-          if scripts/check-release-version.sh v9.9.9 "$RUNNER_TEMP/nockguard"; then
+          if out=$(scripts/check-release-version.sh v9.9.9 "$RUNNER_TEMP/nockguard" 2>&1); then
             echo "negative control failed: a mismatched tag was accepted" >&2
             exit 1
           fi
+          grep -q "version mismatch" <<<"$out" || { echo "control failed for the wrong reason: $out" >&2; exit 1; }
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -60,6 +61,9 @@ jobs:
         with:
           name: release-assets
           path: dist
+
+      - name: re-verify checksums
+        run: cd dist && sha256sum -c SHA256SUMS
 
       - name: attach to release
         env:

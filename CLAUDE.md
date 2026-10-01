@@ -21,6 +21,7 @@ and a live source disagree, the live source wins.
 | `internal/validate/`, `ratelimit/`, `trust/`, `approval/`, `evidence/`, `forward/` | argument validation, sliding-window limit + spend cap, behavioral trust score, human approval gate, compliance evidence packs, NockCC ops-log forwarding |
 | `README.md` | the manual: every policy key, audit/signing modes, `selftest`, coverage scope, roadmap |
 | `docs/` | `TRUST.md` (score model), `POOL_ROUTER.md` (contract), `http-mcp-interception.md` and `design/n8761-*` (HTTP interception; the design note supersedes the older one) |
+| `scripts/`, `.github/workflows/release-assets.yml` | release assets: builds the four `nockguard_<version>_<os>_<arch>.tar.gz` archives + `SHA256SUMS` on release publish (`workflow_dispatch` = dry run); `check-release-version.sh` fails when the tag and the hardcoded `nockguard version` disagree |
 | `templates/` | Claude Code project templates shipped to users (`warden/`, `egress/`) — their `CLAUDE.md` files are payload for downstream repos, not this repo's map |
 | `livedemo/` | demo policy + Python client used to show the firewall blocking live |
 
