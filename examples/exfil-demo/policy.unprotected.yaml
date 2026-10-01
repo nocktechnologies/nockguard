@@ -1,0 +1,11 @@
+# Negative control for `run.sh --unprotected`: allow everything.
+# The audit trail is still written so the run can be verified, but no call is
+# denied or blocked. Do not use this as a real policy.
+audit:
+  enabled: true
+  path: ~/.nockguard/logs/exfil-demo.audit.jsonl
+  sign_key_env: NOCKGUARD_AUDIT_KEY
+
+agents:
+  demo:
+    mode: allow

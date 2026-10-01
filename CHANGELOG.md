@@ -4,6 +4,9 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Added
+- `examples/exfil-demo/`: a self-contained poisoned-MCP-server demo. `bash examples/exfil-demo/run.sh` shows an agent following an injected instruction to read and email a fake SSH key, the starter policy blocking it, and `nockguard verify` on the trail; `--unprotected` is the negative control. No product code changed.
+
 ## [0.3.0] - 2026-10-01
 
 First release with binary assets attached.
