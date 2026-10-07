@@ -25,6 +25,7 @@ preceding links, and signed checkpoint head. It attests that the Wall checked
 the full trail for matching rows and timestamp order. Changing or deleting a
 selected row, or narrowing the declared range, fails verification. An empty
 window is a signed zero-row attestation.
+With no filters, the same check reports `complete trail`.
 
 Severity, decision, and text filters deliberately produce `integrity verified;
 not a complete window`: their selected rows are genuine, but those filters

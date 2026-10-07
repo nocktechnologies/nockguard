@@ -69,6 +69,13 @@ func TestExportProofWindowAndSeverity(t *testing.T) {
 	if _, _, err := VerifyExport(bad, pub, ""); err == nil {
 		t.Fatal("changed receipt scope passed")
 	}
+	all, err := MakeExportProof(trail, head, pub, priv, ExportFilters{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, complete, err := VerifyExport(all, pub, "probe"); err != nil || n != 6 || !complete {
+		t.Fatalf("full trail: n=%d complete=%v err=%v", n, complete, err)
+	}
 	severity, err := MakeExportProof(trail, head, pub, priv, ExportFilters{Severity: "none"})
 	if err != nil {
 		t.Fatal(err)

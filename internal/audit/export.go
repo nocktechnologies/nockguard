@@ -42,6 +42,9 @@ type ExportProof struct {
 	ReceiptSig     string          `json:"receipt_sig"`
 }
 
+// MaxExportProofBytes is shared by the Wall writer and offline CLI reader.
+const MaxExportProofBytes = 256 << 20
+
 func (p ExportProof) receiptMessage() []byte {
 	p.ReceiptSig = ""
 	data, _ := json.Marshal(p)
@@ -68,7 +71,7 @@ func verifyExportHead(data []byte, pub ed25519.PublicKey) (*highWaterMark, error
 }
 
 func (f ExportFilters) completeWindow() bool {
-	return (f.Since != "" || f.Until != "") && f.Severity == "" && f.Decision == "" && f.Query == ""
+	return f.Severity == "" && f.Decision == "" && f.Query == ""
 }
 
 func (f ExportFilters) validate() error {

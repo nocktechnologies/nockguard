@@ -43,13 +43,13 @@ func runVerifyExport(args []string) int {
 		return 1
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, 128<<20+1))
+	data, err := io.ReadAll(io.LimitReader(f, audit.MaxExportProofBytes+1))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if len(data) > 128<<20 {
-		fmt.Fprintln(os.Stderr, "export proof exceeds 128 MiB")
+	if len(data) > audit.MaxExportProofBytes {
+		fmt.Fprintln(os.Stderr, "export proof exceeds 256 MiB")
 		return 1
 	}
 	n, complete, err := audit.VerifyExport(data, pub, *agent)
@@ -62,7 +62,11 @@ func runVerifyExport(args []string) int {
 	_ = json.Unmarshal(data, &proof) // already parsed and checked by VerifyExport
 	fmt.Printf("Scope: agent=%q since=%q until=%q severity=%q decision=%q q=%q\n", proof.Agent, proof.Filters.Since, proof.Filters.Until, proof.Filters.Severity, proof.Filters.Decision, proof.Filters.Query)
 	if complete {
-		fmt.Println("VERDICT: PROTECTED — complete time window")
+		if proof.Filters.Since == "" && proof.Filters.Until == "" {
+			fmt.Println("VERDICT: PROTECTED — complete trail")
+		} else {
+			fmt.Println("VERDICT: PROTECTED — complete time window")
+		}
 	} else {
 		fmt.Println("VERDICT: PROTECTED — integrity verified; not a complete window")
 	}

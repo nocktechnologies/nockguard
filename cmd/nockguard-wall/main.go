@@ -653,6 +653,10 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("offline proof unavailable: %v", err), http.StatusConflict)
 			return
 		}
+		if len(proof) > audit.MaxExportProofBytes {
+			http.Error(w, "offline proof exceeds verifier size limit", http.StatusRequestEntityTooLarge)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Disposition", `attachment; filename="nockguard-wall.proof.json"`)
 		_, _ = w.Write(proof)
