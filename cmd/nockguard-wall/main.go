@@ -13,6 +13,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"embed"
 	"encoding/csv"
 	"encoding/json"
@@ -99,9 +100,10 @@ type broker struct {
 	// verifier holds the server-side trusted key used to verify the audit chain;
 	// vsnap caches the most recent full-verify result so per-event badges (replay
 	// and tail) can be tagged without re-walking the whole trail per event.
-	verifier *verifier
-	vmu      sync.Mutex
-	vsnap    verifyReport
+	verifier    *verifier
+	proofSigner ed25519.PrivateKey
+	vmu         sync.Mutex
+	vsnap       verifyReport
 
 	// Test seams for mutating the live files at each capture boundary.
 	// Production leaves both nil.
@@ -558,6 +560,17 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	since := parseTimeFilter(q.Get("since"))
 	until := parseTimeFilter(q.Get("until"))
+	proofMode := q.Get("format") == "proof"
+	if proofMode {
+		if (q.Get("since") != "" && since == nil) || (q.Get("until") != "" && until == nil) {
+			http.Error(w, "invalid time filter", http.StatusBadRequest)
+			return
+		}
+		if b.verifier == nil || b.verifier.mode != modeEd25519 || len(b.proofSigner) == 0 {
+			http.Error(w, "offline proof requires Ed25519 verification and the trail signing key", http.StatusConflict)
+			return
+		}
+	}
 	if !b.verifier.enabled() {
 		evs := filterEvents(loadEvents(b.auditPath), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
 		for i := range evs {
@@ -584,6 +597,10 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 	f, err := os.Open(b.auditPath)
 	if os.IsNotExist(err) {
 		if hwm == nil {
+			if proofMode {
+				http.Error(w, "empty trail has no signed proof", http.StatusConflict)
+				return
+			}
 			writeExport(w, q.Get("format"), nil)
 			return
 		}
@@ -618,6 +635,27 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 	if int64(len(trail)) > b.exportTrailLimit {
 		http.Error(w, "audit trail exceeds 64 MiB export limit", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if proofMode {
+		if b.afterExportSnapshot != nil {
+			b.afterExportSnapshot()
+		}
+		filters := audit.ExportFilters{Severity: q.Get("severity"), Decision: q.Get("decision"), Query: normalizeQuery(q.Get("q"))}
+		if since != nil {
+			filters.Since = since.Format(time.RFC3339Nano)
+		}
+		if until != nil {
+			filters.Until = until.Format(time.RFC3339Nano)
+		}
+		proof, err := audit.MakeExportProof(trail, hwm, b.verifier.pub, b.proofSigner, filters)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("offline proof unavailable: %v", err), http.StatusConflict)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Disposition", `attachment; filename="nockguard-wall.proof.json"`)
+		_, _ = w.Write(proof)
 		return
 	}
 	rep := b.verifier.verifyBytes(trail, hwm)
@@ -775,8 +813,10 @@ func main() {
 		"env var holding the Ed25519 PUBLIC key that verifies the audit chain (server-side trust; never client-supplied). Unset var = verification disabled.")
 	verifyKeyEnv := flag.String("verify-key-env", "",
 		"env var holding the HMAC key that verifies the audit chain (alternative to Ed25519; server-side trust)")
+	proofKeyEnv := flag.String("proof-signing-key-env", "NOCKGUARD_AUDIT_ED25519_KEY",
+		"env var holding the Ed25519 private key used to sign offline export receipts")
 	flag.Parse()
-	var agentSet, auditSet, pubEnvSet bool
+	var agentSet, auditSet, pubEnvSet, proofEnvSet bool
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "agent":
@@ -785,6 +825,8 @@ func main() {
 			auditSet = true
 		case "verify-ed25519-pub-env":
 			pubEnvSet = true
+		case "proof-signing-key-env":
+			proofEnvSet = true
 		}
 	})
 	if agentSet {
@@ -796,6 +838,9 @@ func main() {
 		}
 		if !pubEnvSet {
 			*verifyPubEnv = policy.AgentPubKeyEnvName(*agent)
+		}
+		if !proofEnvSet {
+			*proofKeyEnv = policy.AgentKeyEnvName(*agent)
 		}
 	}
 
@@ -810,6 +855,12 @@ func main() {
 		log.Fatalf("audit verification config: %v", verr)
 	}
 	b.verifier = v
+	if v.mode == modeEd25519 && os.Getenv(*proofKeyEnv) != "" {
+		b.proofSigner, verr = audit.PrivateKeyFromHex(os.Getenv(*proofKeyEnv))
+		if verr != nil || !bytes.Equal(b.proofSigner.Public().(ed25519.PublicKey), v.pub) {
+			log.Fatal("offline proof signing key does not match the configured public key")
+		}
+	}
 	b.refreshSnapshot() // seed the snapshot so live badges have a baseline
 
 	go tail(ctx, *auditPath, b)

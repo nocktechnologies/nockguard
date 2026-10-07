@@ -219,7 +219,8 @@
         <option value="24h">last 24h</option>
       </select>
       <button class="toggle" id="f-clear" title="clear filters">✕ CLEAR</button>
-      <a class="toggle" id="f-export" title="download the current audit window (respects the active filters) as CSV" href="/export" download>⬇ EXPORT</a>
+      <a class="toggle" id="f-export" title="download the current audit window as CSV" href="/export" download>⬇ CSV</a>
+      <a class="toggle" id="f-proof" title="download a signed offline proof of this audit window" href="/export?format=proof" download>⬇ PROOF</a>
       <span class="fcount" id="f-count"></span>
     </div>
   </header>
@@ -275,6 +276,7 @@
   const fClear = document.getElementById('f-clear');
   const fCount = document.getElementById('f-count');
   const fExport = document.getElementById('f-export');
+  const fProof = document.getElementById('f-proof');
   let fq = '', fdec = '', fsev = '', ftimerange = '';
   let ftimeSinceMs = NaN;
   
@@ -304,6 +306,8 @@
     if (since) p.set('since', since);
     const qs = p.toString();
     fExport.href = '/export' + (qs ? '?' + qs : '');
+    p.set('format', 'proof');
+    fProof.href = '/export?' + p.toString();
   }
   // Mirrors the server's matches() severity leg: "threat" = any live catch
   // (critical|high|low, i.e. not none); any other value is an exact tier match.

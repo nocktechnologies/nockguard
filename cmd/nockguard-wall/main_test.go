@@ -413,6 +413,29 @@ func TestHandleExportMarksUnchangedRowsVerified(t *testing.T) {
 	}
 }
 
+func TestHandleExportProof(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = &verifier{mode: modeEd25519, pub: pub}
+	rec := httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=proof&since=1h", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("proof without signing key: status %d", rec.Code)
+	}
+	b.proofSigner = priv
+	rec = httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=proof&since=1h", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("proof status %d: %s", rec.Code, rec.Body.String())
+	}
+	if n, complete, err := audit.VerifyExport(rec.Body.Bytes(), pub, ""); err != nil || n != 3 || !complete {
+		t.Fatalf("export proof: n=%d complete=%v err=%v", n, complete, err)
+	}
+}
+
 func TestHandleExportHMACSnapshot(t *testing.T) {
 	key := []byte("test-export-hmac-key-32-bytes-pad")
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
