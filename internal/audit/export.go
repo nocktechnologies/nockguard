@@ -141,10 +141,6 @@ func MakeExportProof(trail, head []byte, pub ed25519.PublicKey, priv ed25519.Pri
 	if err != nil {
 		return nil, err
 	}
-	if mark.Count > len(trail) {
-		return nil, fmt.Errorf("trail is shorter than signed checkpoint")
-	}
-
 	var lines []string
 	var events []Event
 	sc := bufio.NewScanner(bytes.NewReader(trail))
@@ -171,19 +167,10 @@ func MakeExportProof(trail, head []byte, pub ed25519.PublicKey, priv ed25519.Pri
 	}
 
 	proof := ExportProof{Schema: "nockguard-export/v1", Agent: events[0].Agent, Filters: filters, CompleteWindow: filters.completeWindow(), Rows: []ExportRow{}, Head: json.RawMessage(head)}
-	var previousTime time.Time
 	for i, ev := range events {
 		if ev.Agent != proof.Agent {
 			proof.Agent = ""
 		}
-		ts, err := time.Parse(time.RFC3339, ev.Time)
-		if err != nil {
-			return nil, err
-		}
-		if proof.CompleteWindow && i > 0 && ts.Before(previousTime) {
-			return nil, fmt.Errorf("signed timestamps regress; time-window completeness cannot be proved")
-		}
-		previousTime = ts
 		match, err := filters.match(ev)
 		if err != nil {
 			return nil, err

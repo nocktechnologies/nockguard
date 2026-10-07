@@ -33,10 +33,11 @@ display-oriented `verification` labels; use **PROOF** when handing evidence to
 someone who has only the export and public key. HMAC and unsigned trails cannot
 produce a public-key offline proof.
 
-The auditor timestamps rows with the host clock. The Wall refuses a complete
-time-window proof if the source trail's signed timestamps go backwards.
-The recipient authenticates this full-trail check through the receipt rather
-than inspecting omitted rows. Keep the export signing key protected: anyone
-holding it can sign false receipts, just as they can sign false audit rows.
+The auditor timestamps rows with the host clock. If a clock regression makes
+the matching rows noncontiguous in the chain, the Wall refuses a complete
+time-window proof. The recipient authenticates the full-trail selection
+through the receipt rather than inspecting omitted rows. Keep the export
+signing key protected: anyone holding it can sign false receipts, just as they
+can sign false audit rows.
 As with ordinary trail verification, rolling both the trail and signed head
 back to an earlier genuine state needs an external anchor to detect.

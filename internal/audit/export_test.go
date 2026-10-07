@@ -102,28 +102,49 @@ func TestExportProofWindowAndSeverity(t *testing.T) {
 	}
 }
 
-func TestExportProofRejectsRegressingSignedTime(t *testing.T) {
-	pub, priv, _ := ed25519.GenerateKey(nil)
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
-	a, err := New(path, WithEd25519Key(priv))
-	if err != nil {
-		t.Fatal(err)
+func TestExportProofTimeRegression(t *testing.T) {
+	cases := []struct {
+		name     string
+		times    []string
+		filters  ExportFilters
+		complete bool
+	}{
+		{"earlier jump", []string{"12:00:02", "12:00:00", "12:00:03", "12:00:04"}, ExportFilters{Since: "2026-10-07T12:00:03Z", Until: "2026-10-07T12:00:04Z"}, true},
+		{"gap inside window", []string{"12:00:00", "12:00:02", "12:00:01", "12:00:03"}, ExportFilters{Since: "2026-10-07T12:00:02Z", Until: "2026-10-07T12:00:03Z"}, false},
 	}
-	times := []string{"2026-10-07T12:00:00Z", "2026-10-07T12:00:02Z", "2026-10-07T12:00:01Z", "2026-10-07T12:00:03Z"}
-	i := 0
-	a.clock = func() time.Time { v, _ := time.Parse(time.RFC3339, times[i]); i++; return v }
-	for range times {
-		if err := a.Record(Event{Agent: "probe", Tool: "Read", Decision: "allow"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := a.Close(); err != nil {
-		t.Fatal(err)
-	}
-	trail, _ := os.ReadFile(path)
-	head, _ := os.ReadFile(path + ".hwm")
-	filters := ExportFilters{Since: times[2], Until: times[1]}
-	if _, err := MakeExportProof(trail, head, pub, priv, filters); err == nil {
-		t.Fatal("regressing source produced complete window")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pub, priv, _ := ed25519.GenerateKey(nil)
+			path := filepath.Join(t.TempDir(), "audit.jsonl")
+			a, err := New(path, WithEd25519Key(priv))
+			if err != nil {
+				t.Fatal(err)
+			}
+			i := 0
+			a.clock = func() time.Time { v, _ := time.Parse(time.RFC3339, "2026-10-07T"+tc.times[i]+"Z"); i++; return v }
+			for range tc.times {
+				if err := a.Record(Event{Agent: "probe", Tool: "Read", Decision: "allow"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := a.Close(); err != nil {
+				t.Fatal(err)
+			}
+			trail, _ := os.ReadFile(path)
+			head, _ := os.ReadFile(path + ".hwm")
+			proof, err := MakeExportProof(trail, head, pub, priv, tc.filters)
+			if !tc.complete {
+				if err == nil {
+					t.Fatal("noncontiguous time window passed")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n, complete, err := VerifyExport(proof, pub, "probe"); err != nil || n != 2 || !complete {
+				t.Fatalf("contiguous window: n=%d complete=%v err=%v", n, complete, err)
+			}
+		})
 	}
 }
