@@ -188,6 +188,8 @@ func TestWallAgentExplicitFlagsWin(t *testing.T) {
 	writeSignedTrail(t, path, priv, []audit.Event{{Agent: "local-agent", Tool: "Read", Decision: "allow"}})
 	t.Setenv("CUSTOM_WALL_PUB", hex.EncodeToString(pub))
 	t.Setenv("NOCKGUARD_AGENT_LOCAL_AGENT_ED25519_PUB", "invalid")
+	_, unrelated, _ := ed25519.GenerateKey(nil)
+	t.Setenv("NOCKGUARD_AGENT_LOCAL_AGENT_ED25519_KEY", hex.EncodeToString(unrelated.Seed()))
 	url, output := startWall(t, home, "-agent", "local-agent", "-audit", path, "-verify-ed25519-pub-env", "CUSTOM_WALL_PUB")
 	if !strings.Contains(output.String(), "audit: "+path) {
 		t.Errorf("wall audit path = %q; want explicit %q", output.String(), path)
@@ -195,6 +197,28 @@ func TestWallAgentExplicitFlagsWin(t *testing.T) {
 	report := wallVerify(t, url)
 	if report.ChainIntact == nil || !*report.ChainIntact || report.EntriesVerified != 1 {
 		t.Errorf("/verify = %+v; want explicit key to verify one row", report)
+	}
+	resp, err := http.Get(url + "/export?format=proof&since=1h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("proof with unrelated default key = %d, want 409", resp.StatusCode)
+	}
+}
+
+func TestWallExplicitProofKeyMismatchFails(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+	_, unrelated, _ := ed25519.GenerateKey(nil)
+	t.Setenv("CUSTOM_WALL_PUB", hex.EncodeToString(pub))
+	t.Setenv("CUSTOM_PROOF_KEY", hex.EncodeToString(unrelated.Seed()))
+	cmd, output := wallCommand(t, t.TempDir(), "-verify-ed25519-pub-env", "CUSTOM_WALL_PUB", "-proof-signing-key-env", "CUSTOM_PROOF_KEY", "-addr", freeWallAddr(t))
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("mismatched explicit proof key started Wall: %s", output.String())
+	}
+	if !strings.Contains(output.String(), "does not match the configured public key") {
+		t.Fatalf("wrong startup error: %s", output.String())
 	}
 }
 

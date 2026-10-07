@@ -9,6 +9,8 @@ the exporter's machine. Select a time range and click **PROOF**. The downloaded
 row's preceding hash-chain link, the signed checkpoint head, and a receipt
 signed by the same trail key. The Wall signs that receipt only after it has
 verified the checkpointed trail and selected the rows.
+An unmatched default signing key disables PROOF with a Wall warning; an
+explicitly selected mismatched signing key stops startup.
 If an append lands between the checkpoint and trail reads, the Wall refuses
 that snapshot; retry the export.
 

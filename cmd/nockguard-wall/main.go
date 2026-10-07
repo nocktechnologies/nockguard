@@ -860,9 +860,20 @@ func main() {
 	}
 	b.verifier = v
 	if v.mode == modeEd25519 && os.Getenv(*proofKeyEnv) != "" {
-		b.proofSigner, verr = audit.PrivateKeyFromHex(os.Getenv(*proofKeyEnv))
-		if verr != nil || !bytes.Equal(b.proofSigner.Public().(ed25519.PublicKey), v.pub) {
-			log.Fatal("offline proof signing key does not match the configured public key")
+		priv, err := audit.PrivateKeyFromHex(os.Getenv(*proofKeyEnv))
+		problem := ""
+		if err != nil {
+			problem = err.Error()
+		} else if !bytes.Equal(priv.Public().(ed25519.PublicKey), v.pub) {
+			problem = "does not match the configured public key"
+		}
+		if problem != "" {
+			if proofEnvSet {
+				log.Fatalf("offline proof signing key in %s: %s", *proofKeyEnv, problem)
+			}
+			log.Printf("offline proof disabled: key in %s %s", *proofKeyEnv, problem)
+		} else {
+			b.proofSigner = priv
 		}
 	}
 	b.refreshSnapshot() // seed the snapshot so live badges have a baseline

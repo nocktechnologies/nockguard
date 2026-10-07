@@ -144,11 +144,12 @@ func MakeExportProof(trail, head []byte, pub ed25519.PublicKey, priv ed25519.Pri
 	if err != nil {
 		return nil, err
 	}
-	var lines []string
-	var events []Event
+	proof := ExportProof{Schema: "nockguard-export/v1", Filters: filters, CompleteWindow: filters.completeWindow(), Rows: []ExportRow{}, Head: json.RawMessage(head)}
+	count, previousSig := 0, ""
 	sc := bufio.NewScanner(bytes.NewReader(trail))
 	sc.Buffer(make([]byte, 0, 64*1024), MaxTrailLineBytes)
 	for sc.Scan() {
+		count++
 		if len(bytes.TrimSpace(sc.Bytes())) == 0 {
 			return nil, fmt.Errorf("blank audit line cannot be exported")
 		}
@@ -156,22 +157,9 @@ func MakeExportProof(trail, head []byte, pub ed25519.PublicKey, priv ed25519.Pri
 		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
 			return nil, err
 		}
-		lines = append(lines, sc.Text())
-		events = append(events, ev)
-	}
-	if err := sc.Err(); err != nil {
-		return nil, err
-	}
-	if len(lines) != mark.Count {
-		return nil, fmt.Errorf("captured trail has %d rows but signed checkpoint has %d", len(lines), mark.Count)
-	}
-	if _, err := VerifyEd25519Bytes([]byte(strings.Join(lines, "\n")+"\n"), head, pub); err != nil {
-		return nil, err
-	}
-
-	proof := ExportProof{Schema: "nockguard-export/v1", Agent: events[0].Agent, Filters: filters, CompleteWindow: filters.completeWindow(), Rows: []ExportRow{}, Head: json.RawMessage(head)}
-	for i, ev := range events {
-		if ev.Agent != proof.Agent {
+		if count == 1 {
+			proof.Agent = ev.Agent
+		} else if ev.Agent != proof.Agent {
 			proof.Agent = ""
 		}
 		match, err := filters.match(ev)
@@ -179,12 +167,18 @@ func MakeExportProof(trail, head []byte, pub ed25519.PublicKey, priv ed25519.Pri
 			return nil, err
 		}
 		if match {
-			prev := ""
-			if i > 0 {
-				prev = events[i-1].Sig
-			}
-			proof.Rows = append(proof.Rows, ExportRow{Index: i + 1, PreviousSig: prev, Raw: lines[i]})
+			proof.Rows = append(proof.Rows, ExportRow{Index: count, PreviousSig: previousSig, Raw: sc.Text()})
 		}
+		previousSig = ev.Sig
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	if count != mark.Count {
+		return nil, fmt.Errorf("captured trail has %d rows but signed checkpoint has %d", count, mark.Count)
+	}
+	if _, err := VerifyEd25519Bytes(trail, head, pub); err != nil {
+		return nil, err
 	}
 	proof.ReceiptSig = hex.EncodeToString(ed25519.Sign(priv, proof.receiptMessage()))
 	data, err := json.Marshal(proof)
