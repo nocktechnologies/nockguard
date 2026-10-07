@@ -2,6 +2,7 @@ package audit
 
 import (
 	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -75,6 +76,15 @@ func TestExportProofWindowAndSeverity(t *testing.T) {
 	}
 	if n, complete, err := VerifyExport(all, pub, "probe"); err != nil || n != 6 || !complete {
 		t.Fatalf("full trail: n=%d complete=%v err=%v", n, complete, err)
+	}
+	if err := json.Unmarshal(all, &p); err != nil {
+		t.Fatal(err)
+	}
+	p.Rows = p.Rows[1:]
+	p.ReceiptSig = hex.EncodeToString(ed25519.Sign(priv, p.receiptMessage()))
+	bad, _ = json.Marshal(p)
+	if _, _, err := VerifyExport(bad, pub, ""); err == nil {
+		t.Fatal("signed complete trail missing its first row passed")
 	}
 	severity, err := MakeExportProof(trail, head, pub, priv, ExportFilters{Severity: "none"})
 	if err != nil {

@@ -223,6 +223,9 @@ func VerifyExport(data []byte, pub ed25519.PublicKey, expectedAgent string) (int
 	if proof.CompleteWindow && !proof.Filters.completeWindow() {
 		return 0, false, fmt.Errorf("selective filter cannot claim a complete window")
 	}
+	if proof.CompleteWindow && proof.Filters.Since == "" && proof.Filters.Until == "" && len(proof.Rows) != mark.Count {
+		return 0, false, fmt.Errorf("complete trail does not reach signed chain head")
+	}
 
 	var previous Event
 	for i, row := range proof.Rows {

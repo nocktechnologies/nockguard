@@ -794,7 +794,7 @@ func runAudit(args []string) int {
 		return runVerifySession(args[1:])
 	}
 	for _, arg := range args[1:] {
-		if arg == "--export" || strings.HasPrefix(arg, "--export=") {
+		if arg == "--export" || arg == "-export" || strings.HasPrefix(arg, "--export=") || strings.HasPrefix(arg, "-export=") {
 			return runVerifyExport(args[1:])
 		}
 	}
