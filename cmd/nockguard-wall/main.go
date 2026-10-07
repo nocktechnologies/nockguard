@@ -817,10 +817,10 @@ func main() {
 		"env var holding the Ed25519 PUBLIC key that verifies the audit chain (server-side trust; never client-supplied). Unset var = verification disabled.")
 	verifyKeyEnv := flag.String("verify-key-env", "",
 		"env var holding the HMAC key that verifies the audit chain (alternative to Ed25519; server-side trust)")
-	proofKeyEnv := flag.String("proof-signing-key-env", "NOCKGUARD_AUDIT_ED25519_KEY",
-		"env var holding the Ed25519 private key used to sign offline export receipts")
+	proofKeyEnv := flag.String("proof-signing-key-env", "",
+		"env var holding the Ed25519 private key used to sign offline export receipts (opt-in)")
 	flag.Parse()
-	var agentSet, auditSet, pubEnvSet, proofEnvSet bool
+	var agentSet, auditSet, pubEnvSet bool
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "agent":
@@ -829,8 +829,6 @@ func main() {
 			auditSet = true
 		case "verify-ed25519-pub-env":
 			pubEnvSet = true
-		case "proof-signing-key-env":
-			proofEnvSet = true
 		}
 	})
 	if agentSet {
@@ -842,9 +840,6 @@ func main() {
 		}
 		if !pubEnvSet {
 			*verifyPubEnv = policy.AgentPubKeyEnvName(*agent)
-		}
-		if !proofEnvSet {
-			*proofKeyEnv = policy.AgentKeyEnvName(*agent)
 		}
 	}
 
@@ -859,22 +854,23 @@ func main() {
 		log.Fatalf("audit verification config: %v", verr)
 	}
 	b.verifier = v
-	if v.mode == modeEd25519 && os.Getenv(*proofKeyEnv) != "" {
-		priv, err := audit.PrivateKeyFromHex(os.Getenv(*proofKeyEnv))
-		problem := ""
+	if *proofKeyEnv != "" {
+		if v.mode != modeEd25519 {
+			log.Fatal("offline proof signing requires Ed25519 public-key verification")
+		}
+		keyHex := os.Getenv(*proofKeyEnv)
+		if keyHex == "" {
+			log.Fatalf("offline proof signing key %s is unset", *proofKeyEnv)
+		}
+		priv, err := audit.PrivateKeyFromHex(keyHex)
 		if err != nil {
-			problem = err.Error()
-		} else if !bytes.Equal(priv.Public().(ed25519.PublicKey), v.pub) {
-			problem = "does not match the configured public key"
+			log.Fatalf("offline proof signing key %s: %v", *proofKeyEnv, err)
 		}
-		if problem != "" {
-			if proofEnvSet {
-				log.Fatalf("offline proof signing key in %s: %s", *proofKeyEnv, problem)
-			}
-			log.Printf("offline proof disabled: key in %s %s", *proofKeyEnv, problem)
-		} else {
-			b.proofSigner = priv
+		if !bytes.Equal(priv.Public().(ed25519.PublicKey), v.pub) {
+			log.Fatalf("offline proof signing key in %s does not match the configured public key", *proofKeyEnv)
 		}
+		b.proofSigner = priv
+		log.Printf("offline proof signing enabled from %s", *proofKeyEnv)
 	}
 	b.refreshSnapshot() // seed the snapshot so live badges have a baseline
 

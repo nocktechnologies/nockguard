@@ -336,8 +336,9 @@ It binds to loopback by default (private), embeds its own page (single binary, n
 
 With `--agent`, the wall reads `~/.nockguard/logs/<agent>.audit.jsonl` and verifies it using `NOCKGUARD_AGENT_<AGENT>_ED25519_PUB`. Explicit `--audit` and `--verify-ed25519-pub-env` values take precedence.
 
-For an Ed25519-signed incident window, start the Wall with the trail's signing
-key in its standard environment variable, click **PROOF**, and hand the
+For an Ed25519-signed incident window, start the Wall with
+`--proof-signing-key-env <ENV>` pointing at the trail's private key, click
+**PROOF**, and hand the
 downloaded file plus the public key to a reviewer. They can run
 `nockguard verify --export <file> --ed25519-pub-env <ENV>` without the source trail. See
 [verifying a Live Wall export](docs/verifying-the-trail.md) for the proof scope

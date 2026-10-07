@@ -1,16 +1,23 @@
 # Verify a Live Wall export offline
 
-Run the Wall with the trail's Ed25519 public key **and signing key**, supplied
-through environment variables. With `--agent`, the Wall uses that agent's
-standard `NOCKGUARD_AGENT_<AGENT>_ED25519_PUB` and `_KEY` variables; for a
-global trail, it uses `NOCKGUARD_AUDIT_ED25519_PUB` and `_KEY`. The key stays on
-the exporter's machine. Select a time range and click **PROOF**. The downloaded
+Run the Wall with the trail's Ed25519 public key and explicitly opt in to
+receipt signing with `--proof-signing-key-env <ENV>`. With `--agent`, the Wall
+uses that agent's standard `NOCKGUARD_AGENT_<AGENT>_ED25519_PUB` public key;
+point the proof flag at its matching `_KEY` variable. For a global trail, use
+`NOCKGUARD_AUDIT_ED25519_PUB` and `_KEY`. The private key stays on the
+exporter's machine. Select a time range and click **PROOF**. The downloaded
 `nockguard-wall.proof.json` contains only selected signed audit rows, each
 row's preceding hash-chain link, the signed checkpoint head, and a receipt
 signed by the same trail key. The Wall signs that receipt only after it has
 verified the checkpointed trail and selected the rows.
-An unmatched default signing key disables PROOF with a Wall warning; an
-explicitly selected mismatched signing key stops startup.
+
+```bash
+nockguard-wall --agent coder \
+  --proof-signing-key-env NOCKGUARD_AGENT_CODER_ED25519_KEY
+```
+
+Without the proof flag, the Wall holds only the public key and PROOF is
+unavailable. An unset or mismatched explicitly selected signing key stops startup.
 If an append lands between the checkpoint and trail reads, the Wall refuses
 that snapshot; retry the export.
 

@@ -135,13 +135,26 @@ func TestWallAgentSignedTrail(t *testing.T) {
 		{Agent: "local-agent", Tool: "WebFetch", Decision: "deny", Reason: "policy denied"},
 	})
 	t.Setenv("NOCKGUARD_AGENT_LOCAL_AGENT_ED25519_PUB", hex.EncodeToString(pub))
-	url, output := startWall(t, home, "-agent", "local-agent")
+	t.Setenv("NOCKGUARD_AGENT_LOCAL_AGENT_ED25519_KEY", hex.EncodeToString(priv.Seed()))
+	url, output := startWall(t, home, "-agent", "local-agent", "-proof-signing-key-env", "NOCKGUARD_AGENT_LOCAL_AGENT_ED25519_KEY")
 	if !strings.Contains(output.String(), "audit: "+path) {
 		t.Errorf("wall audit path = %q; want %q", output.String(), path)
 	}
 	report := wallVerify(t, url)
 	if report.ChainIntact == nil || !*report.ChainIntact || report.EntriesVerified != 2 {
 		t.Errorf("/verify = %+v; want intact chain with two verified rows", report)
+	}
+	proofResp, err := http.Get(url + "/export?format=proof&since=1h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proofResp.Body.Close()
+	var proof audit.ExportProof
+	if err := json.NewDecoder(proofResp.Body).Decode(&proof); err != nil {
+		t.Fatal(err)
+	}
+	if proofResp.StatusCode != http.StatusOK || len(proof.Rows) != 2 {
+		t.Fatalf("proof export: status=%d rows=%d", proofResp.StatusCode, len(proof.Rows))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -219,6 +232,14 @@ func TestWallExplicitProofKeyMismatchFails(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "does not match the configured public key") {
 		t.Fatalf("wrong startup error: %s", output.String())
+	}
+	t.Setenv("CUSTOM_PROOF_KEY", "")
+	cmd, output = wallCommand(t, t.TempDir(), "-verify-ed25519-pub-env", "CUSTOM_WALL_PUB", "-proof-signing-key-env", "CUSTOM_PROOF_KEY", "-addr", freeWallAddr(t))
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("unset explicit proof key started Wall: %s", output.String())
+	}
+	if !strings.Contains(output.String(), "CUSTOM_PROOF_KEY is unset") {
+		t.Fatalf("wrong unset-key error: %s", output.String())
 	}
 }
 
