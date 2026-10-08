@@ -582,6 +582,7 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 
 	exportMu.Lock()
 	defer exportMu.Unlock()
+	captureUntil := time.Now().UTC()
 
 	// The writer appends a trail line before advancing the checkpoint under its
 	// flock. Capturing the checkpoint first therefore preserves hwm.count <= the
@@ -647,6 +648,8 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 		}
 		if until != nil {
 			filters.Until = until.Format(time.RFC3339Nano)
+		} else {
+			filters.Until = captureUntil.Format(time.RFC3339Nano)
 		}
 		proof, err := audit.MakeExportProof(trail, hwm, b.verifier.pub, b.proofSigner, filters)
 		if err != nil {
@@ -890,6 +893,9 @@ func main() {
 			return
 		}
 		data, _ := indexFS.ReadFile("index.html")
+		if len(b.proofSigner) != 0 {
+			data = bytes.Replace(data, []byte(`id="f-proof" hidden`), []byte(`id="f-proof"`), 1)
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(data)
 	})

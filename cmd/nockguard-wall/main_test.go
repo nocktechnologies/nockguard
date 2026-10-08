@@ -426,13 +426,43 @@ func TestHandleExportProof(t *testing.T) {
 		t.Fatalf("proof without signing key: status %d", rec.Code)
 	}
 	b.proofSigner = priv
+	var snapshotAt time.Time
+	b.afterExportSnapshot = func() { snapshotAt = time.Now().UTC() }
+	before := time.Now().UTC()
 	rec = httptest.NewRecorder()
 	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=proof&since=1h", nil))
+	after := time.Now().UTC()
 	if rec.Code != http.StatusOK {
 		t.Fatalf("proof status %d: %s", rec.Code, rec.Body.String())
 	}
 	if n, complete, err := audit.VerifyExport(rec.Body.Bytes(), pub, ""); err != nil || n != 3 || !complete {
 		t.Fatalf("export proof: n=%d complete=%v err=%v", n, complete, err)
+	}
+	var proof audit.ExportProof
+	if err := json.Unmarshal(rec.Body.Bytes(), &proof); err != nil {
+		t.Fatal(err)
+	}
+	bound, err := time.Parse(time.RFC3339Nano, proof.Filters.Until)
+	if err != nil || bound.Before(before) || bound.After(snapshotAt) || snapshotAt.After(after) {
+		t.Fatalf("signed capture bound = %q, want before snapshot %s within %s..%s: %v", proof.Filters.Until, snapshotAt, before, after, err)
+	}
+	proof.Filters.Until = bound.Add(time.Second).Format(time.RFC3339Nano)
+	tampered, _ := json.Marshal(proof)
+	if _, _, err := audit.VerifyExport(tampered, pub, ""); err == nil {
+		t.Fatal("tampered upper bound passed")
+	}
+
+	explicit := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	rec = httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=proof&until="+explicit, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("explicit bound proof status %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proof); err != nil {
+		t.Fatal(err)
+	}
+	if proof.Filters.Until != explicit {
+		t.Fatalf("explicit bound = %q, want %q", proof.Filters.Until, explicit)
 	}
 }
 

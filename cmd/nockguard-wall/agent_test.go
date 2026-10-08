@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -137,6 +138,15 @@ func TestWallAgentSignedTrail(t *testing.T) {
 	t.Setenv("NOCKGUARD_AGENT_LOCAL_AGENT_ED25519_PUB", hex.EncodeToString(pub))
 	t.Setenv("NOCKGUARD_AGENT_LOCAL_AGENT_ED25519_KEY", hex.EncodeToString(priv.Seed()))
 	url, output := startWall(t, home, "-agent", "local-agent", "-proof-signing-key-env", "NOCKGUARD_AGENT_LOCAL_AGENT_ED25519_KEY")
+	pageResp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := io.ReadAll(pageResp.Body)
+	pageResp.Body.Close()
+	if err != nil || !strings.Contains(string(page), `id="f-proof" title=`) {
+		t.Fatalf("proof link absent with signing enabled: %v", err)
+	}
 	if !strings.Contains(output.String(), "audit: "+path) {
 		t.Errorf("wall audit path = %q; want %q", output.String(), path)
 	}
@@ -204,6 +214,15 @@ func TestWallAgentExplicitFlagsWin(t *testing.T) {
 	_, unrelated, _ := ed25519.GenerateKey(nil)
 	t.Setenv("NOCKGUARD_AGENT_LOCAL_AGENT_ED25519_KEY", hex.EncodeToString(unrelated.Seed()))
 	url, output := startWall(t, home, "-agent", "local-agent", "-audit", path, "-verify-ed25519-pub-env", "CUSTOM_WALL_PUB")
+	pageResp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := io.ReadAll(pageResp.Body)
+	pageResp.Body.Close()
+	if err != nil || !strings.Contains(string(page), `id="f-proof" hidden`) {
+		t.Fatalf("proof link visible without signing enabled: %v", err)
+	}
 	if !strings.Contains(output.String(), "audit: "+path) {
 		t.Errorf("wall audit path = %q; want explicit %q", output.String(), path)
 	}

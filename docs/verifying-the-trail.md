@@ -33,8 +33,9 @@ The signed receipt binds the resolved time bounds, selected row indexes,
 preceding links, and signed checkpoint head. It attests that the Wall checked
 the full trail for matching rows and timestamp order. Changing or deleting a
 selected row, or narrowing the declared range, fails verification. An empty
-window is a signed zero-row attestation.
-With no filters, the same check reports `complete trail`.
+window is a signed zero-row attestation. If no upper bound was requested, the
+Wall signs its UTC capture time as `until`; the verdict prints that bound, so
+the proof makes no claim about rows appended afterward.
 
 Severity, decision, and text filters deliberately produce `integrity verified;
 not a complete window`: their selected rows are genuine, but those filters

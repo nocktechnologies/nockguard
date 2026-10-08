@@ -39,6 +39,7 @@
             border-radius:8px; padding:8px 12px; font:inherit; font-size:12px; cursor:pointer;
             letter-spacing:.5px; }
   .toggle:hover { color:var(--text); border-color:#2b3442; }
+  .toggle[hidden] { display:none; }
   .toggle.on { color:var(--block); border-color:rgba(255,77,77,.5); background:rgba(255,77,77,.08); }
   .toggle.snd.on { color:var(--accent); border-color:rgba(88,166,255,.5); background:rgba(88,166,255,.08); }
 
@@ -220,7 +221,7 @@
       </select>
       <button class="toggle" id="f-clear" title="clear filters">✕ CLEAR</button>
       <a class="toggle" id="f-export" title="download the current audit window as CSV" href="/export" download>⬇ CSV</a>
-      <a class="toggle" id="f-proof" title="download a signed offline proof of this audit window" href="/export?format=proof" download>⬇ PROOF</a>
+      <a class="toggle" id="f-proof" hidden title="download a signed offline proof of this audit window" href="/export?format=proof" download>⬇ PROOF</a>
       <span class="fcount" id="f-count"></span>
     </div>
   </header>
