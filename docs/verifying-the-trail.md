@@ -18,8 +18,9 @@ nockguard-wall --agent coder \
 
 Without the proof flag, the Wall holds only the public key and PROOF is
 unavailable. An unset or mismatched explicitly selected signing key stops startup.
-If an append lands between the checkpoint and trail reads, the Wall refuses
-that snapshot; retry the export.
+Proof exports hold the trail lock through the checkpoint and trail reads, so
+an append waits until the snapshot finishes. Other verified exports can refuse
+a snapshot crossed by an append; retry those exports.
 
 ```bash
 export NOCKGUARD_AUDIT_ED25519_PUB='<public key from the trail signer>'
@@ -29,20 +30,22 @@ nockguard verify --export nockguard-wall.proof.json \
 
 `VERDICT: PROTECTED — complete time window` means the selected rows are byte
 identical to the signed canonical audit rows and consecutive in the hash chain.
-The signed receipt binds the resolved time bounds, selected row indexes,
+The signed receipt binds the UTC `captured_at` time, resolved time bounds, selected row indexes,
 preceding links, and signed checkpoint head. It attests that the Wall checked
 the full trail for matching rows and timestamp order. Changing or deleting a
 selected row, or narrowing the declared range, fails verification. An empty
-window is a signed zero-row attestation. The Wall signs its UTC snapshot time as
-`captured_at` and never signs an `until` later than the whole second before it:
-row times have one-second resolution, so a row appended just after the snapshot
-can share the capture second. A requested `until` later than that is clamped,
-and the verifier refuses a receipt whose `until` is not before its
-`captured_at` second. The verdict prints both, so the proof makes no claim about
-rows appended afterward; the last second or two before an export are outside it.
-Rows are timestamped while the append lock is held, so row times follow append
-order. The claim assumes the Wall and the proxy share a clock and that no writer
-is paused between taking that lock and appending across the snapshot.
+window is a signed zero-row attestation. The Wall holds a shared trail lock
+while capturing the checkpoint and rows. Because audit timestamps have
+one-second resolution, it signs the earlier of the requested `until` and the
+last fully elapsed second before `captured_at` as the effective upper bound.
+If no upper bound was requested, it uses that safe bound. The offline verifier
+rejects a receipt whose upper bound exceeds the safe bound derived from its
+signed `captured_at` time.
+The verdict prints the effective bound and covers the checkpointed snapshot;
+rows appended after that snapshot require a new proof.
+Version 2 receipts carry `captured_at`. Older version 1 receipts still verify
+the authenticity of their selected rows, but receive only an integrity verdict
+because they do not sign a separate capture time.
 
 Severity, decision, and text filters deliberately produce `integrity verified;
 not a complete window`: their selected rows are genuine, but those filters
@@ -51,7 +54,8 @@ display-oriented `verification` labels; use **PROOF** when handing evidence to
 someone who has only the export and public key. HMAC and unsigned trails cannot
 produce a public-key offline proof.
 
-The auditor timestamps rows with the host clock. If a clock regression makes
+The auditor timestamps signed rows after taking the exclusive append lock, so
+concurrent writers stamp rows in append order. It uses the host clock. If a clock regression makes
 the matching rows noncontiguous in the chain, the Wall refuses a complete
 time-window proof. The recipient authenticates the full-trail selection
 through the receipt rather than inspecting omitted rows. Keep the export

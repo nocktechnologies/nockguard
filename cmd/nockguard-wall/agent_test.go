@@ -154,7 +154,7 @@ func TestWallAgentSignedTrail(t *testing.T) {
 	if report.ChainIntact == nil || !*report.ChainIntact || report.EntriesVerified != 2 {
 		t.Errorf("/verify = %+v; want intact chain with two verified rows", report)
 	}
-	time.Sleep(2100 * time.Millisecond) // proofs close the window one whole second before capture
+	time.Sleep(time.Until(time.Now().UTC().Truncate(time.Second).Add(time.Second)))
 	proofResp, err := http.Get(url + "/export?format=proof&since=1h")
 	if err != nil {
 		t.Fatal(err)

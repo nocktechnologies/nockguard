@@ -15,15 +15,11 @@ import (
 
 // ExportFilters records resolved, inclusive RFC3339 bounds and the Wall filters.
 type ExportFilters struct {
-	Since string `json:"since,omitempty"`
-	Until string `json:"until,omitempty"`
-	// CapturedAt is when the Wall took its snapshot. Row times have one-second
-	// resolution, so an Until is only a completeness claim if it is strictly
-	// earlier than the second CapturedAt falls in.
-	CapturedAt string `json:"captured_at,omitempty"`
-	Severity   string `json:"severity,omitempty"`
-	Decision   string `json:"decision,omitempty"`
-	Query      string `json:"q,omitempty"`
+	Since    string `json:"since,omitempty"`
+	Until    string `json:"until,omitempty"`
+	Severity string `json:"severity,omitempty"`
+	Decision string `json:"decision,omitempty"`
+	Query    string `json:"q,omitempty"`
 }
 
 // ExportRow is an original canonical audit line and its immediate chain link.
@@ -39,6 +35,7 @@ type ExportRow struct {
 type ExportProof struct {
 	Schema         string          `json:"schema"`
 	Agent          string          `json:"agent,omitempty"`
+	CapturedAt     string          `json:"captured_at,omitempty"`
 	Filters        ExportFilters   `json:"filters"`
 	CompleteWindow bool            `json:"complete_window"`
 	Rows           []ExportRow     `json:"rows"`
@@ -96,18 +93,6 @@ func (f ExportFilters) validate() error {
 	if !since.IsZero() && !until.IsZero() && since.After(until) {
 		return fmt.Errorf("since is after until")
 	}
-	if f.Until != "" {
-		if f.CapturedAt == "" {
-			return fmt.Errorf("upper bound has no signed capture time")
-		}
-		captured, err := time.Parse(time.RFC3339, f.CapturedAt)
-		if err != nil {
-			return fmt.Errorf("invalid captured_at: %w", err)
-		}
-		if !until.Before(captured.Truncate(time.Second)) {
-			return fmt.Errorf("upper bound %s is not before signed capture time %s", f.Until, f.CapturedAt)
-		}
-	}
 	return nil
 }
 
@@ -146,9 +131,18 @@ func (f ExportFilters) match(ev Event) (bool, error) {
 
 // MakeExportProof verifies the signed checkpoint snapshot before attesting to
 // its selection. A checkpoint behind the captured trail cannot prove a window.
-func MakeExportProof(trail, head []byte, pub ed25519.PublicKey, priv ed25519.PrivateKey, filters ExportFilters) ([]byte, error) {
+func MakeExportProof(trail, head []byte, pub ed25519.PublicKey, priv ed25519.PrivateKey, filters ExportFilters, capturedAt time.Time) ([]byte, error) {
 	if err := filters.validate(); err != nil {
 		return nil, err
+	}
+	if capturedAt.IsZero() {
+		return nil, fmt.Errorf("capture time required for offline export")
+	}
+	if filters.Until != "" {
+		until, _ := time.Parse(time.RFC3339, filters.Until)
+		if until.After(capturedAt.Truncate(time.Second).Add(-time.Nanosecond)) {
+			return nil, fmt.Errorf("until exceeds safe capture bound")
+		}
 	}
 	if len(priv) != ed25519.PrivateKeySize || !bytes.Equal(priv.Public().(ed25519.PublicKey), pub) {
 		return nil, fmt.Errorf("receipt signing key does not match trail public key")
@@ -160,7 +154,7 @@ func MakeExportProof(trail, head []byte, pub ed25519.PublicKey, priv ed25519.Pri
 	if err != nil {
 		return nil, err
 	}
-	proof := ExportProof{Schema: "nockguard-export/v1", Filters: filters, CompleteWindow: filters.completeWindow(), Rows: []ExportRow{}, Head: json.RawMessage(head)}
+	proof := ExportProof{Schema: "nockguard-export/v2", CapturedAt: capturedAt.UTC().Format(time.RFC3339Nano), Filters: filters, CompleteWindow: filters.completeWindow(), Rows: []ExportRow{}, Head: json.RawMessage(head)}
 	count, previousSig := 0, ""
 	sc := bufio.NewScanner(bytes.NewReader(trail))
 	sc.Buffer(make([]byte, 0, 64*1024), MaxTrailLineBytes)
@@ -218,7 +212,8 @@ func VerifyExport(data []byte, pub ed25519.PublicKey, expectedAgent string) (int
 	if !bytes.Equal(bytes.TrimSpace(data), canonicalProof) {
 		return 0, false, fmt.Errorf("export proof is not canonical JSON")
 	}
-	if proof.Schema != "nockguard-export/v1" || len(proof.Head) == 0 {
+	legacy := proof.Schema == "nockguard-export/v1"
+	if (!legacy && proof.Schema != "nockguard-export/v2") || len(proof.Head) == 0 {
 		return 0, false, fmt.Errorf("invalid export proof")
 	}
 	if err := proof.Filters.validate(); err != nil {
@@ -227,6 +222,22 @@ func VerifyExport(data []byte, pub ed25519.PublicKey, expectedAgent string) (int
 	receiptSig, err := hex.DecodeString(proof.ReceiptSig)
 	if err != nil || !ed25519.Verify(pub, proof.receiptMessage(), receiptSig) {
 		return 0, false, fmt.Errorf("export receipt signature invalid")
+	}
+	if legacy {
+		if proof.CapturedAt != "" {
+			return 0, false, fmt.Errorf("v1 proof cannot claim a capture time")
+		}
+	} else {
+		capturedAt, err := time.Parse(time.RFC3339Nano, proof.CapturedAt)
+		if err != nil {
+			return 0, false, fmt.Errorf("invalid signed capture time: %w", err)
+		}
+		if proof.Filters.Until != "" {
+			until, _ := time.Parse(time.RFC3339, proof.Filters.Until)
+			if until.After(capturedAt.Truncate(time.Second).Add(-time.Nanosecond)) {
+				return 0, false, fmt.Errorf("signed upper bound exceeds safe capture time")
+			}
+		}
 	}
 	if expectedAgent != "" && proof.Agent != expectedAgent {
 		return 0, false, fmt.Errorf("export belongs to agent %q, expected %q", proof.Agent, expectedAgent)
@@ -288,5 +299,5 @@ func VerifyExport(data []byte, pub ed25519.PublicKey, expectedAgent string) (int
 		previous = ev
 		previous.Sig = gotSig
 	}
-	return len(proof.Rows), proof.CompleteWindow, nil
+	return len(proof.Rows), proof.CompleteWindow && !legacy, nil
 }

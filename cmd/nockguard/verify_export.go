@@ -60,14 +60,14 @@ func runVerifyExport(args []string) int {
 	fmt.Printf("OK — %d exported rows verified against the signed chain head\n", n)
 	var proof audit.ExportProof
 	_ = json.Unmarshal(data, &proof) // already parsed and checked by VerifyExport
-	fmt.Printf("Scope: agent=%q since=%q until=%q severity=%q decision=%q q=%q\n", proof.Agent, proof.Filters.Since, proof.Filters.Until, proof.Filters.Severity, proof.Filters.Decision, proof.Filters.Query)
+	fmt.Printf("Scope: agent=%q captured_at=%q since=%q until=%q severity=%q decision=%q q=%q\n", proof.Agent, proof.CapturedAt, proof.Filters.Since, proof.Filters.Until, proof.Filters.Severity, proof.Filters.Decision, proof.Filters.Query)
 	if complete {
 		if proof.Filters.Since == "" && proof.Filters.Until == "" {
 			fmt.Println("VERDICT: PROTECTED — complete trail")
 		} else if proof.Filters.Until == "" {
 			fmt.Println("VERDICT: PROTECTED — complete through signed checkpoint; no explicit upper time bound")
 		} else {
-			fmt.Printf("VERDICT: PROTECTED — complete time window through %s (snapshot captured %s)\n", proof.Filters.Until, proof.Filters.CapturedAt)
+			fmt.Printf("VERDICT: PROTECTED — complete time window through %s\n", proof.Filters.Until)
 		}
 	} else {
 		fmt.Println("VERDICT: PROTECTED — integrity verified; not a complete window")

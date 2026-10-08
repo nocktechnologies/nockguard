@@ -8,4 +8,6 @@ package audit
 // package building everywhere, not to provide multi-process safety off-unix.
 func lockExclusive(fd uintptr) error { return nil }
 
-func unlockFile(fd uintptr) error { return nil }
+func LockShared(fd uintptr) error { return nil }
+
+func UnlockFile(fd uintptr) error { return nil }

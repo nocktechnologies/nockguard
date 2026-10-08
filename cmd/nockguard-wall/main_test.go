@@ -426,7 +426,8 @@ func TestHandleExportProof(t *testing.T) {
 		t.Fatalf("proof without signing key: status %d", rec.Code)
 	}
 	b.proofSigner = priv
-	time.Sleep(2100 * time.Millisecond) // proofs close the window one whole second before capture
+	// The proof excludes the capture second because audit rows use whole seconds.
+	time.Sleep(time.Until(time.Now().UTC().Truncate(time.Second).Add(time.Second)))
 	var snapshotAt time.Time
 	b.afterExportSnapshot = func() { snapshotAt = time.Now().UTC() }
 	before := time.Now().UTC()
@@ -444,9 +445,9 @@ func TestHandleExportProof(t *testing.T) {
 		t.Fatal(err)
 	}
 	bound, err := time.Parse(time.RFC3339Nano, proof.Filters.Until)
-	captured, cerr := time.Parse(time.RFC3339Nano, proof.Filters.CapturedAt)
-	if err != nil || cerr != nil || captured.Before(before) || captured.After(snapshotAt) || snapshotAt.After(after) || !bound.Before(captured.Truncate(time.Second)) {
-		t.Fatalf("signed bound %q / capture %q, want bound before the capture second, capture within %s..%s", proof.Filters.Until, proof.Filters.CapturedAt, before, snapshotAt)
+	capturedAt, captureErr := time.Parse(time.RFC3339Nano, proof.CapturedAt)
+	if err != nil || captureErr != nil || capturedAt.Before(before) || capturedAt.After(snapshotAt) || snapshotAt.After(after) || !bound.Equal(capturedAt.Truncate(time.Second).Add(-time.Nanosecond)) {
+		t.Fatalf("signed capture = %q, upper = %q, snapshot %s within %s..%s: %v %v", proof.CapturedAt, proof.Filters.Until, snapshotAt, before, after, captureErr, err)
 	}
 	proof.Filters.Until = bound.Add(time.Second).Format(time.RFC3339Nano)
 	tampered, _ := json.Marshal(proof)
@@ -460,19 +461,106 @@ func TestHandleExportProof(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("explicit bound proof status %d: %s", rec.Code, rec.Body.String())
 	}
-	var future audit.ExportProof
-	if err := json.Unmarshal(rec.Body.Bytes(), &future); err != nil {
+	if err := json.Unmarshal(rec.Body.Bytes(), &proof); err != nil {
 		t.Fatal(err)
 	}
-	if future.Filters.Until == explicit || future.Filters.Until >= future.Filters.CapturedAt {
-		t.Fatalf("future until %q was signed unclamped (captured %q)", future.Filters.Until, future.Filters.CapturedAt)
+	bound, err = time.Parse(time.RFC3339Nano, proof.Filters.Until)
+	capturedAt, captureErr = time.Parse(time.RFC3339Nano, proof.CapturedAt)
+	if err != nil || captureErr != nil || !bound.Equal(capturedAt.Truncate(time.Second).Add(-time.Nanosecond)) {
+		t.Fatalf("future bound = %q, captured_at = %q, want clamped safe time: %v %v", proof.Filters.Until, proof.CapturedAt, captureErr, err)
+	}
+	if _, complete, err := audit.VerifyExport(rec.Body.Bytes(), pub, ""); err != nil || !complete {
+		t.Fatalf("clamped proof: complete=%v err=%v", complete, err)
 	}
 
-	earlier := time.Now().UTC().Add(-time.Hour).Truncate(time.Second).Format(time.RFC3339)
+	past := "2020-01-01T00:00:00Z"
 	rec = httptest.NewRecorder()
-	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=proof&until="+earlier, nil))
-	if err := json.Unmarshal(rec.Body.Bytes(), &future); err != nil || future.Filters.Until != earlier {
-		t.Fatalf("earlier explicit until = %q, want %q (err %v)", future.Filters.Until, earlier, err)
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=proof&until="+past, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("past bound proof status %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proof); err != nil {
+		t.Fatal(err)
+	}
+	if proof.Filters.Until != past {
+		t.Fatalf("past bound = %q, want %q", proof.Filters.Until, past)
+	}
+}
+
+func TestHandleExportProofWaitsForConcurrentAppend(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	a, err := audit.New(path, audit.WithEd25519Key(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if err := a.Record(audit.Event{Agent: "probe", Tool: "first", Decision: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Until(time.Now().UTC().Truncate(time.Second).Add(time.Second)))
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = &verifier{mode: modeEd25519, pub: pub}
+	b.proofSigner = priv
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	b.afterExportCheckpoint = func() { close(entered); <-release }
+	snapshotReady := make(chan struct{})
+	finishProof := make(chan struct{})
+	b.afterExportSnapshot = func() { close(snapshotReady); <-finishProof }
+	proofs := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=proof", nil))
+		proofs <- rec
+	}()
+	<-entered
+	appendDone := make(chan error, 1)
+	go func() { appendDone <- a.Record(audit.Event{Agent: "probe", Tool: "second", Decision: "allow"}) }()
+	select {
+	case err := <-appendDone:
+		t.Fatalf("append crossed locked proof snapshot: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	<-snapshotReady
+	select {
+	case err := <-appendDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("append remained blocked after proof snapshot")
+	}
+	close(finishProof)
+	rec := <-proofs
+	if rec.Code != http.StatusOK {
+		t.Fatalf("proof status %d: %s", rec.Code, rec.Body.String())
+	}
+	if n, complete, err := audit.VerifyExport(rec.Body.Bytes(), pub, ""); err != nil || n != 1 || !complete {
+		t.Fatalf("snapshot proof: n=%d complete=%v err=%v", n, complete, err)
+	}
+	var proof audit.ExportProof
+	if err := json.Unmarshal(rec.Body.Bytes(), &proof); err != nil {
+		t.Fatal(err)
+	}
+	bound, _ := time.Parse(time.RFC3339Nano, proof.Filters.Until)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("trail has %d rows, want 2", len(lines))
+	}
+	var appended audit.Event
+	if err := json.Unmarshal([]byte(lines[1]), &appended); err != nil {
+		t.Fatal(err)
+	}
+	appendedAt, err := time.Parse(time.RFC3339, appended.Time)
+	if err != nil || !appendedAt.After(bound) {
+		t.Fatalf("post-snapshot row time %q is inside upper bound %q: %v", appended.Time, proof.Filters.Until, err)
 	}
 }
 

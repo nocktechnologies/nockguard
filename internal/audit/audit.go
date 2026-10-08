@@ -321,7 +321,15 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 			return err
 		}
 	}
+	if a.signing() {
+		// Serialize the timestamp with signed appends across processes.
+		if err := lockExclusive(a.f.Fd()); err != nil {
+			return err
+		}
+		defer UnlockFile(a.f.Fd())
+	}
 
+	ev.Time = a.clock().Format(time.RFC3339)
 	ev.Sig = "" // canonical content never includes the signature itself
 
 	// N10647: stamp correlation fields before the canonical bytes are computed
@@ -354,14 +362,6 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 		// entry links onto the real tail regardless of how many processes write.
 		// lastSig seeks from end (O(1) in file size); the flock makes the read
 		// see the stable tail regardless of how many processes write.
-		if err := lockExclusive(a.f.Fd()); err != nil {
-			return err
-		}
-		defer unlockFile(a.f.Fd())
-
-		// Stamp under the lock so row times follow append order; a reader that
-		// snapshots at time T can then rely on later rows not being stamped <= T.
-		ev.Time = a.clock().Format(time.RFC3339)
 		last, err := lastSig(a.path)
 		if err != nil {
 			return err
@@ -376,8 +376,6 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 		}
 		sig := a.sign(canonical, last)
 		ev.Sig = sig
-	} else {
-		ev.Time = a.clock().Format(time.RFC3339)
 	}
 
 	line, err := json.Marshal(ev)

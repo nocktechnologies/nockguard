@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
 )
@@ -26,8 +27,9 @@ func TestVerifyExportVerdictNamesSignedUpperBound(t *testing.T) {
 	}
 	trail, _ := os.ReadFile(trailPath)
 	head, _ := os.ReadFile(trailPath + ".hwm")
-	const bound = "2026-10-07T12:00:00Z"
-	proof, err := audit.MakeExportProof(trail, head, pub, priv, audit.ExportFilters{Until: bound, CapturedAt: "2099-01-01T00:00:01Z"})
+	capturedAt := time.Now().UTC().Add(time.Second)
+	bound := capturedAt.Truncate(time.Second).Add(-time.Nanosecond).Format(time.RFC3339Nano)
+	proof, err := audit.MakeExportProof(trail, head, pub, priv, audit.ExportFilters{Until: bound}, capturedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +42,7 @@ func TestVerifyExportVerdictNamesSignedUpperBound(t *testing.T) {
 	if code != 0 || stderr != "" || !strings.Contains(stdout, "VERDICT: PROTECTED — complete time window through "+bound) {
 		t.Fatalf("verify export = %d, stdout=%q, stderr=%q", code, stdout, stderr)
 	}
-	legacy, err := audit.MakeExportProof(trail, head, pub, priv, audit.ExportFilters{Since: "2020-01-01T00:00:00Z"})
+	legacy, err := audit.MakeExportProof(trail, head, pub, priv, audit.ExportFilters{Since: "2020-01-01T00:00:00Z"}, capturedAt)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -582,7 +582,31 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 
 	exportMu.Lock()
 	defer exportMu.Unlock()
-	captureUntil := time.Now().UTC()
+	var lockFile *os.File
+	locked := false
+	if proofMode {
+		var err error
+		lockFile, err = os.Open(b.auditPath)
+		if err != nil {
+			http.Error(w, "audit trail unavailable for offline proof", http.StatusConflict)
+			return
+		}
+		defer lockFile.Close()
+		if err := audit.LockShared(lockFile.Fd()); err != nil {
+			http.Error(w, "audit trail lock unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		locked = true
+		defer func() {
+			if locked {
+				_ = audit.UnlockFile(lockFile.Fd())
+			}
+		}()
+	}
+	capturedAt := time.Now().UTC()
+	// Row timestamps have one-second resolution. Exclude the capture second so
+	// an append after the snapshot cannot have a timestamp inside the proof.
+	captureUntil := capturedAt.Truncate(time.Second).Add(-time.Nanosecond)
 
 	// The writer appends a trail line before advancing the checkpoint under its
 	// flock. Capturing the checkpoint first therefore preserves hwm.count <= the
@@ -639,6 +663,11 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if proofMode {
+		if err := audit.UnlockFile(lockFile.Fd()); err != nil {
+			http.Error(w, "audit trail unlock failed", http.StatusServiceUnavailable)
+			return
+		}
+		locked = false
 		if b.afterExportSnapshot != nil {
 			b.afterExportSnapshot()
 		}
@@ -646,15 +675,12 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 		if since != nil {
 			filters.Since = since.Format(time.RFC3339Nano)
 		}
-		// Row times are whole seconds, so a row appended after the snapshot can
-		// carry the capture second; only the second before it is provably closed.
-		bound := captureUntil.Truncate(time.Second).Add(-time.Second)
-		if until != nil && until.Before(bound) {
-			bound = *until
+		effectiveUntil := captureUntil
+		if until != nil && until.Before(effectiveUntil) {
+			effectiveUntil = *until
 		}
-		filters.Until = bound.UTC().Format(time.RFC3339Nano)
-		filters.CapturedAt = captureUntil.Format(time.RFC3339Nano)
-		proof, err := audit.MakeExportProof(trail, hwm, b.verifier.pub, b.proofSigner, filters)
+		filters.Until = effectiveUntil.Format(time.RFC3339Nano)
+		proof, err := audit.MakeExportProof(trail, hwm, b.verifier.pub, b.proofSigner, filters, capturedAt)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("offline proof unavailable: %v", err), http.StatusConflict)
 			return
