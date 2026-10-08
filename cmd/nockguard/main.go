@@ -793,6 +793,11 @@ func runAudit(args []string) int {
 	if hasSessionFlag(args[1:]) {
 		return runVerifySession(args[1:])
 	}
+	for _, arg := range args[1:] {
+		if arg == "--export" || arg == "-export" || strings.HasPrefix(arg, "--export=") || strings.HasPrefix(arg, "-export=") {
+			return runVerifyExport(args[1:])
+		}
+	}
 	var auditPath, auditDir, agentName, keyEnv, pubEnv string
 	allMode := false
 	jsonOutput := false
@@ -1412,6 +1417,7 @@ Usage:
   nockguard egress-proxy --listen <addr> --agent <name> --policy <path> [--audit <path>] [--enforce]
   nockguard verify (--all | --agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
   nockguard verify --session <id> --lock-db <path> --guard-trail <path> (--pub-env <ENV> | --lock-pub-env <ENV> --guard-pub-env <ENV>) [--json]
+  nockguard verify --export <wall.proof.json> (--agent <name> | --ed25519-pub-env <ENV>)
   nockguard selftest [--policy <path>] [--json]
   nockguard policy propose --agent <name> [--audit <path>] [--audit-dir <dir>]
   nockguard policy shadow-report --agent <name> [--audit <path>] [--audit-dir <dir>]

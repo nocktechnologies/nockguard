@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -135,13 +136,36 @@ func TestWallAgentSignedTrail(t *testing.T) {
 		{Agent: "local-agent", Tool: "WebFetch", Decision: "deny", Reason: "policy denied"},
 	})
 	t.Setenv("NOCKGUARD_AGENT_LOCAL_AGENT_ED25519_PUB", hex.EncodeToString(pub))
-	url, output := startWall(t, home, "-agent", "local-agent")
+	t.Setenv("NOCKGUARD_AGENT_LOCAL_AGENT_ED25519_KEY", hex.EncodeToString(priv.Seed()))
+	url, output := startWall(t, home, "-agent", "local-agent", "-proof-signing-key-env", "NOCKGUARD_AGENT_LOCAL_AGENT_ED25519_KEY")
+	pageResp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := io.ReadAll(pageResp.Body)
+	pageResp.Body.Close()
+	if err != nil || !strings.Contains(string(page), `id="f-proof" title=`) {
+		t.Fatalf("proof link absent with signing enabled: %v", err)
+	}
 	if !strings.Contains(output.String(), "audit: "+path) {
 		t.Errorf("wall audit path = %q; want %q", output.String(), path)
 	}
 	report := wallVerify(t, url)
 	if report.ChainIntact == nil || !*report.ChainIntact || report.EntriesVerified != 2 {
 		t.Errorf("/verify = %+v; want intact chain with two verified rows", report)
+	}
+	time.Sleep(time.Until(time.Now().UTC().Truncate(time.Second).Add(time.Second)))
+	proofResp, err := http.Get(url + "/export?format=proof&since=1h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proofResp.Body.Close()
+	var proof audit.ExportProof
+	if err := json.NewDecoder(proofResp.Body).Decode(&proof); err != nil {
+		t.Fatal(err)
+	}
+	if proofResp.StatusCode != http.StatusOK || len(proof.Rows) != 2 {
+		t.Fatalf("proof export: status=%d rows=%d", proofResp.StatusCode, len(proof.Rows))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -188,13 +212,54 @@ func TestWallAgentExplicitFlagsWin(t *testing.T) {
 	writeSignedTrail(t, path, priv, []audit.Event{{Agent: "local-agent", Tool: "Read", Decision: "allow"}})
 	t.Setenv("CUSTOM_WALL_PUB", hex.EncodeToString(pub))
 	t.Setenv("NOCKGUARD_AGENT_LOCAL_AGENT_ED25519_PUB", "invalid")
+	_, unrelated, _ := ed25519.GenerateKey(nil)
+	t.Setenv("NOCKGUARD_AGENT_LOCAL_AGENT_ED25519_KEY", hex.EncodeToString(unrelated.Seed()))
 	url, output := startWall(t, home, "-agent", "local-agent", "-audit", path, "-verify-ed25519-pub-env", "CUSTOM_WALL_PUB")
+	pageResp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := io.ReadAll(pageResp.Body)
+	pageResp.Body.Close()
+	if err != nil || !strings.Contains(string(page), `id="f-proof" hidden`) {
+		t.Fatalf("proof link visible without signing enabled: %v", err)
+	}
 	if !strings.Contains(output.String(), "audit: "+path) {
 		t.Errorf("wall audit path = %q; want explicit %q", output.String(), path)
 	}
 	report := wallVerify(t, url)
 	if report.ChainIntact == nil || !*report.ChainIntact || report.EntriesVerified != 1 {
 		t.Errorf("/verify = %+v; want explicit key to verify one row", report)
+	}
+	resp, err := http.Get(url + "/export?format=proof&since=1h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("proof with unrelated default key = %d, want 409", resp.StatusCode)
+	}
+}
+
+func TestWallExplicitProofKeyMismatchFails(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+	_, unrelated, _ := ed25519.GenerateKey(nil)
+	t.Setenv("CUSTOM_WALL_PUB", hex.EncodeToString(pub))
+	t.Setenv("CUSTOM_PROOF_KEY", hex.EncodeToString(unrelated.Seed()))
+	cmd, output := wallCommand(t, t.TempDir(), "-verify-ed25519-pub-env", "CUSTOM_WALL_PUB", "-proof-signing-key-env", "CUSTOM_PROOF_KEY", "-addr", freeWallAddr(t))
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("mismatched explicit proof key started Wall: %s", output.String())
+	}
+	if !strings.Contains(output.String(), "does not match the configured public key") {
+		t.Fatalf("wrong startup error: %s", output.String())
+	}
+	t.Setenv("CUSTOM_PROOF_KEY", "")
+	cmd, output = wallCommand(t, t.TempDir(), "-verify-ed25519-pub-env", "CUSTOM_WALL_PUB", "-proof-signing-key-env", "CUSTOM_PROOF_KEY", "-addr", freeWallAddr(t))
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("unset explicit proof key started Wall: %s", output.String())
+	}
+	if !strings.Contains(output.String(), "CUSTOM_PROOF_KEY is unset") {
+		t.Fatalf("wrong unset-key error: %s", output.String())
 	}
 }
 
