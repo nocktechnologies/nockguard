@@ -26,8 +26,8 @@ func TestVerifyExportVerdictNamesSignedUpperBound(t *testing.T) {
 	}
 	trail, _ := os.ReadFile(trailPath)
 	head, _ := os.ReadFile(trailPath + ".hwm")
-	const bound = "2099-01-01T00:00:00Z"
-	proof, err := audit.MakeExportProof(trail, head, pub, priv, audit.ExportFilters{Until: bound})
+	const bound = "2026-10-07T12:00:00Z"
+	proof, err := audit.MakeExportProof(trail, head, pub, priv, audit.ExportFilters{Until: bound, CapturedAt: "2099-01-01T00:00:01Z"})
 	if err != nil {
 		t.Fatal(err)
 	}

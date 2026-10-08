@@ -67,7 +67,7 @@ func runVerifyExport(args []string) int {
 		} else if proof.Filters.Until == "" {
 			fmt.Println("VERDICT: PROTECTED — complete through signed checkpoint; no explicit upper time bound")
 		} else {
-			fmt.Printf("VERDICT: PROTECTED — complete time window through %s\n", proof.Filters.Until)
+			fmt.Printf("VERDICT: PROTECTED — complete time window through %s (snapshot captured %s)\n", proof.Filters.Until, proof.Filters.CapturedAt)
 		}
 	} else {
 		fmt.Println("VERDICT: PROTECTED — integrity verified; not a complete window")

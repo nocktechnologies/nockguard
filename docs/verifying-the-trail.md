@@ -33,9 +33,16 @@ The signed receipt binds the resolved time bounds, selected row indexes,
 preceding links, and signed checkpoint head. It attests that the Wall checked
 the full trail for matching rows and timestamp order. Changing or deleting a
 selected row, or narrowing the declared range, fails verification. An empty
-window is a signed zero-row attestation. If no upper bound was requested, the
-Wall signs its UTC capture time as `until`; the verdict prints that bound, so
-the proof makes no claim about rows appended afterward.
+window is a signed zero-row attestation. The Wall signs its UTC snapshot time as
+`captured_at` and never signs an `until` later than the whole second before it:
+row times have one-second resolution, so a row appended just after the snapshot
+can share the capture second. A requested `until` later than that is clamped,
+and the verifier refuses a receipt whose `until` is not before its
+`captured_at` second. The verdict prints both, so the proof makes no claim about
+rows appended afterward; the last second or two before an export are outside it.
+Rows are timestamped while the append lock is held, so row times follow append
+order. The claim assumes the Wall and the proxy share a clock and that no writer
+is paused between taking that lock and appending across the snapshot.
 
 Severity, decision, and text filters deliberately produce `integrity verified;
 not a complete window`: their selected rows are genuine, but those filters

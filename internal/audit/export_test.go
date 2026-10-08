@@ -34,7 +34,7 @@ func TestExportProofWindowAndSeverity(t *testing.T) {
 	}
 	trail, _ := os.ReadFile(path)
 	head, _ := os.ReadFile(path + ".hwm")
-	proof, err := MakeExportProof(trail, head, pub, priv, ExportFilters{Since: "2026-10-07T12:00:02Z", Until: "2026-10-07T12:00:03Z"})
+	proof, err := MakeExportProof(trail, head, pub, priv, ExportFilters{Since: "2026-10-07T12:00:02Z", Until: "2026-10-07T12:00:03Z", CapturedAt: "2026-10-07T12:01:00Z"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestExportProofWindowAndSeverity(t *testing.T) {
 		t.Fatal(err)
 	}
 	appended, _ := os.ReadFile(path)
-	broader := ExportFilters{Since: "2026-10-07T12:00:02Z", Until: "2026-10-07T12:00:06Z"}
+	broader := ExportFilters{Since: "2026-10-07T12:00:02Z", Until: "2026-10-07T12:00:06Z", CapturedAt: "2026-10-07T12:01:00Z"}
 	if _, err := MakeExportProof(appended, head, pub, priv, broader); err == nil {
 		t.Fatal("stale checkpoint hid an in-window row")
 	}
@@ -126,8 +126,8 @@ func TestExportProofTimeRegression(t *testing.T) {
 		filters  ExportFilters
 		complete bool
 	}{
-		{"earlier jump", []string{"12:00:02", "12:00:00", "12:00:03", "12:00:04"}, ExportFilters{Since: "2026-10-07T12:00:03Z", Until: "2026-10-07T12:00:04Z"}, true},
-		{"gap inside window", []string{"12:00:00", "12:00:02", "12:00:01", "12:00:03"}, ExportFilters{Since: "2026-10-07T12:00:02Z", Until: "2026-10-07T12:00:03Z"}, false},
+		{"earlier jump", []string{"12:00:02", "12:00:00", "12:00:03", "12:00:04"}, ExportFilters{Since: "2026-10-07T12:00:03Z", Until: "2026-10-07T12:00:04Z", CapturedAt: "2026-10-07T12:01:00Z"}, true},
+		{"gap inside window", []string{"12:00:00", "12:00:02", "12:00:01", "12:00:03"}, ExportFilters{Since: "2026-10-07T12:00:02Z", Until: "2026-10-07T12:00:03Z", CapturedAt: "2026-10-07T12:01:00Z"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -163,5 +163,32 @@ func TestExportProofTimeRegression(t *testing.T) {
 				t.Fatalf("contiguous window: n=%d complete=%v err=%v", n, complete, err)
 			}
 		})
+	}
+}
+
+func TestExportProofRejectsUnclosedUpperBound(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	a, err := New(path, WithEd25519Key(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Record(Event{Agent: "probe", Tool: "Read", Decision: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	a.Close()
+	trail, _ := os.ReadFile(path)
+	head, _ := os.ReadFile(path + ".hwm")
+	for name, f := range map[string]ExportFilters{
+		"future until":          {Until: "2099-01-01T00:00:00Z", CapturedAt: "2026-10-07T12:00:10Z"},
+		"until in capture sec":  {Until: "2026-10-07T12:00:10Z", CapturedAt: "2026-10-07T12:00:10.5Z"},
+		"until without capture": {Until: "2026-10-07T12:00:00Z"},
+	} {
+		if _, err := MakeExportProof(trail, head, pub, priv, f); err == nil {
+			t.Errorf("%s: unclosed upper bound was signed", name)
+		}
+	}
+	if _, err := MakeExportProof(trail, head, pub, priv, ExportFilters{Until: "2026-10-07T12:00:09.9Z", CapturedAt: "2026-10-07T12:00:10.5Z"}); err != nil {
+		t.Fatalf("closed upper bound: %v", err)
 	}
 }

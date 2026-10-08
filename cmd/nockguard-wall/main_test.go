@@ -426,6 +426,7 @@ func TestHandleExportProof(t *testing.T) {
 		t.Fatalf("proof without signing key: status %d", rec.Code)
 	}
 	b.proofSigner = priv
+	time.Sleep(2100 * time.Millisecond) // proofs close the window one whole second before capture
 	var snapshotAt time.Time
 	b.afterExportSnapshot = func() { snapshotAt = time.Now().UTC() }
 	before := time.Now().UTC()
@@ -443,8 +444,9 @@ func TestHandleExportProof(t *testing.T) {
 		t.Fatal(err)
 	}
 	bound, err := time.Parse(time.RFC3339Nano, proof.Filters.Until)
-	if err != nil || bound.Before(before) || bound.After(snapshotAt) || snapshotAt.After(after) {
-		t.Fatalf("signed capture bound = %q, want before snapshot %s within %s..%s: %v", proof.Filters.Until, snapshotAt, before, after, err)
+	captured, cerr := time.Parse(time.RFC3339Nano, proof.Filters.CapturedAt)
+	if err != nil || cerr != nil || captured.Before(before) || captured.After(snapshotAt) || snapshotAt.After(after) || !bound.Before(captured.Truncate(time.Second)) {
+		t.Fatalf("signed bound %q / capture %q, want bound before the capture second, capture within %s..%s", proof.Filters.Until, proof.Filters.CapturedAt, before, snapshotAt)
 	}
 	proof.Filters.Until = bound.Add(time.Second).Format(time.RFC3339Nano)
 	tampered, _ := json.Marshal(proof)
@@ -458,11 +460,19 @@ func TestHandleExportProof(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("explicit bound proof status %d: %s", rec.Code, rec.Body.String())
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &proof); err != nil {
+	var future audit.ExportProof
+	if err := json.Unmarshal(rec.Body.Bytes(), &future); err != nil {
 		t.Fatal(err)
 	}
-	if proof.Filters.Until != explicit {
-		t.Fatalf("explicit bound = %q, want %q", proof.Filters.Until, explicit)
+	if future.Filters.Until == explicit || future.Filters.Until >= future.Filters.CapturedAt {
+		t.Fatalf("future until %q was signed unclamped (captured %q)", future.Filters.Until, future.Filters.CapturedAt)
+	}
+
+	earlier := time.Now().UTC().Add(-time.Hour).Truncate(time.Second).Format(time.RFC3339)
+	rec = httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=proof&until="+earlier, nil))
+	if err := json.Unmarshal(rec.Body.Bytes(), &future); err != nil || future.Filters.Until != earlier {
+		t.Fatalf("earlier explicit until = %q, want %q (err %v)", future.Filters.Until, earlier, err)
 	}
 }
 

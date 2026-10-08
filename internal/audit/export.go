@@ -15,11 +15,15 @@ import (
 
 // ExportFilters records resolved, inclusive RFC3339 bounds and the Wall filters.
 type ExportFilters struct {
-	Since    string `json:"since,omitempty"`
-	Until    string `json:"until,omitempty"`
-	Severity string `json:"severity,omitempty"`
-	Decision string `json:"decision,omitempty"`
-	Query    string `json:"q,omitempty"`
+	Since string `json:"since,omitempty"`
+	Until string `json:"until,omitempty"`
+	// CapturedAt is when the Wall took its snapshot. Row times have one-second
+	// resolution, so an Until is only a completeness claim if it is strictly
+	// earlier than the second CapturedAt falls in.
+	CapturedAt string `json:"captured_at,omitempty"`
+	Severity   string `json:"severity,omitempty"`
+	Decision   string `json:"decision,omitempty"`
+	Query      string `json:"q,omitempty"`
 }
 
 // ExportRow is an original canonical audit line and its immediate chain link.
@@ -91,6 +95,18 @@ func (f ExportFilters) validate() error {
 	}
 	if !since.IsZero() && !until.IsZero() && since.After(until) {
 		return fmt.Errorf("since is after until")
+	}
+	if f.Until != "" {
+		if f.CapturedAt == "" {
+			return fmt.Errorf("upper bound has no signed capture time")
+		}
+		captured, err := time.Parse(time.RFC3339, f.CapturedAt)
+		if err != nil {
+			return fmt.Errorf("invalid captured_at: %w", err)
+		}
+		if !until.Before(captured.Truncate(time.Second)) {
+			return fmt.Errorf("upper bound %s is not before signed capture time %s", f.Until, f.CapturedAt)
+		}
 	}
 	return nil
 }

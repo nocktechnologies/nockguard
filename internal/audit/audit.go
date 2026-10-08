@@ -322,7 +322,6 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 		}
 	}
 
-	ev.Time = a.clock().Format(time.RFC3339)
 	ev.Sig = "" // canonical content never includes the signature itself
 
 	// N10647: stamp correlation fields before the canonical bytes are computed
@@ -360,6 +359,9 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 		}
 		defer unlockFile(a.f.Fd())
 
+		// Stamp under the lock so row times follow append order; a reader that
+		// snapshots at time T can then rely on later rows not being stamped <= T.
+		ev.Time = a.clock().Format(time.RFC3339)
 		last, err := lastSig(a.path)
 		if err != nil {
 			return err
@@ -374,6 +376,8 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 		}
 		sig := a.sign(canonical, last)
 		ev.Sig = sig
+	} else {
+		ev.Time = a.clock().Format(time.RFC3339)
 	}
 
 	line, err := json.Marshal(ev)

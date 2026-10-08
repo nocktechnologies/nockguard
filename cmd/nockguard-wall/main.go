@@ -646,11 +646,14 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 		if since != nil {
 			filters.Since = since.Format(time.RFC3339Nano)
 		}
-		if until != nil {
-			filters.Until = until.Format(time.RFC3339Nano)
-		} else {
-			filters.Until = captureUntil.Format(time.RFC3339Nano)
+		// Row times are whole seconds, so a row appended after the snapshot can
+		// carry the capture second; only the second before it is provably closed.
+		bound := captureUntil.Truncate(time.Second).Add(-time.Second)
+		if until != nil && until.Before(bound) {
+			bound = *until
 		}
+		filters.Until = bound.UTC().Format(time.RFC3339Nano)
+		filters.CapturedAt = captureUntil.Format(time.RFC3339Nano)
 		proof, err := audit.MakeExportProof(trail, hwm, b.verifier.pub, b.proofSigner, filters)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("offline proof unavailable: %v", err), http.StatusConflict)
