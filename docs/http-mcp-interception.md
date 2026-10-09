@@ -94,8 +94,7 @@ The `nockguard mcp-http` subcommand (see `cmd/nockguard/main.go` and
 
 1. Generate a per-agent keypair if not present:
    ```bash
-   eval $(nockguard keygen --agent mira)
-   export NOCKGUARD_AGENT_MIRA_ED25519_KEY="<seed>"
+   nockguard keygen --agent mira   # writes ~/.nockguard/keys/mira.ed25519 (0600) + mira.pub; the proxy and `verify --agent mira` find them by name
    ```
 
 2. Edit `agents/mira/.mcp.json` — replace the remote-HTTP entry with a `command:`

@@ -58,7 +58,7 @@ func TestEgressProxyObserveOnlyAuditsAndDoesNotBlock(t *testing.T) {
 	dir := t.TempDir()
 	auditPath := filepath.Join(dir, "audit.jsonl")
 
-	keygenOut, err := exec.Command(binary, "keygen").Output()
+	keygenOut, err := exec.Command(binary, "keygen", "--print-env").Output()
 	if err != nil {
 		t.Fatalf("keygen failed: %v", err)
 	}

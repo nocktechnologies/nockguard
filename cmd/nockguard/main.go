@@ -2,9 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -655,6 +652,7 @@ func parseCommand(cmd string) []string {
 type verifyResult struct {
 	Verdict         string `json:"verdict"`
 	AuditPath       string `json:"audit_path,omitempty"`
+	PubKeySource    string `json:"public_key_source,omitempty"`
 	EntriesVerified int    `json:"entries_verified"`
 	Error           string `json:"error,omitempty"`
 }
@@ -673,6 +671,7 @@ type verifyTrailResult struct {
 	Agent           string `json:"agent"`
 	Path            string `json:"path"`
 	Status          string `json:"status"`
+	PubKeySource    string `json:"public_key_source,omitempty"`
 	EntriesVerified int    `json:"entries_verified,omitempty"`
 	Error           string `json:"error,omitempty"`
 }
@@ -724,9 +723,9 @@ func verifyAllAgents(auditDir string, jsonOutput bool) int {
 			continue
 		}
 		envName := policy.AgentPubKeyEnvName(agent)
-		pubHex := os.Getenv(envName)
-		if pubHex == "" {
-			msg := envName + " not set"
+		pubHex, keySource, kerr := requirePubHex(envName, agent)
+		if kerr != nil {
+			msg := kerr.Error()
 			if !jsonOutput {
 				fmt.Printf("  [NO KEY] %-18s %s\n", agent, msg)
 			}
@@ -748,14 +747,14 @@ func verifyAllAgents(auditDir string, jsonOutput bool) int {
 			if !jsonOutput {
 				fmt.Printf("  [TAMPER] %-18s %v\n", agent, verr)
 			}
-			results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: "TAMPERED", EntriesVerified: n, Error: verr.Error()})
+			results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: "TAMPERED", PubKeySource: keySource, EntriesVerified: n, Error: verr.Error()})
 			tampered++
 			continue
 		}
 		if !jsonOutput {
-			fmt.Printf("  [OK]     %-18s %d entries, chain intact\n", agent, n)
+			fmt.Printf("  [OK]     %-18s %d entries, chain intact (public key: %s)\n", agent, n, keySource)
 		}
-		results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: "PROTECTED", EntriesVerified: n})
+		results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: "PROTECTED", PubKeySource: keySource, EntriesVerified: n})
 		intact++
 	}
 	verdict := "PROTECTED"
@@ -911,13 +910,15 @@ func runAudit(args []string) int {
 	}
 
 	var (
-		n   int
-		err error
+		n         int
+		err       error
+		keySource string
 	)
 	if pubEnv != "" {
-		pubHex := os.Getenv(pubEnv)
-		if pubHex == "" {
-			fmt.Fprintf(os.Stderr, "error: %s is not set in the environment\n", pubEnv)
+		pubHex, src, kerr := requirePubHex(pubEnv, agentName)
+		keySource = src
+		if kerr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", kerr)
 			return 1
 		}
 		pub, perr := audit.PublicKeyFromHex(pubHex)
@@ -944,9 +945,12 @@ func runAudit(args []string) int {
 		return 2
 	}
 	if jsonOutput {
-		writeJSON(verifyResult{Verdict: "PROTECTED", AuditPath: auditPath, EntriesVerified: n})
+		writeJSON(verifyResult{Verdict: "PROTECTED", AuditPath: auditPath, PubKeySource: keySource, EntriesVerified: n})
 	} else {
 		fmt.Printf("OK — %d entries verified, hash chain intact: %s\n", n, auditPath)
+		if keySource != "" {
+			fmt.Printf("public key: %s\n", keySource)
+		}
 		fmt.Println("VERDICT: PROTECTED")
 	}
 	return 0
@@ -1107,9 +1111,9 @@ func runEvidence(args []string) int {
 		Agent:      agentName,
 	}
 	if pubEnv != "" {
-		pubHex := os.Getenv(pubEnv)
-		if pubHex == "" {
-			fmt.Fprintf(os.Stderr, "error: %s is not set in the environment\n", pubEnv)
+		pubHex, _, kerr := requirePubHex(pubEnv, agentName)
+		if kerr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", kerr)
 			return 1
 		}
 		opts.Ed25519PubHex = pubHex
@@ -1227,49 +1231,6 @@ func runTrust(args []string) int {
 	fmt.Printf("score: %.3f\n", score)
 	fmt.Printf("tier: %s\n", trust.TierFor(score))
 	fmt.Printf("effective_multiplier: %.1fx\n", trust.MultiplierFor(score))
-	return 0
-}
-
-// runKeygen generates a fresh Ed25519 keypair for non-repudiable audit signing.
-// With --agent <name> it emits agent-namespaced variable names
-// (NOCKGUARD_AGENT_<UPPER>_ED25519_KEY / _PUB) so each agent can hold its own
-// signing identity. Without --agent it emits the legacy global variable names.
-func runKeygen(args []string) int {
-	var agentName string
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--agent" {
-			if i+1 >= len(args) {
-				fmt.Fprintln(os.Stderr, "error: --agent requires a value")
-				return 1
-			}
-			i++
-			agentName = args[i]
-			if !policy.ValidAgentName(agentName) {
-				fmt.Fprintf(os.Stderr, "error: invalid agent name %q: only alphanumerics, hyphens, and dots are allowed\n", agentName)
-				return 1
-			}
-		}
-	}
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "keygen failed: %v\n", err)
-		return 1
-	}
-	if agentName != "" {
-		keyEnv := policy.AgentKeyEnvName(agentName)
-		pubEnv := policy.AgentPubKeyEnvName(agentName)
-		fmt.Printf("# Ed25519 keypair for agent: %s\n", agentName)
-		fmt.Printf("# PRIVATE seed — secret. Set in the proxy environment; never commit.\n")
-		fmt.Printf("%s=%s\n\n", keyEnv, hex.EncodeToString(priv.Seed()))
-		fmt.Printf("# PUBLIC key — share with verifiers. Cannot produce signatures.\n")
-		fmt.Printf("%s=%s\n", pubEnv, hex.EncodeToString(pub))
-	} else {
-		fmt.Printf("# Ed25519 audit signing keypair\n")
-		fmt.Printf("# PRIVATE seed — secret. Set as the signing env (sign_ed25519_key_env); never commit.\n")
-		fmt.Printf("NOCKGUARD_AUDIT_ED25519_KEY=%s\n\n", hex.EncodeToString(priv.Seed()))
-		fmt.Printf("# PUBLIC key — share with verifiers. Cannot forge entries.\n")
-		fmt.Printf("NOCKGUARD_AUDIT_ED25519_PUB=%s\n", hex.EncodeToString(pub))
-	}
 	return 0
 }
 
@@ -1423,7 +1384,7 @@ Usage:
   nockguard trust show --agent <name>
   nockguard audit verify ...   # same as 'nockguard verify' (the audit-namespaced form)
   nockguard evidence --framework soc2 (--agent <name> | --ed25519-pub-env <ENV> | --key-env <ENV>) [--audit <path>] [--audit-dir <dir>] [--from <date>] [--to <date>] [--format html|json] [-o <file>]
-  nockguard keygen [--agent <name>]
+  nockguard keygen [--agent <name>] [--force] [--print-env]
   nockguard version
 
 Options:
@@ -1433,7 +1394,8 @@ Options:
   --agent            Agent identity for policy lookup / per-agent keypair flow
   --policy           Path to policy YAML (default: ~/.nockguard/policy.yaml)
   --enforce          Block denied egress hosts (returns 403); default is observe-only (logs but allows)
-  --force            Overwrite an existing policy (for: init)
+  --force            Overwrite an existing policy (for: init) or existing key files (for: keygen)
+  --print-env        Print the keygen env lines, INCLUDING the secret seed, to stdout instead of writing key files (for: keygen)
   --key-env          Env var holding the HMAC signing key (tamper-evident verify)
   --ed25519-pub-env  Env var holding the hex Ed25519 public key (non-repudiable verify)
   --audit            Path to the audit JSONL (default: ~/.nockguard/logs/audit.jsonl)
@@ -1452,6 +1414,9 @@ Per-agent signing:
   Each agent gets its own Ed25519 keypair. The trail is signed with the agent's
   private key and written to <agent>.audit.jsonl, verifiable with only that
   agent's public key — non-repudiable: proves which agent did what.
+  keygen writes ~/.nockguard/keys/<agent>.ed25519 (seed, 0600) and <agent>.pub;
+  proxy and verify --agent find them by name when the NOCKGUARD_AGENT_<NAME>_*
+  env vars are unset (the env vars win when set).
 
 Evidence packs:
   `+"`nockguard evidence`"+` reads the SAME signed trail `+"`audit verify`"+` checks, maps its
@@ -1466,7 +1431,7 @@ Examples:
   nockguard mcp-http --upstream https://mcp.example.com/mcp --agent coder --auth-env MCP_AUTH
   nockguard mcp-listen --listen 127.0.0.1:8790 --upstream https://mcp.example.com/mcp --agent coder --policy policy.yaml
   nockguard egress-proxy --listen 127.0.0.1:8899 --agent coder --policy egress.yaml
-  nockguard keygen --agent coder                        # generate per-agent keypair
+  nockguard keygen --agent coder                        # write per-agent keypair to ~/.nockguard/keys (seed never printed)
   nockguard verify --agent coder                        # prove coder's trail is intact + non-repudiable (exit 0 = clean, 2 = tampered)
   nockguard selftest --policy policy.yaml               # prove the firewall BLOCKS a denied tool + catches a secret (exit 0 = proven, 2 = gap)
   nockguard verify --session "$NOCKLOCK_SESSION_ID" --lock-db <nocklock.db> --guard-trail ~/.nockguard/logs/coder.audit.jsonl --lock-pub-env LOCK_PUB --guard-pub-env GUARD_PUB   # one verdict across both chains (exit 0 = PROTECTED, 2 = TAMPERED, 1 = anything else)
@@ -1474,6 +1439,6 @@ Examples:
   nockguard policy propose --agent coder                 # derive a shadow allowlist from coder's observed allowed tools
   nockguard policy shadow-report --agent coder           # count shadow would-deny misses by tool
   nockguard evidence --framework soc2 --agent coder -o coder-soc2.html   # SOC2 pack for coder's signed trail
-  nockguard keygen                                      # generate global keypair (legacy)
+  nockguard keygen                                      # keypair for the "default" identity
   nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB  # verify global trail`)
 }

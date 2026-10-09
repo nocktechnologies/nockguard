@@ -4,6 +4,20 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Changed
+- `nockguard keygen` now writes the keypair to `~/.nockguard/keys/<name>.ed25519` (seed, `0600`, directory `0700`) and `<name>.pub` (`0644`) and prints only the paths and the public key, so the private seed no longer lands in terminal scrollback, shell logs or agent transcripts. It refuses to overwrite without `--force` and refuses symlinks. Without `--agent` the name is `default`. The old stdout env lines (including the secret seed) are behind `--print-env`, which writes no files and warns on stderr. Scripts that parsed keygen's stdout must add `--print-env`. Unknown keygen flags are now an error; `--agent=<name>` is accepted.
+- Zero-config observe mode now writes its public key to `<agent>.pub` (was `<agent>.ed25519.pub`).
+
+- `verify` text output now names the public key source: a `public key: <env var or .pub path>` line before `VERDICT:` and a `(public key: ...)` suffix on each `verify --all` `[OK]` line. Parse `--json` (`public_key_source`) rather than the text.
+
+### Added
+- `verify --agent`, `verify --all`, `verify --export` and `evidence --agent` read `~/.nockguard/keys/<name>.pub` when `NOCKGUARD_AGENT_<NAME>_ED25519_PUB` is unset.
+- Per-agent signing (`proxy`, `mcp-listen`, `egress-proxy`, `mcp-gateway`) reads `~/.nockguard/keys/<name>.ed25519` when `NOCKGUARD_AGENT_<NAME>_ED25519_KEY` is unset, refusing a seed file that is not a regular file owned by the current user with no group/other permission bits. The env vars still win when set. Audit format and signatures are unchanged.
+- `keygen` and observe mode take a per-agent `flock` (`~/.nockguard/keys/<name>.lock`) across the seed and `.pub` publication, observe repairs a `.pub` that does not match its seed, and `verify` reports which public key source it used (`public_key_source` in `--json`).
+
+### Fixed
+- An empty or whitespace-only key file is now an error naming the path instead of reading as "no key" and silently weakening signing; a FIFO at a key path is refused instead of hanging the open; an unresolvable home directory no longer fails startup when no key file is wanted; an explicit `audit.sign_ed25519_key_env` / `sign_key_env` now outranks a key file for the same agent.
+
 ## [0.4.0] - 2026-10-09
 
 ### Added

@@ -21,7 +21,7 @@ func TestPerAgentEd25519EndToEnd(t *testing.T) {
 	dir := t.TempDir()
 
 	// 1. keygen --agent kit  → NOCKGUARD_AGENT_KIT_ED25519_KEY / _PUB
-	kitKeygenOut, err := exec.Command(binary, "keygen", "--agent", "kit").Output()
+	kitKeygenOut, err := exec.Command(binary, "keygen", "--print-env", "--agent", "kit").Output()
 	if err != nil {
 		t.Fatalf("keygen --agent kit: %v", err)
 	}
@@ -32,7 +32,7 @@ func TestPerAgentEd25519EndToEnd(t *testing.T) {
 	}
 
 	// 2. keygen --agent wren → NOCKGUARD_AGENT_WREN_ED25519_KEY / _PUB
-	wrenKeygenOut, err := exec.Command(binary, "keygen", "--agent", "wren").Output()
+	wrenKeygenOut, err := exec.Command(binary, "keygen", "--print-env", "--agent", "wren").Output()
 	if err != nil {
 		t.Fatalf("keygen --agent wren: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestPerAgentEd25519EndToEnd(t *testing.T) {
 // agent-namespaced variable names and a comment identifying the agent.
 func TestKeygenAgentOutputFormat(t *testing.T) {
 	binary := buildBinary(t)
-	out, err := exec.Command(binary, "keygen", "--agent", "mira-nockos").Output()
+	out, err := exec.Command(binary, "keygen", "--print-env", "--agent", "mira-nockos").Output()
 	if err != nil {
 		t.Fatalf("keygen --agent mira-nockos: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestKeygenAgentOutputFormat(t *testing.T) {
 // the legacy NOCKGUARD_AUDIT_ED25519_KEY / _PUB format.
 func TestKeygenLegacyUnchanged(t *testing.T) {
 	binary := buildBinary(t)
-	out, err := exec.Command(binary, "keygen").Output()
+	out, err := exec.Command(binary, "keygen", "--print-env").Output()
 	if err != nil {
 		t.Fatalf("keygen: %v", err)
 	}
