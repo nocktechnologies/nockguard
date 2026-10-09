@@ -72,7 +72,7 @@ func runCLI(args []string) int {
 	}
 
 	if args[0] == "version" {
-		fmt.Println("nockguard v0.3.0")
+		fmt.Println("nockguard v0.4.0")
 		return 0
 	}
 
