@@ -80,14 +80,19 @@ func TestGatewayStartupRequiresCredentialsPolicyAndSignedAudit(t *testing.T) {
 
 func TestGatewayRequiresPerAgentKeyEvenWhenPolicyNamesOne(t *testing.T) {
 	for _, test := range []struct {
-		name                          string
-		policyKey, perAgentEnv, seedF bool
-		want                          string
+		name                  string
+		policyKey             string
+		perAgentEnv, seedF    bool
+		auditDisabled         bool
+		want, absentFromError string
 	}{
-		{"policy key set beats seed file", true, false, true, "takes precedence"},
-		{"per-agent env beats policy key", true, true, false, ""},
-		{"seed file, no policy key", false, false, true, ""},
-		{"nothing but a policy key", true, false, false, "takes precedence"},
+		{"policy HMAC beats seed file", "sign_key_env", false, true, false, "audit.sign_key_env GUARD_TEST_POLICY_HMAC takes precedence; remove it", ""},
+		{"policy Ed25519 beats seed file", "sign_ed25519_key_env", false, true, false, "audit.sign_ed25519_key_env GUARD_TEST_POLICY_ED25519 takes precedence; remove it", ""},
+		{"per-agent env beats policy key", "sign_key_env", true, false, false, "", ""},
+		{"seed file, no policy key", "", false, true, false, "", ""},
+		{"nothing but a policy key", "sign_key_env", false, false, false, "audit.sign_key_env GUARD_TEST_POLICY_HMAC takes precedence; remove it", ""},
+		{"no key anywhere", "", false, false, false, "no per-agent Ed25519 signing key found in NOCKGUARD_AGENT_MIRA_ED25519_KEY or a key file from `nockguard keygen --agent mira`", "takes precedence"},
+		{"audit disabled, no key", "", false, false, true, "gateway requires audit.enabled: true", "per-agent"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir, home := t.TempDir(), keygenHome(t)
@@ -106,10 +111,13 @@ func TestGatewayRequiresPerAgentKeyEvenWhenPolicyNamesOne(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			auditCfg := map[string]interface{}{"enabled": true, "path": filepath.Join(dir, "audit.jsonl")}
-			if test.policyKey {
-				t.Setenv("GUARD_TEST_POLICY_HMAC", "test-policy-wide-hmac-key")
+			auditCfg := map[string]interface{}{"enabled": !test.auditDisabled, "path": filepath.Join(dir, "audit.jsonl")}
+			if test.policyKey == "sign_key_env" {
+				t.Setenv("GUARD_TEST_POLICY_HMAC", "hmac-test-value")
 				auditCfg["sign_key_env"] = "GUARD_TEST_POLICY_HMAC"
+			} else if test.policyKey == "sign_"+"ed25519_key_env" {
+				t.Setenv("GUARD_TEST_POLICY_ED25519", seed)
+				auditCfg["sign_ed25519_key_env"] = "GUARD_TEST_POLICY_ED25519"
 			}
 			c := gateway.Config{Listen: "127.0.0.1:0", Resource: "https://guard.example/mcp", Issuer: "https://issuer.example", IntrospectionURL: "https://issuer.example/introspect", IntrospectionAuthHeader: "X-Agent-Token", IntrospectionTokenEnv: "GUARD_TEST_AUTH", Subject: "operator", ClientID: "client", Scope: "mcp", Agent: "mira", Policy: filepath.Join(dir, "policy.yaml"), Upstream: "https://upstream.example/mcp", UpstreamTokenEnv: "GUARD_TEST_UPSTREAM"}
 			b, err := yaml.Marshal(map[string]interface{}{"agents": map[string]interface{}{"mira": map[string]interface{}{"mode": "deny"}}, "audit": auditCfg})
@@ -129,12 +137,18 @@ func TestGatewayRequiresPerAgentKeyEvenWhenPolicyNamesOne(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			err = serveMCPGateway(ctx, path)
+			if err != nil {
+				if _, statErr := os.Stat(auditCfg["path"].(string)); !os.IsNotExist(statErr) {
+					t.Errorf("refused gateway created policy-wide trail: %v", statErr)
+				}
+			}
 			if test.want == "" {
 				if err != nil {
 					t.Fatal(err)
 				}
-			} else if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("got %v, want %s", err, test.want)
+			} else if err == nil || !strings.Contains(err.Error(), test.want) ||
+				(test.absentFromError != "" && strings.Contains(err.Error(), test.absentFromError)) {
+				t.Fatalf("got %v, want %s without %s", err, test.want, test.absentFromError)
 			}
 		})
 	}

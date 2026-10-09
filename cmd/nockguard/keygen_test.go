@@ -528,8 +528,11 @@ func TestObserveBackfillRepublishesMatchingPubThatVerifyWouldReject(t *testing.T
 		t.Fatal(err)
 	}
 	st, err := os.Stat(pubPath)
-	if err != nil || st.Mode().Perm() != 0o644 {
-		t.Fatalf("got mode %v, %v; want republished at 0644", st.Mode().Perm(), err)
+	if err != nil {
+		t.Fatalf("stat republished public key: %v", err)
+	}
+	if st.Mode().Perm() != 0o644 {
+		t.Fatalf("got mode %v; want republished at 0644", st.Mode().Perm())
 	}
 	if got, _, err := policy.ResolveAgentPub("kit"); err != nil || got != hex.EncodeToString(pub) {
 		t.Fatalf("verify side rejects the republished pub: (%q, %v)", got, err)
