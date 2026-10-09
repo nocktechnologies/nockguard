@@ -846,40 +846,66 @@ func AgentAuditPath(basePath, agent string) string {
 // A per-agent key (1 or 3) signs a trail at the agent-specific path
 // (AgentAuditPath). Otherwise AuditorFor falls back to the policy-wide Auditor.
 // A missing key, or an unresolvable home directory, is not an error; a key file
-// that exists but is unsafe, unreadable or empty is.
+// that exists but is unsafe, unreadable or empty is. A policy-named key variable
+// that is unset while a key file exists is also an error: the policy key wins,
+// so the file would otherwise be ignored without a word.
 func (e *Engine) AuditorFor(agent string) (*audit.Auditor, error) {
+	a, _, err := e.AuditorForAgent(agent)
+	return a, err
+}
+
+// AuditorForAgent is AuditorFor plus whether the returned Auditor signs with a
+// per-agent Ed25519 key (cases 1 and 3 above) rather than the policy-wide one.
+func (e *Engine) AuditorForAgent(agent string) (*audit.Auditor, bool, error) {
 	if !ValidAgentName(agent) {
-		return nil, fmt.Errorf("invalid agent name %q: only alphanumerics, hyphens, and dots are allowed", agent)
+		return nil, false, fmt.Errorf("invalid agent name %q: only alphanumerics, hyphens, and dots are allowed", agent)
 	}
 	// Check audit enabled first — no point parsing a key we won't use.
 	if e.config.Audit == nil || !e.config.Audit.Enabled {
-		return audit.New("")
+		a, err := audit.New("")
+		return a, false, err
 	}
-	if os.Getenv(AgentKeyEnvName(agent)) == "" && (e.config.Audit.SignEd25519KeyEnv != "" || e.config.Audit.SignKeyEnv != "") {
-		return e.Auditor()
+	if os.Getenv(AgentKeyEnvName(agent)) == "" {
+		policyEnv := e.config.Audit.SignEd25519KeyEnv
+		if policyEnv == "" {
+			policyEnv = e.config.Audit.SignKeyEnv
+		}
+		if policyEnv != "" {
+			if os.Getenv(policyEnv) == "" {
+				if raw, err := ResolveAgentSeed(agent); err != nil {
+					return nil, false, fmt.Errorf("per-agent signing key for %q: %w", agent, err)
+				} else if raw != "" {
+					return nil, false, fmt.Errorf("policy names signing key variable %s, which is not set, and a key file for %q exists but the policy key takes precedence; set %s or remove the policy line", policyEnv, agent, policyEnv)
+				}
+			}
+			a, err := e.Auditor()
+			return a, false, err
+		}
 	}
 	raw, err := ResolveAgentSeed(agent)
 	if err != nil {
-		return nil, fmt.Errorf("per-agent signing key for %q: %w", agent, err)
+		return nil, false, fmt.Errorf("per-agent signing key for %q: %w", agent, err)
 	}
 	if raw == "" {
-		return e.Auditor()
+		a, err := e.Auditor()
+		return a, false, err
 	}
 	priv, err := audit.PrivateKeyFromHex(raw)
 	if err != nil {
-		return nil, fmt.Errorf("per-agent key for %q: %w", agent, err)
+		return nil, false, fmt.Errorf("per-agent key for %q: %w", agent, err)
 	}
 	path := e.config.Audit.Path
 	if path == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		path = filepath.Join(home, DefaultAuditPath)
 	} else if path, err = expandTilde(path); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return audit.New(AgentAuditPath(path, agent), audit.WithEd25519Key(priv))
+	a, err := audit.New(AgentAuditPath(path, agent), audit.WithEd25519Key(priv))
+	return a, err == nil, err
 }
 
 // SigningKeyEnvNamesFor includes every inherited per-agent signing key, even

@@ -509,3 +509,29 @@ func TestVerifyReportsPublicKeySource(t *testing.T) {
 		t.Errorf("env source: exit %d stdout %s", code, stdout)
 	}
 }
+
+func TestObserveBackfillRepublishesMatchingPubThatVerifyWouldReject(t *testing.T) {
+	home := keygenHome(t)
+	_, pub, err := ensureObserveKey(home, "kit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubPath := policy.AgentPubPath(home, "kit")
+	if err := os.Chmod(pubPath, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(policy.AgentPubKeyEnvName("kit"), "")
+	if _, _, err := policy.ResolveAgentPub("kit"); err == nil {
+		t.Fatal("precondition: a 0666 pub file must be rejected by the verifier")
+	}
+	if _, _, err := ensureObserveKey(home, "kit"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(pubPath)
+	if err != nil || st.Mode().Perm() != 0o644 {
+		t.Fatalf("got mode %v, %v; want republished at 0644", st.Mode().Perm(), err)
+	}
+	if got, _, err := policy.ResolveAgentPub("kit"); err != nil || got != hex.EncodeToString(pub) {
+		t.Fatalf("verify side rejects the republished pub: (%q, %v)", got, err)
+	}
+}

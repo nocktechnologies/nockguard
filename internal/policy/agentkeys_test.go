@@ -328,3 +328,48 @@ func TestAuditorForPolicySigningKeyBeatsSeedFile(t *testing.T) {
 		t.Fatalf("per-agent env key must beat the policy key: %v", err)
 	}
 }
+
+func TestAuditorForUnsetPolicyKeyVarWithSeedFileSaysBoth(t *testing.T) {
+	for _, field := range []string{"sign_ed25519_key_env", "sign_key_env"} {
+		t.Run(field, func(t *testing.T) {
+			seededHome(t, "kit", 0o600)
+			t.Setenv("TEST_POLICY_SIGNING_KEY", "")
+			trail := filepath.Join(t.TempDir(), "audit.jsonl")
+			eng, err := Load(writePolicy(t, "audit:\n  enabled: true\n  path: "+trail+"\n  "+field+": TEST_POLICY_SIGNING_KEY\nagents:\n  kit:\n    allow: [\"*\"]\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, perAgent, err := eng.AuditorForAgent("kit")
+			if err == nil || perAgent {
+				t.Fatalf("got (perAgent=%v, %v), want an error", perAgent, err)
+			}
+			for _, want := range []string{"TEST_POLICY_SIGNING_KEY", "not set", "key file", "precedence"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+
+			// With the variable set the policy key signs, as before.
+			_, polPriv, _ := ed25519.GenerateKey(nil)
+			t.Setenv("TEST_POLICY_SIGNING_KEY", hex.EncodeToString(polPriv.Seed()))
+			a, perAgent, err := eng.AuditorForAgent("kit")
+			if err != nil || perAgent {
+				t.Fatalf("var set: got (perAgent=%v, %v), want the policy-wide auditor", perAgent, err)
+			}
+			a.Close()
+		})
+	}
+
+	t.Run("no seed file keeps the plain not-set error", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv(AgentKeyEnvName("kit"), "")
+		t.Setenv("TEST_POLICY_SIGNING_KEY", "")
+		eng, err := Load(writePolicy(t, "audit:\n  enabled: true\n  path: "+filepath.Join(t.TempDir(), "audit.jsonl")+"\n  sign_key_env: TEST_POLICY_SIGNING_KEY\nagents:\n  kit:\n    allow: [\"*\"]\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := eng.AuditorFor("kit"); err == nil || strings.Contains(err.Error(), "key file") || !strings.Contains(err.Error(), "is not set") {
+			t.Fatalf("got %v, want the plain not-set error", err)
+		}
+	})
+}

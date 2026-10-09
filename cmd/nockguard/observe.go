@@ -176,15 +176,17 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 	return priv, pub, nil
 }
 
-// ensurePubFile publishes name only when it is missing or does not hold pubHex,
-// so a matching .pub is never rewritten. The caller holds the agent's key lock
-// and pubHex derives from the seed read under it, so this can never replace a
-// rotated pub with one from an older seed. Best-effort, like the original backfill.
+// ensurePubFile publishes name unless it already holds pubHex as a regular file
+// owned by us that is not group/other writable (what verify accepts). The caller
+// holds the agent's key lock and pubHex derives from the seed read under it, so
+// this can never replace a rotated pub with one from an older seed. Best-effort,
+// like the original backfill.
 func ensurePubFile(keyDir *os.File, name, pubHex string) {
 	if fd, err := unix.Openat(int(keyDir.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0); err == nil {
 		f := os.NewFile(uintptr(fd), name)
 		var st unix.Stat_t
-		if unix.Fstat(fd, &st) == nil && st.Mode&unix.S_IFMT == unix.S_IFREG {
+		// Same bar as policy.ResolveAgentPub: a file verify would reject is republished.
+		if unix.Fstat(fd, &st) == nil && st.Mode&unix.S_IFMT == unix.S_IFREG && st.Uid == uint32(os.Geteuid()) && st.Mode&0o022 == 0 {
 			if b, err := io.ReadAll(io.LimitReader(f, 4096)); err == nil && strings.TrimSpace(string(b)) == pubHex {
 				_ = f.Close()
 				return
