@@ -339,7 +339,7 @@ func TestAuditorForUnsetPolicyKeyVarWithSeedFileSaysBoth(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, perAgent, err := eng.AuditorForAgent("kit")
+			_, perAgent, err := eng.AuditorForAgent("kit", false)
 			if err == nil || perAgent {
 				t.Fatalf("got (perAgent=%v, %v), want an error", perAgent, err)
 			}
@@ -352,7 +352,7 @@ func TestAuditorForUnsetPolicyKeyVarWithSeedFileSaysBoth(t *testing.T) {
 			// With the variable set the policy key signs, as before.
 			_, polPriv, _ := ed25519.GenerateKey(nil)
 			t.Setenv("TEST_POLICY_SIGNING_KEY", hex.EncodeToString(polPriv.Seed()))
-			a, perAgent, err := eng.AuditorForAgent("kit")
+			a, perAgent, err := eng.AuditorForAgent("kit", false)
 			if err != nil || perAgent {
 				t.Fatalf("var set: got (perAgent=%v, %v), want the policy-wide auditor", perAgent, err)
 			}

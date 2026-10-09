@@ -850,13 +850,14 @@ func AgentAuditPath(basePath, agent string) string {
 // that is unset while a key file exists is also an error: the policy key wins,
 // so the file would otherwise be ignored without a word.
 func (e *Engine) AuditorFor(agent string) (*audit.Auditor, error) {
-	a, _, err := e.AuditorForAgent(agent)
+	a, _, err := e.AuditorForAgent(agent, false)
 	return a, err
 }
 
 // AuditorForAgent is AuditorFor plus whether the returned Auditor signs with a
 // per-agent Ed25519 key (cases 1 and 3 above) rather than the policy-wide one.
-func (e *Engine) AuditorForAgent(agent string) (*audit.Auditor, bool, error) {
+// When requirePerAgent is true, it refuses before opening a policy-wide trail.
+func (e *Engine) AuditorForAgent(agent string, requirePerAgent bool) (*audit.Auditor, bool, error) {
 	if !ValidAgentName(agent) {
 		return nil, false, fmt.Errorf("invalid agent name %q: only alphanumerics, hyphens, and dots are allowed", agent)
 	}
@@ -871,6 +872,13 @@ func (e *Engine) AuditorForAgent(agent string) (*audit.Auditor, bool, error) {
 			policyEnv = e.config.Audit.SignKeyEnv
 		}
 		if policyEnv != "" {
+			if requirePerAgent {
+				key := "sign_key_env"
+				if e.config.Audit.SignEd25519KeyEnv != "" {
+					key = "sign_ed25519_key_env"
+				}
+				return nil, false, fmt.Errorf("policy audit.%s %s takes precedence; remove it for a per-agent audit", key, policyEnv)
+			}
 			if os.Getenv(policyEnv) == "" {
 				if raw, err := ResolveAgentSeed(agent); err != nil {
 					return nil, false, fmt.Errorf("per-agent signing key for %q: %w", agent, err)
@@ -887,6 +895,9 @@ func (e *Engine) AuditorForAgent(agent string) (*audit.Auditor, bool, error) {
 		return nil, false, fmt.Errorf("per-agent signing key for %q: %w", agent, err)
 	}
 	if raw == "" {
+		if requirePerAgent {
+			return nil, false, fmt.Errorf("no per-agent Ed25519 signing key found in %s or a key file from `nockguard keygen --agent %s`", AgentKeyEnvName(agent), agent)
+		}
 		a, err := e.Auditor()
 		return a, false, err
 	}

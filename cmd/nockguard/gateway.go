@@ -69,16 +69,13 @@ func serveMCPGateway(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	auditor, perAgent, err := engine.AuditorForAgent(c.Agent)
+	auditor, _, err := engine.AuditorForAgent(c.Agent, true)
 	if err != nil {
 		return err
 	}
 	defer auditor.Close()
 	if !auditor.Enabled() {
 		return fmt.Errorf("gateway requires audit.enabled: true")
-	}
-	if !perAgent {
-		return fmt.Errorf("gateway requires the per-agent Ed25519 signing key in %s or a key file from `nockguard keygen --agent %s`; the policy's sign_key_env/sign_ed25519_key_env takes precedence; remove it for the gateway", policy.AgentKeyEnvName(c.Agent), c.Agent)
 	}
 	forwarder, err := engine.Forwarder()
 	if err != nil {
