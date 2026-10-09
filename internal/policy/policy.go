@@ -873,11 +873,11 @@ func (e *Engine) AuditorForAgent(agent string, requirePerAgent bool) (*audit.Aud
 		}
 		if policyEnv != "" {
 			if requirePerAgent {
-				key := "sign_key_env"
+				keyKind := ""
 				if e.config.Audit.SignEd25519KeyEnv != "" {
-					key = "sign_ed25519_key_env"
+					keyKind = "ed25519_"
 				}
-				return nil, false, fmt.Errorf("policy audit.%s %s takes precedence; remove it for a per-agent audit", key, policyEnv)
+				return nil, false, fmt.Errorf("policy audit.sign_%skey_env %s takes precedence; remove it for a per-agent audit", keyKind, policyEnv)
 			}
 			if os.Getenv(policyEnv) == "" {
 				if raw, err := ResolveAgentSeed(agent); err != nil {

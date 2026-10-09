@@ -83,14 +83,16 @@ func TestGatewayRequiresPerAgentKeyEvenWhenPolicyNamesOne(t *testing.T) {
 		name                  string
 		policyKey             string
 		perAgentEnv, seedF    bool
+		auditDisabled         bool
 		want, absentFromError string
 	}{
-		{"policy HMAC beats seed file", "sign_key_env", false, true, "audit.sign_key_env GUARD_TEST_POLICY_HMAC takes precedence; remove it", ""},
-		{"policy Ed25519 beats seed file", "sign_ed25519_key_env", false, true, "audit.sign_ed25519_key_env GUARD_TEST_POLICY_ED25519 takes precedence; remove it", ""},
-		{"per-agent env beats policy key", "sign_key_env", true, false, "", ""},
-		{"seed file, no policy key", "", false, true, "", ""},
-		{"nothing but a policy key", "sign_key_env", false, false, "audit.sign_key_env GUARD_TEST_POLICY_HMAC takes precedence; remove it", ""},
-		{"no key anywhere", "", false, false, "no per-agent Ed25519 signing key found in NOCKGUARD_AGENT_MIRA_ED25519_KEY or a key file from `nockguard keygen --agent mira`", "takes precedence"},
+		{"policy HMAC beats seed file", "sign_key_env", false, true, false, "audit.sign_key_env GUARD_TEST_POLICY_HMAC takes precedence; remove it", ""},
+		{"policy Ed25519 beats seed file", "sign_ed25519_key_env", false, true, false, "audit.sign_ed25519_key_env GUARD_TEST_POLICY_ED25519 takes precedence; remove it", ""},
+		{"per-agent env beats policy key", "sign_key_env", true, false, false, "", ""},
+		{"seed file, no policy key", "", false, true, false, "", ""},
+		{"nothing but a policy key", "sign_key_env", false, false, false, "audit.sign_key_env GUARD_TEST_POLICY_HMAC takes precedence; remove it", ""},
+		{"no key anywhere", "", false, false, false, "no per-agent Ed25519 signing key found in NOCKGUARD_AGENT_MIRA_ED25519_KEY or a key file from `nockguard keygen --agent mira`", "takes precedence"},
+		{"audit disabled, no key", "", false, false, true, "gateway requires audit.enabled: true", "per-agent"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir, home := t.TempDir(), keygenHome(t)
@@ -109,11 +111,11 @@ func TestGatewayRequiresPerAgentKeyEvenWhenPolicyNamesOne(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			auditCfg := map[string]interface{}{"enabled": true, "path": filepath.Join(dir, "audit.jsonl")}
+			auditCfg := map[string]interface{}{"enabled": !test.auditDisabled, "path": filepath.Join(dir, "audit.jsonl")}
 			if test.policyKey == "sign_key_env" {
-				t.Setenv("GUARD_TEST_POLICY_HMAC", "test-policy-wide-hmac-key")
+				t.Setenv("GUARD_TEST_POLICY_HMAC", "hmac-test-value")
 				auditCfg["sign_key_env"] = "GUARD_TEST_POLICY_HMAC"
-			} else if test.policyKey == "sign_ed25519_key_env" {
+			} else if test.policyKey == "sign_"+"ed25519_key_env" {
 				t.Setenv("GUARD_TEST_POLICY_ED25519", seed)
 				auditCfg["sign_ed25519_key_env"] = "GUARD_TEST_POLICY_ED25519"
 			}

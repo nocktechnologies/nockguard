@@ -69,13 +69,16 @@ func serveMCPGateway(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	auditor, _, err := engine.AuditorForAgent(c.Agent, true)
+	auditor, perAgent, err := engine.AuditorForAgent(c.Agent, true)
 	if err != nil {
 		return err
 	}
 	defer auditor.Close()
 	if !auditor.Enabled() {
 		return fmt.Errorf("gateway requires audit.enabled: true")
+	}
+	if !perAgent {
+		return fmt.Errorf("gateway requires a per-agent Ed25519 signing key")
 	}
 	forwarder, err := engine.Forwarder()
 	if err != nil {
