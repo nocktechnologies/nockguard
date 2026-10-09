@@ -4,8 +4,16 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-09
+
 ### Added
-- `examples/exfil-demo/`: a self-contained poisoned-MCP-server demo. `bash examples/exfil-demo/run.sh` shows an agent following an injected instruction to read and email a fake SSH key, the starter policy blocking it, and `nockguard verify` on the trail; `--unprotected` is the negative control. No product code changed.
+- Offline proof for Live Wall incident exports. Start the Wall with `--proof-signing-key-env <ENV>` and it offers a PROOF download for an Ed25519 trail. The Wall verifies the checkpointed trail, selects the requested rows, and signs a receipt that binds the filters, row indexes, the chain links before each row, and the signed head. No private key is loaded unless the flag is given.
+- `nockguard verify --export <file>` checks a proof file with the public key alone: the receipt signature, every row's signature, and, for a time-range export, that no row inside the window is missing. Severity, decision and text filtered exports verify row integrity only and say "not a complete window". A requested end time later than the capture time is clamped to the last fully elapsed second before capture, and the verifier rejects a receipt whose upper bound is past that limit. See `docs/verifying-the-trail.md`.
+- `examples/exfil-demo/`: a self-contained poisoned MCP server demo. `bash examples/exfil-demo/run.sh` shows an agent told to read and email a fake SSH key, the starter policy blocking it, and `nockguard verify` on the resulting trail. `--unprotected` runs the same scenario without the policy.
+
+### Fixed
+- `--help` and `-h` now print usage and exit 0 for every subcommand, before any subcommand runs. Before this, `nockguard init --help` ran `init` and wrote `~/.nockguard/policy.yaml`, and `nockguard audit verify --help` returned an error.
+- Audit rows are timestamped after the append lock is taken, so row times follow file order. This keeps a time-window proof from missing a row that was stamped before the capture but written after it.
 
 ## [0.3.0] - 2026-10-01
 
