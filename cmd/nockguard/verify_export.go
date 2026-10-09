@@ -27,7 +27,7 @@ func runVerifyExport(args []string) int {
 		}
 		*pubEnv = policy.AgentPubKeyEnvName(*agent)
 	}
-	pubHex, kerr := requirePubHex(*pubEnv, *agent)
+	pubHex, keySource, kerr := requirePubHex(*pubEnv, *agent)
 	if kerr != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", kerr)
 		return 1
@@ -58,6 +58,7 @@ func runVerifyExport(args []string) int {
 		return 2
 	}
 	fmt.Printf("OK — %d exported rows verified against the signed chain head\n", n)
+	fmt.Printf("public key: %s\n", keySource)
 	var proof audit.ExportProof
 	_ = json.Unmarshal(data, &proof) // already parsed and checked by VerifyExport
 	fmt.Printf("Scope: agent=%q captured_at=%q since=%q until=%q severity=%q decision=%q q=%q\n", proof.Agent, proof.CapturedAt, proof.Filters.Since, proof.Filters.Until, proof.Filters.Severity, proof.Filters.Decision, proof.Filters.Query)

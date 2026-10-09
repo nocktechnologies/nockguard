@@ -3,10 +3,13 @@ package main
 import (
 	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/policy"
 )
@@ -309,5 +312,200 @@ func TestObserveBackfillsPubFileForExistingSeed(t *testing.T) {
 	}
 	if _, err := os.Stat(pubPath); err != nil {
 		t.Errorf("existing seed should get its .pub backfilled: %v", err)
+	}
+}
+
+func openKeyDirForTest(t *testing.T, home string) *os.File {
+	t.Helper()
+	if err := os.MkdirAll(policy.AgentKeyDir(home), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	d, err := os.Open(policy.AgentKeyDir(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	return d
+}
+
+func newKeyPairHex(t *testing.T) (seedHex, pubHex string) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hex.EncodeToString(priv.Seed()), hex.EncodeToString(pub)
+}
+
+func requireBlocked(t *testing.T, what string, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+		t.Fatalf("%s finished while the agent key lock was held", what)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func requireFinishes(t *testing.T, what string, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s did not finish after the agent key lock was released", what)
+	}
+}
+
+// assertWaitsForAgentKeyLock holds the agent's key lock, starts op, and checks op
+// does not finish until the lock is released.
+func assertWaitsForAgentKeyLock(t *testing.T, home, what string, op func() error) {
+	t.Helper()
+	unlock, err := lockAgentKeys(openKeyDirForTest(t, home), "kit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := op(); err != nil {
+			t.Errorf("%s: %v", what, err)
+		}
+	}()
+	requireBlocked(t, what, done)
+	unlock()
+	requireFinishes(t, what, done)
+}
+
+func TestKeygenForceWaitsForAgentKeyLock(t *testing.T) {
+	home := keygenHome(t)
+	seed, pub := newKeyPairHex(t)
+	assertWaitsForAgentKeyLock(t, home, "keygen --force", func() error {
+		_, err := writeKeyFiles(home, "kit", seed, pub, true)
+		return err
+	})
+	if fi, err := os.Stat(filepath.Join(policy.AgentKeyDir(home), "kit.lock")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("lock file: %v, %v; want mode 0600", fi, err)
+	}
+}
+
+func TestObserveKeyWaitsForAgentKeyLock(t *testing.T) {
+	home := keygenHome(t)
+	if _, _, err := ensureObserveKey(home, "kit"); err != nil {
+		t.Fatal(err)
+	}
+	assertWaitsForAgentKeyLock(t, home, "observe seed read", func() error {
+		_, _, err := ensureObserveKey(home, "kit")
+		return err
+	})
+}
+
+func TestConcurrentKeygenForceKeepsSeedAndPubInStep(t *testing.T) {
+	home := keygenHome(t)
+	for round := 0; round < 20; round++ {
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			seed, pub := newKeyPairHex(t)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, err := writeKeyFiles(home, "kit", seed, pub, true); err != nil {
+					t.Errorf("writeKeyFiles: %v", err)
+				}
+			}()
+		}
+		wg.Wait()
+		seedB, err := os.ReadFile(policy.AgentSeedPath(home, "kit"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pubB, err := os.ReadFile(policy.AgentPubPath(home, "kit"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		priv, _, err := loadSeedHex("kit", string(seedB))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := hex.EncodeToString(priv.Public().(ed25519.PublicKey)); got != string(pubB) {
+			t.Fatalf("round %d: published pub %s does not belong to the persisted seed (%s)", round, pubB, got)
+		}
+	}
+}
+
+func TestObserveBackfillKeepsMatchingPubAndRepairsMismatch(t *testing.T) {
+	home := keygenHome(t)
+	_, pub, err := ensureObserveKey(home, "kit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubPath := policy.AgentPubPath(home, "kit")
+	before, err := os.Stat(pubPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ensureObserveKey(home, "kit"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(pubPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Error("a .pub that already matches the seed must not be rewritten")
+	}
+
+	_, stale := newKeyPairHex(t)
+	if err := os.WriteFile(pubPath, []byte(stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ensureObserveKey(home, "kit"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(pubPath)
+	if err != nil || string(got) != hex.EncodeToString(pub) {
+		t.Errorf("mismatched .pub must be repaired from the seed: got %q, %v", got, err)
+	}
+}
+
+func TestRequirePubHexSaysEmptyForEmptyPubFile(t *testing.T) {
+	home := keygenHome(t)
+	t.Setenv(policy.AgentPubKeyEnvName("kit"), "")
+	openKeyDirForTest(t, home)
+	if err := os.WriteFile(policy.AgentPubPath(home, "kit"), []byte(" \n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := requirePubHex(policy.AgentPubKeyEnvName("kit"), "kit")
+	if err == nil || !strings.Contains(err.Error(), "empty") || strings.Contains(err.Error(), "does not exist") || !strings.Contains(err.Error(), policy.AgentPubPath(home, "kit")) {
+		t.Fatalf("got %v, want an error naming the path and saying the file is empty", err)
+	}
+}
+
+func TestVerifyReportsPublicKeySource(t *testing.T) {
+	home := keygenHome(t)
+	dir := t.TempDir()
+	_, pubHex := writeEd25519Trail(t, dir, "kit")
+	pubPath := policy.AgentPubPath(home, "kit")
+	openKeyDirForTest(t, home)
+	if err := os.WriteFile(pubPath, []byte(pubHex), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv(policy.AgentPubKeyEnvName("kit"), "")
+	for name, args := range map[string][]string{
+		"verify":     {"verify", "--agent", "kit", "--audit-dir", dir},
+		"verify all": {"verify", "--all", "--audit-dir", dir},
+	} {
+		if code, stdout, stderr := runCommandForTest(t, args...); code != 0 || !strings.Contains(stdout, "public key: "+pubPath) {
+			t.Errorf("%s: exit %d, want the .pub path reported\nstdout:\n%s\nstderr:\n%s", name, code, stdout, stderr)
+		}
+	}
+	code, stdout, _ := runCommandForTest(t, "verify", "--agent", "kit", "--audit-dir", dir, "--json")
+	var res verifyResult
+	if err := json.Unmarshal([]byte(stdout), &res); code != 0 || err != nil || res.PubKeySource != pubPath {
+		t.Errorf("--json must carry public_key_source=%s; exit %d, err %v, stdout %s", pubPath, code, err, stdout)
+	}
+
+	t.Setenv(policy.AgentPubKeyEnvName("kit"), pubHex)
+	if code, stdout, _ := runCommandForTest(t, "verify", "--agent", "kit", "--audit-dir", dir); code != 0 || !strings.Contains(stdout, "public key: "+policy.AgentPubKeyEnvName("kit")) {
+		t.Errorf("env source: exit %d stdout %s", code, stdout)
 	}
 }

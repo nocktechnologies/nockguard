@@ -27,34 +27,44 @@ func AgentPubPath(home, agent string) string {
 // ResolveAgentSeed returns the agent's hex signing seed. The env var
 // (AgentKeyEnvName) wins; otherwise ~/.nockguard/keys/<agent>.ed25519 is used, but
 // only if it is a regular, non-symlink file owned by the current user with no
-// group/other permission bits. An unsafe file is an error, never a quiet fallback
-// to a weaker signing mode. An empty result with a nil error means neither exists.
+// group/other permission bits. An unsafe, unreadable or empty file is an error,
+// never a quiet fallback to a weaker signing mode. An empty result with a nil
+// error means no key is configured, including when the home directory cannot be
+// resolved (there is then no key file to find).
 func ResolveAgentSeed(agent string) (string, error) {
-	return resolveAgentKey(AgentKeyEnvName(agent), AgentSeedPath, agent, true)
+	v, _, err := resolveAgentKey(AgentKeyEnvName(agent), AgentSeedPath, agent, true)
+	return v, err
 }
 
 // ResolveAgentPub is the verifier-side counterpart of ResolveAgentSeed: the env
 // var (AgentPubKeyEnvName) wins, then ~/.nockguard/keys/<agent>.pub, which must be
 // a regular, non-symlink file owned by the current user and not group/other
-// writable. An empty result with a nil error means neither exists.
-func ResolveAgentPub(agent string) (string, error) {
+// writable. source names where a non-empty key came from: the env var name or the
+// file path. An empty key with a nil error means neither exists.
+func ResolveAgentPub(agent string) (key, source string, err error) {
 	return resolveAgentKey(AgentPubKeyEnvName(agent), AgentPubPath, agent, false)
 }
 
-func resolveAgentKey(envName string, path func(home, agent string) string, agent string, secret bool) (string, error) {
+func resolveAgentKey(envName string, path func(home, agent string) string, agent string, secret bool) (key, source string, err error) {
 	if v := os.Getenv(envName); v != "" {
-		return v, nil
+		return v, envName, nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("cannot locate key file for %q: %w", agent, err)
+	home, herr := os.UserHomeDir()
+	if herr != nil {
+		return "", "", nil
 	}
-	return readAgentKeyFile(path(home, agent), secret)
+	p := path(home, agent)
+	key, err = readAgentKeyFile(p, secret)
+	if key == "" || err != nil {
+		return "", "", err
+	}
+	return key, p, nil
 }
 
 // readAgentKeyFile reads a hex key file through a no-follow descriptor. secret
 // files must have no group/other bits; public files must not be group/other
-// writable. A missing file or key directory yields ("", nil).
+// writable. A missing file or key directory yields ("", nil); a file that exists
+// but is empty is an error.
 func readAgentKeyFile(path string, secret bool) (string, error) {
 	dir := filepath.Dir(path)
 	var dst unix.Stat_t
@@ -74,7 +84,8 @@ func readAgentKeyFile(path string, secret bool) (string, error) {
 		return "", fmt.Errorf("key directory %s permissions = %o: group/other writable", dir, mode)
 	}
 
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	// O_NONBLOCK: opening a FIFO read-only would otherwise hang before the regular-file check.
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if errors.Is(err, unix.ENOENT) {
 		return "", nil
 	}
@@ -107,5 +118,9 @@ func readAgentKeyFile(path string, secret bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(b)), nil
+	key := strings.TrimSpace(string(b))
+	if key == "" {
+		return "", fmt.Errorf("key file %s is empty", path)
+	}
+	return key, nil
 }

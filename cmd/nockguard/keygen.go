@@ -120,6 +120,12 @@ func writeKeyFiles(home, name, seedHex, pubHex string, force bool) (replaced boo
 	}
 	defer keyDir.Close()
 
+	unlock, err := lockAgentKeys(keyDir, name)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+
 	seedName, pubName := name+".ed25519", name+".pub"
 	for _, n := range []string{seedName, pubName} {
 		path := filepath.Join(policy.AgentKeyDir(home), n)
@@ -146,6 +152,45 @@ func writeKeyFiles(home, name, seedHex, pubHex string, force bool) (replaced boo
 		return false, fmt.Errorf("writing %s: %w", pubName, err)
 	}
 	return replaced, nil
+}
+
+// lockAgentKeys takes an exclusive flock on <name>.lock in the validated key
+// directory and returns the release func. Every writer of an agent's seed/pub
+// pair (keygen, observe's create and backfill) holds it across validation and
+// publication, so two writers cannot interleave into a pub that does not match
+// the seed. The lock file is opened no-follow and non-blocking (a FIFO planted at
+// the name cannot hang the open) and must be a regular file we own.
+func lockAgentKeys(keyDir *os.File, name string) (func(), error) {
+	lockName := name + ".lock"
+	fd, err := unix.Openat(int(keyDir.Fd()), lockName, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("opening key lock %s: %w", lockName, err)
+	}
+	f := os.NewFile(uintptr(fd), lockName)
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("checking key lock %s: %w", lockName, err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != uint32(os.Geteuid()) {
+		_ = f.Close()
+		return nil, fmt.Errorf("key lock %s is not a regular file owned by the current user", lockName)
+	}
+	if err := unix.Fchmod(fd, 0o600); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("setting key lock permissions: %w", err)
+	}
+	for {
+		err = unix.Flock(fd, unix.LOCK_EX)
+		if !errors.Is(err, unix.EINTR) {
+			break
+		}
+	}
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("locking %s: %w", lockName, err)
+	}
+	return func() { _ = f.Close() }, nil
 }
 
 // publishKeyFile writes data to dir/name via a complete same-directory temp file
@@ -209,24 +254,25 @@ func publishKeyFile(dir *os.File, name string, data []byte, perm uint32, replace
 	return nil
 }
 
-// requirePubHex returns the hex public key a verifier should use. pubEnv is the
-// env var the caller settled on; when it is the agent's canonical one (not an
-// explicit --ed25519-pub-env override), an unset var falls back to the agent's
-// ~/.nockguard/keys/<agent>.pub. Not finding a key is an error naming where it looked.
-func requirePubHex(pubEnv, agent string) (string, error) {
+// requirePubHex returns the hex public key a verifier should use and where it came
+// from (an env var name or a file path). pubEnv is the env var the caller settled
+// on; when it is the agent's canonical one (not an explicit --ed25519-pub-env
+// override), an unset var falls back to the agent's ~/.nockguard/keys/<agent>.pub.
+// Not finding a key is an error naming where it looked.
+func requirePubHex(pubEnv, agent string) (hexKey, source string, err error) {
 	if agent == "" || pubEnv != policy.AgentPubKeyEnvName(agent) {
 		if v := os.Getenv(pubEnv); v != "" {
-			return v, nil
+			return v, pubEnv, nil
 		}
-		return "", fmt.Errorf("%s is not set in the environment", pubEnv)
+		return "", "", fmt.Errorf("%s is not set in the environment", pubEnv)
 	}
-	v, err := policy.ResolveAgentPub(agent)
+	v, source, err := policy.ResolveAgentPub(agent)
 	if err != nil || v != "" {
-		return v, err
+		return v, source, err
 	}
 	hint := ""
 	if home, herr := os.UserHomeDir(); herr == nil {
 		hint = fmt.Sprintf(" and %s does not exist (create it with `nockguard keygen --agent %s`)", policy.AgentPubPath(home, agent), agent)
 	}
-	return "", fmt.Errorf("%s is not set in the environment%s", pubEnv, hint)
+	return "", "", fmt.Errorf("%s is not set in the environment%s", pubEnv, hint)
 }

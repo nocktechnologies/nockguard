@@ -835,11 +835,18 @@ func AgentAuditPath(basePath, agent string) string {
 	return filepath.Join(dir, safeAgent+"."+base)
 }
 
-// AuditorFor builds an Auditor for a specific agent. When the agent has its own
-// Ed25519 key set via the env var returned by AgentKeyEnvName (or, when that is
-// unset, in ~/.nockguard/keys/<agent>.ed25519; see ResolveAgentSeed), that key is
-// used and the trail is written to an agent-specific path (AgentAuditPath). When no
-// per-agent key is set, AuditorFor falls back to the policy-wide Auditor.
+// AuditorFor builds an Auditor for a specific agent. Signing key precedence:
+//
+//  1. the per-agent env var returned by AgentKeyEnvName;
+//  2. an explicitly configured policy signing key (audit.sign_ed25519_key_env or
+//     audit.sign_key_env), so a key file left by an earlier zero-config observe
+//     run cannot silently override what the policy names;
+//  3. ~/.nockguard/keys/<agent>.ed25519 (see ResolveAgentSeed).
+//
+// A per-agent key (1 or 3) signs a trail at the agent-specific path
+// (AgentAuditPath). Otherwise AuditorFor falls back to the policy-wide Auditor.
+// A missing key, or an unresolvable home directory, is not an error; a key file
+// that exists but is unsafe, unreadable or empty is.
 func (e *Engine) AuditorFor(agent string) (*audit.Auditor, error) {
 	if !ValidAgentName(agent) {
 		return nil, fmt.Errorf("invalid agent name %q: only alphanumerics, hyphens, and dots are allowed", agent)
@@ -847,6 +854,9 @@ func (e *Engine) AuditorFor(agent string) (*audit.Auditor, error) {
 	// Check audit enabled first — no point parsing a key we won't use.
 	if e.config.Audit == nil || !e.config.Audit.Enabled {
 		return audit.New("")
+	}
+	if os.Getenv(AgentKeyEnvName(agent)) == "" && (e.config.Audit.SignEd25519KeyEnv != "" || e.config.Audit.SignKeyEnv != "") {
+		return e.Auditor()
 	}
 	raw, err := ResolveAgentSeed(agent)
 	if err != nil {

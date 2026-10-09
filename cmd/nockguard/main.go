@@ -652,6 +652,7 @@ func parseCommand(cmd string) []string {
 type verifyResult struct {
 	Verdict         string `json:"verdict"`
 	AuditPath       string `json:"audit_path,omitempty"`
+	PubKeySource    string `json:"public_key_source,omitempty"`
 	EntriesVerified int    `json:"entries_verified"`
 	Error           string `json:"error,omitempty"`
 }
@@ -670,6 +671,7 @@ type verifyTrailResult struct {
 	Agent           string `json:"agent"`
 	Path            string `json:"path"`
 	Status          string `json:"status"`
+	PubKeySource    string `json:"public_key_source,omitempty"`
 	EntriesVerified int    `json:"entries_verified,omitempty"`
 	Error           string `json:"error,omitempty"`
 }
@@ -721,7 +723,7 @@ func verifyAllAgents(auditDir string, jsonOutput bool) int {
 			continue
 		}
 		envName := policy.AgentPubKeyEnvName(agent)
-		pubHex, kerr := requirePubHex(envName, agent)
+		pubHex, keySource, kerr := requirePubHex(envName, agent)
 		if kerr != nil {
 			msg := kerr.Error()
 			if !jsonOutput {
@@ -745,14 +747,14 @@ func verifyAllAgents(auditDir string, jsonOutput bool) int {
 			if !jsonOutput {
 				fmt.Printf("  [TAMPER] %-18s %v\n", agent, verr)
 			}
-			results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: "TAMPERED", EntriesVerified: n, Error: verr.Error()})
+			results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: "TAMPERED", PubKeySource: keySource, EntriesVerified: n, Error: verr.Error()})
 			tampered++
 			continue
 		}
 		if !jsonOutput {
-			fmt.Printf("  [OK]     %-18s %d entries, chain intact\n", agent, n)
+			fmt.Printf("  [OK]     %-18s %d entries, chain intact (public key: %s)\n", agent, n, keySource)
 		}
-		results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: "PROTECTED", EntriesVerified: n})
+		results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: "PROTECTED", PubKeySource: keySource, EntriesVerified: n})
 		intact++
 	}
 	verdict := "PROTECTED"
@@ -908,11 +910,13 @@ func runAudit(args []string) int {
 	}
 
 	var (
-		n   int
-		err error
+		n         int
+		err       error
+		keySource string
 	)
 	if pubEnv != "" {
-		pubHex, kerr := requirePubHex(pubEnv, agentName)
+		pubHex, src, kerr := requirePubHex(pubEnv, agentName)
+		keySource = src
 		if kerr != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", kerr)
 			return 1
@@ -941,9 +945,12 @@ func runAudit(args []string) int {
 		return 2
 	}
 	if jsonOutput {
-		writeJSON(verifyResult{Verdict: "PROTECTED", AuditPath: auditPath, EntriesVerified: n})
+		writeJSON(verifyResult{Verdict: "PROTECTED", AuditPath: auditPath, PubKeySource: keySource, EntriesVerified: n})
 	} else {
 		fmt.Printf("OK — %d entries verified, hash chain intact: %s\n", n, auditPath)
+		if keySource != "" {
+			fmt.Printf("public key: %s\n", keySource)
+		}
 		fmt.Println("VERDICT: PROTECTED")
 	}
 	return 0
@@ -1104,7 +1111,7 @@ func runEvidence(args []string) int {
 		Agent:      agentName,
 	}
 	if pubEnv != "" {
-		pubHex, kerr := requirePubHex(pubEnv, agentName)
+		pubHex, _, kerr := requirePubHex(pubEnv, agentName)
 		if kerr != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", kerr)
 			return 1

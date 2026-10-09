@@ -124,6 +124,15 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 	}
 	defer keyDir.Close()
 
+	// Hold the per-agent lock from the first read through the .pub publication so
+	// a concurrent `keygen --force` cannot rotate the seed between our read and
+	// our backfill.
+	unlock, err := lockAgentKeys(keyDir, agent)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer unlock()
+
 	keyName := agent + ".ed25519"
 	keyPath := policy.AgentSeedPath(home, agent)
 	// Reuse an existing key if present. The directory-relative Lstat and
@@ -133,8 +142,9 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 	} else if exists {
 		priv, pub, lerr := loadSeedHex(keyPath, string(seedHex))
 		if lerr == nil {
-			// Keys created by an earlier release have no <agent>.pub; backfill it.
-			_ = publishKeyFile(keyDir, agent+".pub", []byte(hex.EncodeToString(pub)), 0o644, true)
+			// Keys created by an earlier release have no <agent>.pub; backfill it,
+			// and repair one that no longer matches the seed.
+			ensurePubFile(keyDir, agent+".pub", hex.EncodeToString(pub))
 		}
 		return priv, pub, lerr
 	}
@@ -164,6 +174,25 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 	// it by name. Its absence is not fatal — the banner already prints the hex key.
 	_ = publishKeyFile(keyDir, agent+".pub", []byte(hex.EncodeToString(pub)), 0o644, true)
 	return priv, pub, nil
+}
+
+// ensurePubFile publishes name only when it is missing or does not hold pubHex,
+// so a matching .pub is never rewritten. The caller holds the agent's key lock
+// and pubHex derives from the seed read under it, so this can never replace a
+// rotated pub with one from an older seed. Best-effort, like the original backfill.
+func ensurePubFile(keyDir *os.File, name, pubHex string) {
+	if fd, err := unix.Openat(int(keyDir.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0); err == nil {
+		f := os.NewFile(uintptr(fd), name)
+		var st unix.Stat_t
+		if unix.Fstat(fd, &st) == nil && st.Mode&unix.S_IFMT == unix.S_IFREG {
+			if b, err := io.ReadAll(io.LimitReader(f, 4096)); err == nil && strings.TrimSpace(string(b)) == pubHex {
+				_ = f.Close()
+				return
+			}
+		}
+		_ = f.Close()
+	}
+	_ = publishKeyFile(keyDir, name, []byte(pubHex), 0o644, true)
 }
 
 // openOrCreateObserveDir creates one state-path component when absent, then
@@ -271,7 +300,7 @@ func readObserveKey(dirFD int, name string) ([]byte, bool, error) {
 		return nil, true, fmt.Errorf("%s is not a regular file", name)
 	}
 
-	fd, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, true, err
 	}
