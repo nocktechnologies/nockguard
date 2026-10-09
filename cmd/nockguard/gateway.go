@@ -57,8 +57,12 @@ func serveMCPGateway(ctx context.Context, path string) error {
 	if !engine.HasPolicyFor(c.Agent) {
 		return fmt.Errorf("configured agent has no policy")
 	}
-	if os.Getenv(policy.AgentKeyEnvName(c.Agent)) == "" {
-		return fmt.Errorf("gateway requires the per-agent Ed25519 signing key in %s", policy.AgentKeyEnvName(c.Agent))
+	seed, err := policy.ResolveAgentSeed(c.Agent)
+	if err != nil {
+		return err
+	}
+	if seed == "" {
+		return fmt.Errorf("gateway requires the per-agent Ed25519 signing key in %s or a key file from `nockguard keygen --agent %s`", policy.AgentKeyEnvName(c.Agent), c.Agent)
 	}
 	validator, err := engine.ValidatorFor(c.Agent)
 	if err != nil {

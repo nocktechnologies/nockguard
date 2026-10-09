@@ -86,6 +86,7 @@ func TestVerifyCommandMissingKeyExit1(t *testing.T) {
 	dir := t.TempDir()
 	_, _ = writeEd25519Trail(t, dir, "kit")
 	t.Setenv(policy.AgentPubKeyEnvName("kit"), "")
+	t.Setenv("HOME", t.TempDir())
 
 	code, stdout, stderr := runCommandForTest(t, "verify", "--agent", "kit", "--audit-dir", dir)
 	if code != 1 {

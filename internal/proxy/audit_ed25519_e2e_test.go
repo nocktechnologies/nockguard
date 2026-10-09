@@ -33,7 +33,7 @@ func TestEd25519AuditEndToEnd(t *testing.T) {
 	auditPath := filepath.Join(dir, "audit.jsonl")
 
 	// 1. keygen -> private seed + public key.
-	keygenOut, err := exec.Command(binary, "keygen").Output()
+	keygenOut, err := exec.Command(binary, "keygen", "--print-env").Output()
 	if err != nil {
 		t.Fatalf("keygen failed: %v", err)
 	}

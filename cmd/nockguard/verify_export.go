@@ -27,9 +27,9 @@ func runVerifyExport(args []string) int {
 		}
 		*pubEnv = policy.AgentPubKeyEnvName(*agent)
 	}
-	pubHex := os.Getenv(*pubEnv)
-	if pubHex == "" {
-		fmt.Fprintf(os.Stderr, "error: %s is not set\n", *pubEnv)
+	pubHex, kerr := requirePubHex(*pubEnv, *agent)
+	if kerr != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", kerr)
 		return 1
 	}
 	pub, err := audit.PublicKeyFromHex(pubHex)

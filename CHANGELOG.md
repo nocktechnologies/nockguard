@@ -4,6 +4,14 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Changed
+- `nockguard keygen` now writes the keypair to `~/.nockguard/keys/<name>.ed25519` (seed, `0600`, directory `0700`) and `<name>.pub` (`0644`) and prints only the paths and the public key, so the private seed no longer lands in terminal scrollback, shell logs or agent transcripts. It refuses to overwrite without `--force` and refuses symlinks. Without `--agent` the name is `default`. The old stdout env lines (including the secret seed) are behind `--print-env`, which writes no files and warns on stderr. Scripts that parsed keygen's stdout must add `--print-env`. Unknown keygen flags are now an error; `--agent=<name>` is accepted.
+- Zero-config observe mode now writes its public key to `<agent>.pub` (was `<agent>.ed25519.pub`).
+
+### Added
+- `verify --agent`, `verify --all`, `verify --export` and `evidence --agent` read `~/.nockguard/keys/<name>.pub` when `NOCKGUARD_AGENT_<NAME>_ED25519_PUB` is unset.
+- Per-agent signing (`proxy`, `mcp-listen`, `egress-proxy`, `mcp-gateway`) reads `~/.nockguard/keys/<name>.ed25519` when `NOCKGUARD_AGENT_<NAME>_ED25519_KEY` is unset, refusing a seed file that is not a regular file owned by the current user with no group/other permission bits. The env vars still win when set. Audit format and signatures are unchanged.
+
 ## [0.4.0] - 2026-10-09
 
 ### Added

@@ -649,7 +649,7 @@ func TestProxyZeroConfigObserveEndToEnd(t *testing.T) {
 	}
 
 	auditPath := policy.AgentAuditPath(filepath.Join(home, policy.DefaultAuditPath), defaultObserveAgent)
-	pubBytes, err := os.ReadFile(filepath.Join(home, ".nockguard", "keys", defaultObserveAgent+".ed25519.pub"))
+	pubBytes, err := os.ReadFile(filepath.Join(home, ".nockguard", "keys", defaultObserveAgent+".pub"))
 	if err != nil {
 		t.Fatalf("read persisted pub key: %v", err)
 	}

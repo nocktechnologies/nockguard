@@ -73,7 +73,7 @@ agents:
 #   path: ~/.nockguard/logs/audit.jsonl
 #   # Tamper-evident (symmetric HMAC):
 #   sign_key_env: NOCKGUARD_AUDIT_KEY
-#   # Non-repudiable (asymmetric Ed25519) — run ` + "`nockguard keygen`" + ` first; takes precedence:
+#   # Non-repudiable (asymmetric Ed25519) — run ` + "`nockguard keygen`" + ` first, then export the seed from ~/.nockguard/keys/default.ed25519; takes precedence:
 #   # sign_ed25519_key_env: NOCKGUARD_AUDIT_ED25519_KEY
 #   # Stream enforcement decisions to the NockCC ops-log:
 #   # forward:

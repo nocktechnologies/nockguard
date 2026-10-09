@@ -125,13 +125,18 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 	defer keyDir.Close()
 
 	keyName := agent + ".ed25519"
-	keyPath := filepath.Join(home, ".nockguard", "keys", keyName)
+	keyPath := policy.AgentSeedPath(home, agent)
 	// Reuse an existing key if present. The directory-relative Lstat and
 	// no-follow open reject symlinks both before and during this read.
 	if seedHex, exists, rerr := readObserveKey(int(keyDir.Fd()), keyName); rerr != nil {
 		return nil, nil, fmt.Errorf("reading persisted key %s: %w", keyPath, rerr)
 	} else if exists {
-		return loadSeedHex(keyPath, string(seedHex))
+		priv, pub, lerr := loadSeedHex(keyPath, string(seedHex))
+		if lerr == nil {
+			// Keys created by an earlier release have no <agent>.pub; backfill it.
+			_ = publishKeyFile(keyDir, agent+".pub", []byte(hex.EncodeToString(pub)), 0o644, true)
+		}
+		return priv, pub, lerr
 	}
 
 	// Generate and persist once. Write the complete seed to a same-directory temp
@@ -142,70 +147,22 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 		return nil, nil, fmt.Errorf("generating observe key: %w", err)
 	}
 	seedHex := hex.EncodeToString(priv.Seed())
-	var (
-		f        *os.File
-		tempName string
-	)
-	for range 32 {
-		var suffix [16]byte
-		if _, err := rand.Read(suffix[:]); err != nil {
-			return nil, nil, fmt.Errorf("creating temporary key name: %w", err)
+	if perr := publishKeyFile(keyDir, keyName, []byte(seedHex), 0o600, false); perr != nil {
+		if !errors.Is(perr, unix.EEXIST) {
+			return nil, nil, fmt.Errorf("publishing key file %s: %w", keyPath, perr)
 		}
-		tempName = ".observe-key-" + hex.EncodeToString(suffix[:])
-		fd, err := unix.Openat(int(keyDir.Fd()), tempName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
-		if errors.Is(err, unix.EEXIST) {
-			continue
+		winner, exists, rerr := readObserveKey(int(keyDir.Fd()), keyName)
+		if rerr != nil {
+			return nil, nil, fmt.Errorf("reading raced key %s: %w", keyPath, rerr)
 		}
-		if err != nil {
-			return nil, nil, fmt.Errorf("creating temporary key in %s: %w", filepath.Dir(keyPath), err)
+		if !exists {
+			return nil, nil, fmt.Errorf("raced key %s disappeared before it could be read", keyPath)
 		}
-		f = os.NewFile(uintptr(fd), tempName)
-		break
+		return loadSeedHex(keyPath, string(winner))
 	}
-	if f == nil {
-		return nil, nil, fmt.Errorf("creating temporary key in %s: could not choose a unique name", filepath.Dir(keyPath))
-	}
-	defer unix.Unlinkat(int(keyDir.Fd()), tempName, 0)
-	if _, werr := io.WriteString(f, seedHex); werr != nil {
-		_ = f.Close()
-		return nil, nil, fmt.Errorf("writing temporary key %s: %w", keyPath, werr)
-	}
-	if serr := f.Sync(); serr != nil {
-		_ = f.Close()
-		return nil, nil, fmt.Errorf("syncing temporary key %s: %w", keyPath, serr)
-	}
-	if cerr := f.Close(); cerr != nil {
-		return nil, nil, fmt.Errorf("closing temporary key %s: %w", keyPath, cerr)
-	}
-	if lerr := unix.Linkat(int(keyDir.Fd()), tempName, int(keyDir.Fd()), keyName, 0); lerr != nil {
-		if errors.Is(lerr, unix.EEXIST) {
-			winner, exists, rerr := readObserveKey(int(keyDir.Fd()), keyName)
-			if rerr != nil {
-				return nil, nil, fmt.Errorf("reading raced key %s: %w", keyPath, rerr)
-			}
-			if !exists {
-				return nil, nil, fmt.Errorf("raced key %s disappeared before it could be read", keyPath)
-			}
-			return loadSeedHex(keyPath, string(winner))
-		}
-		return nil, nil, fmt.Errorf("publishing key file %s: %w", keyPath, lerr)
-	}
-	// os.Link added a new entry to keyDir; that entry is only durable once keyDir
-	// itself is fsync'd. Without this, a crash after the trail is written can
-	// discard the key file while the trail it signed survives — and the next
-	// run's freshly generated key makes audit.New reject the existing chain,
-	// permanently bricking observe. Fail loudly rather than persist a key whose
-	// directory entry is not durable (matches the temp-file Sync above).
-	if err := unix.Fsync(int(keyDir.Fd())); err != nil {
-		return nil, nil, fmt.Errorf("syncing key dir %s after publishing key: %w", filepath.Dir(keyPath), err)
-	}
-	// Best-effort: the public half alongside the seed, for convenience. Its
-	// absence is not fatal — the banner already prints the hex public key.
-	if fd, err := unix.Openat(int(keyDir.Fd()), keyName+".pub", unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o644); err == nil {
-		pubFile := os.NewFile(uintptr(fd), keyName+".pub")
-		_, _ = io.WriteString(pubFile, hex.EncodeToString(pub))
-		_ = pubFile.Close()
-	}
+	// Best-effort: the public half alongside the seed, so `verify --agent` finds
+	// it by name. Its absence is not fatal — the banner already prints the hex key.
+	_ = publishKeyFile(keyDir, agent+".pub", []byte(hex.EncodeToString(pub)), 0o644, true)
 	return priv, pub, nil
 }
 

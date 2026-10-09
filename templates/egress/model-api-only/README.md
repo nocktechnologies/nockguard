@@ -12,17 +12,17 @@ signed into the audit chain, but requests are never blocked.
 
 ## Setup
 
-Generate an Ed25519 audit keypair:
+Generate an Ed25519 audit keypair (written to `~/.nockguard/keys/default.ed25519` and `default.pub`; the seed is never printed):
 
 ```bash
 nockguard keygen
 ```
 
-Export the private seed in the proxy environment:
+Load both into the proxy environment straight from the files:
 
 ```bash
-export NOCKGUARD_AUDIT_ED25519_KEY=<private-seed-from-keygen>
-export NOCKGUARD_AUDIT_ED25519_PUB=<public-key-from-keygen>
+export NOCKGUARD_AUDIT_ED25519_KEY="$(cat ~/.nockguard/keys/default.ed25519)"
+export NOCKGUARD_AUDIT_ED25519_PUB="$(cat ~/.nockguard/keys/default.pub)"
 ```
 
 Start the proxy:

@@ -25,8 +25,7 @@ nockguard init                                   # writes ~/.nockguard/policy.ya
 The starter policy ships with auditing commented out. Open `~/.nockguard/policy.yaml` and uncomment the `audit:` block (`enabled: true` is the one line that matters here), then generate a per-agent signing key:
 
 ```bash
-nockguard keygen --agent coder                   # prints NOCKGUARD_AGENT_CODER_ED25519_KEY (private — export it, never commit) and _PUB (share it)
-export NOCKGUARD_AGENT_CODER_ED25519_KEY='<private seed printed by keygen>'   # the seed never gets committed; proxy needs it in its own environment to sign
+nockguard keygen --agent coder                   # writes ~/.nockguard/keys/coder.ed25519 (private seed, 0600) and coder.pub (public key); prints only the paths and the public key
 nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project" --agent coder
 ```
 
@@ -46,8 +45,7 @@ Point your agent at `nockguard` instead of the server:
 From here every `tools/call` flows through the policy engine and lands in a signed audit trail. Then:
 
 ```bash
-export NOCKGUARD_AGENT_CODER_ED25519_PUB='<public key printed by keygen>'         # the verifier needs the public key, not the private seed
-nockguard verify --agent coder        # prove the trail is intact and authentic (exit 0), or tampered (exit 2)
+nockguard verify --agent coder        # reads ~/.nockguard/keys/coder.pub; prove the trail is intact and authentic (exit 0), or tampered (exit 2)
 nockguard policy propose --agent coder # turn what the agent actually used into a starter allowlist
 nockguard selftest                     # prove the firewall really BLOCKS — a denied tool and a leaked secret, through the live gate
 ```
@@ -279,12 +277,28 @@ nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY   # exit 0 = intact, 2 = ta
 
 HMAC is *tamper-evident* but symmetric: whoever verifies the trail holds the same key that produced the signatures, and could therefore forge them. **Ed25519** signing closes that gap — it is asymmetric. A private key signs; the trail is verified with the corresponding **public key**, which *cannot* produce signatures. So a passing verification is proof that the holder of the private key signed every entry — the verifier never has the power to forge one. That is the difference between "this trail wasn't edited" and "this trail is *non-repudiable*": court-credible, and aligned with the emerging [IETF agent-audit-trail](https://datatracker.ietf.org) direction (hash-chain + asymmetric signatures).
 
-Generate a keypair, then point the policy at the private seed via an env var:
+**Key files.** `nockguard keygen --agent <name>` writes the keypair instead of printing it, so the private seed never lands in terminal scrollback, shell history or an agent transcript:
+
+| File | Contents | Mode |
+|---|---|---|
+| `~/.nockguard/keys/<name>.ed25519` | private seed, hex | `0600` (directory `0700`) |
+| `~/.nockguard/keys/<name>.pub` | public key, hex | `0644` |
+
+`keygen` prints only the two paths and the public key. It refuses to overwrite existing files without `--force` (a forced replacement means trails signed by the old key stop verifying), and refuses a symlink at either file or at the `keys` directory. `--print-env` restores the old behavior (prints `NOCKGUARD_AGENT_<NAME>_ED25519_KEY=` / `_PUB=` lines to stdout, writes no files) and warns that the seed is now in your terminal output; avoid it outside throwaway setups.
+
+With `--agent <name>` these files are found by name; an env var always wins when set:
+
+- **Signing** (`proxy`, `mcp-listen`, `egress-proxy`, `mcp-gateway`): `NOCKGUARD_AGENT_<NAME>_ED25519_KEY`, else `~/.nockguard/keys/<name>.ed25519`. The seed file is refused unless it is a regular file owned by you with no group/other permission bits; an unsafe file is an error, not a silent fallback to unsigned or HMAC audit.
+- **Verifying** (`verify --agent`, `verify --all`, `verify --export`, `evidence --agent`): `NOCKGUARD_AGENT_<NAME>_ED25519_PUB`, else `~/.nockguard/keys/<name>.pub`. Explicit `--ed25519-pub-env` / `--key-env` flags are unchanged.
+
+Existing env-based deployments need no change. One tradeoff to know: an env-var seed is stripped from the upstream MCP server's environment, but a key file is readable by anything running as the same user, including that upstream. If the upstream is untrusted, run the proxy as a separate user, or keep using the env var.
+
+The agent-less `nockguard keygen` is the `default` identity (`default.ed25519` / `default.pub`), the same one zero-config observe mode creates, so the two share a key. The policy-wide `sign_ed25519_key_env` setting still reads an env var; fill it from the file without printing it:
 
 ```bash
-nockguard keygen
-# NOCKGUARD_AUDIT_ED25519_KEY='<private seed — secret, never commit>'
-# NOCKGUARD_AUDIT_ED25519_PUB='<public key — share with verifiers>'
+nockguard keygen     # no --agent = the "default" identity: ~/.nockguard/keys/default.ed25519 (seed, 0600) + default.pub
+export NOCKGUARD_AUDIT_ED25519_KEY="$(cat ~/.nockguard/keys/default.ed25519)"   # the seed goes file -> env, never through your terminal output
+export NOCKGUARD_AUDIT_ED25519_PUB="$(cat ~/.nockguard/keys/default.pub)"
 ```
 
 ```yaml

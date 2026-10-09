@@ -836,8 +836,9 @@ func AgentAuditPath(basePath, agent string) string {
 }
 
 // AuditorFor builds an Auditor for a specific agent. When the agent has its own
-// Ed25519 key set via the env var returned by AgentKeyEnvName, that key is used
-// and the trail is written to an agent-specific path (AgentAuditPath). When no
+// Ed25519 key set via the env var returned by AgentKeyEnvName (or, when that is
+// unset, in ~/.nockguard/keys/<agent>.ed25519; see ResolveAgentSeed), that key is
+// used and the trail is written to an agent-specific path (AgentAuditPath). When no
 // per-agent key is set, AuditorFor falls back to the policy-wide Auditor.
 func (e *Engine) AuditorFor(agent string) (*audit.Auditor, error) {
 	if !ValidAgentName(agent) {
@@ -847,14 +848,16 @@ func (e *Engine) AuditorFor(agent string) (*audit.Auditor, error) {
 	if e.config.Audit == nil || !e.config.Audit.Enabled {
 		return audit.New("")
 	}
-	envName := AgentKeyEnvName(agent)
-	raw := os.Getenv(envName)
+	raw, err := ResolveAgentSeed(agent)
+	if err != nil {
+		return nil, fmt.Errorf("per-agent signing key for %q: %w", agent, err)
+	}
 	if raw == "" {
 		return e.Auditor()
 	}
 	priv, err := audit.PrivateKeyFromHex(raw)
 	if err != nil {
-		return nil, fmt.Errorf("per-agent key %q: %w", envName, err)
+		return nil, fmt.Errorf("per-agent key for %q: %w", agent, err)
 	}
 	path := e.config.Audit.Path
 	if path == "" {

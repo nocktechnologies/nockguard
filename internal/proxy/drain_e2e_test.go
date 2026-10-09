@@ -18,7 +18,7 @@ func TestDrainAuditsOnUpstreamClose(t *testing.T) {
 	auditPath := filepath.Join(dir, "audit.jsonl")
 
 	// Generate Ed25519 keypair for signing.
-	keygenOut, err := exec.Command(binary, "keygen").Output()
+	keygenOut, err := exec.Command(binary, "keygen", "--print-env").Output()
 	if err != nil {
 		t.Fatalf("keygen failed: %v", err)
 	}
