@@ -19,8 +19,9 @@ MCP server (filesystem, GitHub, your own)
 ```bash
 brew install nocktechnologies/tap/nockguard      # or: go install github.com/nocktechnologies/nockguard/cmd/nockguard@latest
 
-mkdir -p /tmp/nockguard-quickstart
-printf 'NockGuard read succeeded\n' > /tmp/nockguard-quickstart/hello.txt
+QS=$(mktemp -d)                                  # private fixture directory (not a predictable /tmp path)
+printf 'NockGuard read succeeded\n' > "$QS/hello.txt"
+echo "$QS"                                        # substitute this path for <QS> below
 nockguard init                                   # writes ~/.nockguard/policy.yaml (coder policy, audit enabled; never clobbers an existing one)
 nockguard keygen --agent coder                   # writes ~/.nockguard/keys/coder.ed25519 and coder.pub
 ```
@@ -32,13 +33,13 @@ The generated policy allows `coder` to call the filesystem server's `read_file` 
   "mcpServers": {
     "files": {
       "command": "nockguard",
-      "args": ["proxy", "--upstream", "npx -y @modelcontextprotocol/server-filesystem /tmp/nockguard-quickstart", "--agent", "coder"]
+      "args": ["proxy", "--upstream", "npx -y @modelcontextprotocol/server-filesystem <QS>", "--agent", "coder"]
     }
   }
 }
 ```
 
-Ask your MCP client to call `read_file` with `{"path":"/tmp/nockguard-quickstart/hello.txt"}`: it should return `NockGuard read succeeded`. After the call, run:
+Ask your MCP client to call `read_file` with `{"path":"<QS>/hello.txt"}`: it should return `NockGuard read succeeded`. After the call, run:
 
 ```bash
 nockguard verify --agent coder        # exit 0 and PROTECTED for the signed trail
