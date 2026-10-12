@@ -17,7 +17,7 @@ import (
 func runLocalApproval(t *testing.T, decision string) map[string]interface{} {
 	t.Helper()
 	binary := buildBinary(t)
-	home, err := os.MkdirTemp("", "ngh")
+	home, err := os.MkdirTemp("/tmp", "ngh")
 	if err != nil {
 		t.Fatal(err)
 	}
