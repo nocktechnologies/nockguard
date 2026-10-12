@@ -181,3 +181,23 @@ func mustJSON(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
 }
+
+func TestLocalTimeoutRaceHonorsReportedDecision(t *testing.T) {
+	a, dir := startLocal(t, 80*time.Millisecond)
+	got := askAsync(a)
+	h := waitPending(t, dir)
+	time.Sleep(60 * time.Millisecond)
+	err := Decide(dir, h.ID, true)
+	v := <-got
+	if err == nil && !v.Approved {
+		t.Errorf("operator was told approve succeeded but the call was %+v", v)
+	}
+}
+
+func TestLocalRefusesLiveSocketOfSamePid(t *testing.T) {
+	_, dir := startLocal(t, time.Second)
+	if a2, err := NewLocalApprover(dir, time.Second); err == nil {
+		a2.ln.Close()
+		t.Error("second approver replaced a live socket")
+	}
+}

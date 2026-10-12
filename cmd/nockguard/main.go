@@ -36,12 +36,13 @@ func buildApprover(logger *log.Logger) approval.Approver {
 	case "deny":
 		return approval.NewStaticApprover(false, "test-auto-deny")
 	}
+	const timeout = 2 * time.Minute
 	if os.Getenv(approval.EnvApprover) == "local" {
 		dir, err := approval.DefaultLocalDir()
 		if err == nil {
 			var a *approval.LocalApprover
-			if a, err = approval.NewLocalApprover(dir, 2*time.Minute); err == nil {
-				logger.Printf("Phase 5 approval gate ON — local socket in %s (decide with `nockguard approvals`), 2m0s timeout, fail-safe deny", dir)
+			if a, err = approval.NewLocalApprover(dir, timeout); err == nil {
+				logger.Printf("Phase 5 approval gate ON — local socket in %s (decide with `nockguard approvals`), %s timeout, fail-safe deny", dir, timeout)
 				return a
 			}
 		}

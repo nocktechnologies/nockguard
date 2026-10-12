@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -83,7 +85,11 @@ func NewLocalApprover(dir string, timeout time.Duration) (*LocalApprover, error)
 		return nil, err
 	}
 	sock := filepath.Join(dir, strconv.Itoa(os.Getpid())+".sock")
-	_ = os.Remove(sock) // our own stale socket from a recycled pid
+	if c, err := net.DialTimeout("unix", sock, time.Second); err == nil {
+		c.Close()
+		return nil, fmt.Errorf("%s is live (pid collision across namespaces?); refusing to replace it", sock)
+	}
+	_ = os.Remove(sock) // stale socket from a dead proxy with this pid
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		return nil, err
@@ -142,6 +148,12 @@ func (a *LocalApprover) Ask(req Request) Verdict {
 	case v := <-h.decide:
 		return v
 	case <-t.C:
+		a.mu.Lock()
+		_, still := a.pending[h.ID]
+		a.mu.Unlock()
+		if !still { // a decision won the race and was reported to the operator: honor it
+			return <-h.decide
+		}
 		return Verdict{Approved: false, Reason: "timeout"}
 	}
 }
@@ -164,7 +176,7 @@ func (a *LocalApprover) handle(c net.Conn) {
 		return // wrong or unknowable peer: say nothing, decide nothing
 	}
 	var m localMsg
-	if json.NewDecoder(c).Decode(&m) != nil {
+	if json.NewDecoder(io.LimitReader(c, 4096)).Decode(&m) != nil {
 		return
 	}
 	var resp localMsg
@@ -229,7 +241,12 @@ func ListPending(dir string) ([]Pending, error) {
 	}
 	var all []Pending
 	for _, s := range socks {
-		if r, err := localCall(s, localMsg{Op: "list"}); err == nil {
+		r, err := localCall(s, localMsg{Op: "list"})
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			_ = os.Remove(s) // proxy is gone
+			continue
+		}
+		if err == nil {
 			all = append(all, r.Pending...)
 		}
 	}

@@ -31,7 +31,7 @@ func runApprovals(args []string) int {
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(w, "ID\tAGENT\tTOOL\tREASON\tAGE")
 		for _, h := range held {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", h.ID, h.Agent, h.Tool, h.Reason, time.Duration(h.AgeSec)*time.Second)
+			fmt.Fprintf(w, "%s\t%q\t%q\t%q\t%s\n", h.ID, h.Agent, h.Tool, h.Reason, time.Duration(h.AgeSec)*time.Second)
 		}
 		w.Flush()
 		return 0

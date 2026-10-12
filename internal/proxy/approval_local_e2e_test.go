@@ -58,7 +58,7 @@ func runLocalApproval(t *testing.T, decision string) map[string]interface{} {
 	var id string
 	for i := 0; i < 300 && id == ""; i++ {
 		for _, l := range strings.Split(approvals("list"), "\n") {
-			if f := strings.Fields(l); len(f) > 2 && f[1] == "kit" && f[2] == "nockcc_kill_switch_set" {
+			if f := strings.Fields(l); len(f) > 2 && f[1] == `"kit"` && f[2] == `"nockcc_kill_switch_set"` {
 				if strings.Contains(l, "hunter2") {
 					t.Fatalf("list leaked arguments: %s", l)
 				}
