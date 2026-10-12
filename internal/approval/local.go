@@ -278,12 +278,17 @@ func checkClientDir(dir string) error {
 	return checkOwned(dir, uid, os.ModeDir, 0o700)
 }
 
-// mkdirIfAbsent creates d (0700) only when Lstat says nothing is there.
+// mkdirIfAbsent creates d (0700) only when Lstat says nothing is there. A
+// concurrent first-run proxy may win the race; EEXIST is success here because
+// the caller re-checks type, owner and mode on whatever now exists.
 func mkdirIfAbsent(d string) error {
 	if _, err := os.Lstat(d); !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	return os.Mkdir(d, 0o700)
+	if err := os.Mkdir(d, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	return nil
 }
 
 // checkParentDir fails unless parent is a plain directory (not a symlink) owned by uid.

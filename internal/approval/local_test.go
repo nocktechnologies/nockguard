@@ -405,3 +405,52 @@ func TestLocalNothingCreatedThroughSymlink(t *testing.T) {
 		t.Errorf("created %d entries through the approvals symlink", len(ents))
 	}
 }
+
+func TestLocalConcurrentFirstRunApprovers(t *testing.T) {
+	// Neither the parent nor the dir exists: every approver races to create both.
+	dir := filepath.Join(filepath.Dir(shortDir(t)), "p", "a")
+	const n = 8
+	start := make(chan struct{})
+	errs := make(chan error, n)
+	apps := make(chan *LocalApprover, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			<-start
+			a, err := NewLocalApprover(dir, time.Second)
+			if err != nil {
+				errs <- err
+				return
+			}
+			apps <- a
+			errs <- nil
+		}()
+	}
+	close(start)
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent first-run approver failed: %v", err)
+		}
+	}
+	close(apps)
+	for a := range apps {
+		a.Close()
+	}
+	if fi, err := os.Lstat(dir); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("dir not 0700 after race: %v %v", fi, err)
+	}
+}
+
+func TestLocalMkdirRaceStillChecksWhatExists(t *testing.T) {
+	// A pre-existing dir with loose mode (what a racer's EEXIST lands on) is
+	// still refused: tolerating EEXIST does not loosen the checks.
+	dir := shortDir(t)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewLocalApprover(dir, time.Second); err == nil {
+		t.Fatal("expected refusal for a 0755 dir")
+	}
+}
