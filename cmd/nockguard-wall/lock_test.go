@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -551,5 +552,85 @@ func TestUnsignedExportKeepsGuardRowsUnderLockFlood(t *testing.T) {
 	}
 	if h := rec.Header().Get("X-NockGuard-Lock-Verification"); h != "unsigned" {
 		t.Fatalf("lock header = %q, want unsigned", h)
+	}
+}
+
+// SQL selects by id only: a row whose event_type is not text is shown as
+// UNPARSEABLE even when its detail looks like proxy status, and the session
+// cannot read PROTECTED.
+func TestNonTextEventTypeWithProxyDetailIsUnparseable(t *testing.T) {
+	w := newLockWall(t)
+	db, err := sql.Open("sqlite", w.lockDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO events (timestamp, event_type, category, detail, blocked, session_id) VALUES (?, CAST('network_passed' AS BLOB), 'network', 'proxy=x domains=1', 0, ?)`,
+		time.Now().UTC().Format(time.RFC3339), lockSessA); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	found := false
+	for _, ev := range loadLockEvents(w.lockDB) {
+		found = found || ev.Decision == decisionUnparseable
+	}
+	if !found {
+		t.Fatal("non-text event_type row was dropped")
+	}
+	if b := w.badge(t, lockSessA); b.Verdict == sessionverify.VerdictProtected {
+		t.Fatal("badge stayed PROTECTED with an unreadable fence row")
+	}
+}
+
+// The same holds for NULL, on a table that allows it.
+func TestNullEventTypeWithProxyDetailIsUnparseable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`CREATE TABLE events (id INTEGER PRIMARY KEY, timestamp TEXT, event_type, detail TEXT, blocked INTEGER, session_id TEXT)`,
+		`INSERT INTO events VALUES (1, '2026-10-12T00:00:00Z', NULL, 'proxy=x domains=1', 0, 's')`,
+		`INSERT INTO events VALUES (2, '2026-10-12T00:00:01Z', 'session_start', '', 0, 's')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	evs := loadLockEvents(path)
+	if len(evs) != 1 || evs[0].Decision != decisionUnparseable || evs[0].Tool != "row #1" {
+		t.Fatalf("rows = %+v, want only row #1 as UNPARSEABLE (lifecycle row skipped)", evs)
+	}
+}
+
+// A poll batch is all or nothing: an iteration error keeps the cursor, emits
+// nothing, and the next poll returns every row.
+func TestPollIterationErrorKeepsBatch(t *testing.T) {
+	w := newLockWall(t)
+	c := make(chan event, 8)
+	w.b.register(c)
+	last, _ := pollLock(w.lockDB, -1, w.b)
+	db, err := sql.Open("sqlite", w.lockDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"a.example:443", "b.example:443"} {
+		if _, err := db.Exec(`INSERT INTO events (timestamp, event_type, category, detail, blocked, session_id) VALUES (?, 'network_blocked', 'network', ?, 1, ?)`,
+			time.Now().UTC().Format(time.RFC3339), d, lockSessA); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	orig := lockRowsErr
+	defer func() { lockRowsErr = orig }()
+	lockRowsErr = func(*sql.Rows) error { return errors.New("injected iteration error") }
+	if got, ok := pollLock(w.lockDB, last, w.b); ok || got != last || len(c) != 0 {
+		t.Fatalf("failed batch = (%d, %v), emitted %d; want cursor %d kept, ok=false, nothing emitted", got, ok, len(c), last)
+	}
+	lockRowsErr = orig
+	got, ok := pollLock(w.lockDB, last, w.b)
+	if !ok || got <= last || len(c) != 2 {
+		t.Fatalf("retry = (%d, %v), emitted %d; want both rows", got, ok, len(c))
 	}
 }

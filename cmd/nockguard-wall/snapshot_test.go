@@ -388,8 +388,9 @@ func TestPulseWindowIsBoundedAcrossSources(t *testing.T) {
 	}
 }
 
-// A non-text event_type is UNPARSEABLE, but the status-row filter still applies.
-func TestNonTextEventTypeObeysStatusFilter(t *testing.T) {
+// A non-text event_type is UNPARSEABLE whatever its detail says: SQL never
+// filters on event_type or detail, so a proxy= detail cannot hide the row.
+func TestNonTextEventTypeIsUnparseable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -406,8 +407,8 @@ func TestNonTextEventTypeObeysStatusFilter(t *testing.T) {
 	}
 	db.Close()
 	evs := loadLockEvents(path)
-	if len(evs) != 1 || evs[0].Decision != decisionUnparseable || evs[0].Tool != "row #2" {
-		t.Fatalf("rows = %+v, want only row #2 as UNPARSEABLE", evs)
+	if len(evs) != 2 || evs[0].Decision != decisionUnparseable || evs[1].Decision != decisionUnparseable {
+		t.Fatalf("rows = %+v, want rows #1 and #2 both UNPARSEABLE", evs)
 	}
 }
 
@@ -435,11 +436,50 @@ func TestFreshViewSingleFlight(t *testing.T) {
 	done := make(chan *wallView, 2)
 	go func() { done <- w.b.freshView() }()
 	<-entered
+	queued := secondCallerQueued(t)
 	go func() { done <- w.b.freshView() }()
-	time.Sleep(100 * time.Millisecond) // let the second caller queue behind the build
+	<-queued
 	close(release)
 	a, b := <-done, <-done
 	if a != b || *n != 1 {
 		t.Fatalf("builds: same view %v, trail opens %d, want shared view and 1 open", a == b, *n)
 	}
+}
+
+// An export never shares a build that started before it asked.
+func TestExportViewBuildsItsOwn(t *testing.T) {
+	w := newLockWall(t)
+	n := w.countTrailOpens(t)
+	inner := sessionverify.GuardSnapshotOpen
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	sessionverify.GuardSnapshotOpen = func(name string) (*os.File, error) {
+		if name == w.b.auditPath {
+			once.Do(func() { close(entered); <-release })
+		}
+		return inner(name)
+	}
+	queued := secondCallerQueued(t)
+	done := make(chan *wallView, 2)
+	go func() { done <- w.b.freshView() }()
+	<-entered
+	go func() { done <- w.b.exportView() }()
+	<-queued
+	close(release)
+	a, b := <-done, <-done
+	if a == b || *n != 2 {
+		t.Fatalf("export shared a build: same view %v, trail opens %d, want 2 distinct builds", a == b, *n)
+	}
+}
+
+// secondCallerQueued returns a channel closed when the next getView caller has
+// read b.builds and is about to wait for the build lock. Register it after the
+// first caller is already inside its build.
+func secondCallerQueued(t *testing.T) <-chan struct{} {
+	t.Helper()
+	queued := make(chan struct{})
+	var once sync.Once
+	viewQueued = func() { once.Do(func() { close(queued) }) }
+	t.Cleanup(func() { viewQueued = func() {} })
+	return queued
 }

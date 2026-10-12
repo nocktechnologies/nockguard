@@ -133,14 +133,22 @@ func (b *broker) headSig() string {
 // currentView returns the cached snapshot, building a new one when it is due.
 // Callers share one build; the build runs outside smu, so readers of the cache
 // never wait on it.
-func (b *broker) currentView() *wallView { return b.getView(false) }
+func (b *broker) currentView() *wallView { return b.getView(false, true) }
 
-// freshView always builds a new snapshot. A browser reconnecting (replay) or an
-// operator exporting must see every row recorded so far, not a view up to a
-// refresh interval old.
-func (b *broker) freshView() *wallView { return b.getView(true) }
+// freshView builds a new snapshot for a browser connecting (replay), which must
+// see every row recorded so far, not a view up to a refresh interval old. A
+// connect that arrives while a build runs shares it.
+func (b *broker) freshView() *wallView { return b.getView(true, true) }
 
-func (b *broker) getView(force bool) *wallView {
+// exportView always builds its own snapshot: an export never reuses a build
+// that started before it was asked for.
+func (b *broker) exportView() *wallView { return b.getView(true, false) }
+
+// viewQueued is a test seam: called after a caller read b.builds, before it waits
+// for the build lock.
+var viewQueued = func() {}
+
+func (b *broker) getView(force, share bool) *wallView {
 	sig := b.headSig()
 	fresh := func() (*wallView, bool) {
 		b.smu.Lock()
@@ -158,12 +166,13 @@ func (b *broker) getView(force bool) *wallView {
 	b.smu.Lock()
 	seen := b.builds
 	b.smu.Unlock()
+	viewQueued()
 	b.lmu.Lock()
 	defer b.lmu.Unlock()
 	b.smu.Lock()
-	reuse, cur := b.builds != seen, b.view
+	reuse, cur := share && b.builds != seen, b.view
 	b.smu.Unlock()
-	if reuse { // a build ran while this caller waited: share it, even for a forced refresh
+	if reuse { // a build ran while this caller waited: share it, even for a forced refresh (not for an export)
 		return cur
 	}
 	if v, ok := fresh(); ok {

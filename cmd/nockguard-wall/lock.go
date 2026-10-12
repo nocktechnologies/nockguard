@@ -25,22 +25,28 @@ const (
 // lockEventTypes are the NockLock fence events the wall shows: file, network
 // and secret, blocked and passed. Lifecycle rows (session_start, proxy_start,
 // config_loaded, …) are not enforcement decisions and stay off the wall.
-const lockEventTypes = `'file_blocked','file_passed','network_blocked','network_passed','secret_blocked','secret_passed'`
+var lockEventTypes = []string{"file_blocked", "file_passed", "network_blocked", "network_passed", "secret_blocked", "secret_passed"}
 
 // decisionUnparseable marks a fence row that could not be read. It is shown in
 // the stream (never silently dropped) and counts against its session's badge.
 const decisionUnparseable = "unparseable"
 
-// lockSelect reads the decision columns only. The chain columns (prev_hash,
-// entry_hash, entry_sig) are the verifier's business, never the stream's.
-//
-// NockLock also logs two session-start network_passed records that are fence
-// status, not decisions ("proxy=… domains=N" and "netns tproxy egress fence
-// active …"); they are excluded. A row whose event_type is not text cannot be
-// classified, so it is selected too and surfaces as UNPARSEABLE.
-const lockSelect = `SELECT id, timestamp, event_type, detail, blocked, session_id FROM events WHERE ` +
-	`NOT (CAST(event_type AS TEXT) = 'network_passed' AND (COALESCE(detail, '') LIKE 'proxy=%' OR COALESCE(detail, '') LIKE 'netns tproxy egress fence%'))` +
-	` AND (event_type IN (` + lockEventTypes + `) OR typeof(event_type) <> 'text')`
+// lockSelect reads the decision columns only, by id; the caller adds the id
+// range. The chain columns (prev_hash, entry_hash, entry_sig) are the verifier's
+// business, never the stream's. SQL never filters on event_type or detail: Go
+// classifies every row (see isLifecycleRow), so a row SQL cannot compare (NULL,
+// BLOB) is never silently dropped.
+const lockSelect = `SELECT id, timestamp, event_type, detail, blocked, session_id FROM events`
+
+// isLifecycleRow reports a text event_type that is not a fence decision. That
+// includes the two session-start network_passed records that are fence status
+// ("proxy=… domains=N" and "netns tproxy egress fence active …").
+func isLifecycleRow(eventType, detail string) bool {
+	if !slices.Contains(lockEventTypes, eventType) {
+		return true
+	}
+	return eventType == "network_passed" && (strings.HasPrefix(detail, "proxy=") || strings.HasPrefix(detail, "netns tproxy egress fence"))
+}
 
 // openLockDB opens the NockLock log read-only. mode=ro plus query_only means
 // the wall can never write it; immutable is deliberately NOT set so SQLite
@@ -111,13 +117,21 @@ func unparseableLockEvent(id any, ts, session string) event {
 	return ev
 }
 
-// scanLockRows maps every row to a wall event. A row that cannot be read becomes
-// an UNPARSEABLE event and the scan continues: one bad row never hides the rest
-// of the batch. The error is the iteration error, if any.
-func scanLockRows(rows *sql.Rows) ([]event, error) {
+// lockRowsErr reports the iteration error after the last row; a test seam.
+var lockRowsErr = func(r *sql.Rows) error { return r.Err() }
+
+// scanLockRows classifies every row into a wall event. A row that cannot be read
+// (NULL or non-text event_type, bad column) becomes an UNPARSEABLE event and the
+// scan continues; lifecycle rows are skipped. It stops after limit events when
+// limit > 0. The error is the iteration error, if any: the caller must then
+// treat the batch as incomplete.
+func scanLockRows(rows *sql.Rows, limit int) ([]event, error) {
 	defer rows.Close()
 	var out []event
 	for rows.Next() {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
 		var id, ts, eventType, detail, blocked, sess any
 		if err := rows.Scan(&id, &ts, &eventType, &detail, &blocked, &sess); err != nil {
 			out = append(out, unparseableLockEvent(nil, "", ""))
@@ -132,9 +146,12 @@ func scanLockRows(rows *sql.Rows) ([]event, error) {
 			out = append(out, unparseableLockEvent(id, t, s))
 			continue
 		}
+		if isLifecycleRow(et, d) {
+			continue
+		}
 		out = append(out, toLockEvent(t, et, d, bl != 0, s))
 	}
-	return out, rows.Err()
+	return out, lockRowsErr(rows)
 }
 
 // loadLockEvents returns up to the most recent maxWindow fence events, oldest
@@ -152,12 +169,12 @@ func loadLockEvents(path string) []event {
 		return nil
 	}
 	defer db.Close()
-	rows, err := db.Query(lockSelect+` ORDER BY id DESC LIMIT ?`, maxWindow)
+	rows, err := db.Query(lockSelect + ` ORDER BY id DESC`)
 	if err != nil {
 		log.Printf("lock db: %v", err)
 		return nil
 	}
-	evs, err := scanLockRows(rows)
+	evs, err := scanLockRows(rows, maxWindow)
 	if err != nil {
 		log.Printf("lock db: %v", err)
 	}
@@ -220,16 +237,17 @@ func pollLock(path string, last int64, b *broker) (next int64, ok bool) {
 	case max.Int64 == last:
 		return last, true
 	}
-	rows, err := tx.Query(lockSelect+` AND id > ? ORDER BY id ASC`, last)
+	rows, err := tx.Query(lockSelect+` WHERE id > ? ORDER BY id ASC`, last)
 	if err != nil {
 		return last, false
 	}
-	// A row that cannot be read is emitted as an UNPARSEABLE row; the rest of
-	// the batch is unaffected. Only an iteration error cuts the batch short, and
-	// that is a data problem, not a transient one, so the cursor moves past it.
-	evs, err := scanLockRows(rows)
+	// A batch is all or nothing: a row that cannot be read becomes an UNPARSEABLE
+	// event, but an iteration error leaves the cursor where it was and emits
+	// nothing, so the next tick retries the whole batch.
+	evs, err := scanLockRows(rows, 0)
 	if err != nil {
 		log.Printf("lock db: %v", err)
+		return last, false
 	}
 	for _, ev := range evs {
 		b.emit(ev)

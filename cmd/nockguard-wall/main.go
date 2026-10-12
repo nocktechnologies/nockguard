@@ -576,7 +576,7 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 	if !b.verifier.enabled() {
 		// No key: nothing can be verified, but the rows still come from one
 		// snapshot (Guard and Lock together), never separate reads.
-		b.writeViewExport(w, q, b.freshView(), since, until)
+		b.writeViewExport(w, q, b.exportView(), since, until)
 		return
 	}
 
