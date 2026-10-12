@@ -27,10 +27,11 @@ func TestStarterPolicyLoadsAndIsDefaultDeny(t *testing.T) {
 		agent, tool string
 		want        bool
 	}{
-		{"my-agent", "nockcc_nock_list", true},
-		{"my-agent", "fs_delete_file", false}, // deny "*delete*" wins
-		{"my-agent", "some_random_write", false},
-		{"nobody-knows-me", "nockcc_nock_list", false}, // default-deny
+		{"coder", "read_file", true},
+		{"coder", "read_text_file", true},
+		{"coder", "write_file", false},
+		{"coder", "unknown_tool", false},
+		{"nobody-knows-me", "read_file", false},
 	}
 	for _, c := range cases {
 		if got := eng.Check(c.agent, c.tool); got != c.want {
@@ -38,9 +39,8 @@ func TestStarterPolicyLoadsAndIsDefaultDeny(t *testing.T) {
 		}
 	}
 
-	// The Phase 5 Ask verdict is present and matches before allow/default logic.
-	if dec := eng.Evaluate("my-agent", "nockcc_kill_switch_set"); dec.Verdict != Ask {
-		t.Errorf("starter should ask on kill_switch tools, got %s (%s)", dec.Verdict, dec.Reason)
+	if eng.config.Audit == nil || !eng.config.Audit.Enabled {
+		t.Fatal("starter must enable auditing for the signed quickstart trail")
 	}
 }
 
