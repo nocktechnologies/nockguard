@@ -89,6 +89,20 @@
     background:var(--panel); border:1px solid var(--line); border-left:4px solid var(--hide);
     border-radius:8px; padding:9px 14px; animation:slidein .28s ease-out;
   }
+  /* source chip: which layer recorded the row. LOCK is NockLock's fence, GUARD the MCP firewall. */
+  .row .src { font-size:10px; font-weight:700; letter-spacing:1px; padding:2px 6px; border-radius:5px;
+              margin-right:6px; background:rgba(120,140,200,.18); color:var(--dim); }
+  .row .src.lock { background:rgba(160,120,255,.2); color:#b9a0ff; }
+  /* per-session signed-proof badges: green ONLY for PROTECTED; everything else is amber or red. */
+  #sessions { display:flex; gap:10px; flex-wrap:wrap; padding:8px 22px; border-bottom:1px solid var(--line); }
+  #sessions[hidden] { display:none; }
+  .sess { background:var(--panel); border:1px solid var(--line); border-left:4px solid var(--ratelimit);
+          border-radius:8px; padding:6px 12px; font-size:12px; max-width:420px; }
+  .sess .sv { font-weight:800; letter-spacing:1px; color:var(--ratelimit); }
+  .sess.PROTECTED { border-left-color:var(--allow); } .sess.PROTECTED .sv { color:var(--allow); }
+  .sess.TAMPERED { border-left-color:var(--block); animation:tamperpulse 1.6s infinite; } .sess.TAMPERED .sv { color:var(--block); }
+  .sess .sid { color:var(--accent); font-weight:600; margin-left:8px; }
+  .sess .sk { color:var(--dim); font-size:11px; display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   @keyframes slidein { from{opacity:0; transform:translateY(-8px)} to{opacity:1; transform:none} }
   .row .ts { color:var(--dim); font-size:12px; }
   .row .agent { color:var(--accent); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -164,7 +178,7 @@
   }
 </style>
 </head>
-<body>
+<body data-lock="0">
   <div id="flash"></div>
   <div id="tamper" class="tamper" role="alert" aria-live="assertive" hidden>
     <span class="tamper-icon">⚠</span>
@@ -221,7 +235,7 @@
       </select>
       <button class="toggle" id="f-clear" title="clear filters">✕ CLEAR</button>
       <a class="toggle" id="f-export" title="download the current audit window as CSV" href="/export" download>⬇ CSV</a>
-      <a class="toggle" id="f-proof" hidden title="download a signed offline proof of this audit window" href="/export?format=proof" download>⬇ PROOF</a>
+      <a class="toggle" id="f-proof" hidden title="download a signed offline proof of the NockGuard rows in this window (NockLock rows are verified by the session badges, not by this file)" href="/export?format=proof" download>⬇ PROOF</a>
       <span class="fcount" id="f-count"></span>
     </div>
   </header>
@@ -244,6 +258,7 @@
       <span class="ptop-list" id="p-agents"><span class="dimquiet">—</span></span>
     </div>
   </div>
+  <div id="sessions" hidden title="signed-proof verdict per session: both the NockLock and the NockGuard chain must verify"></div>
   <div id="feed"><div class="empty" id="empty">waiting for the first decision…</div></div>
   <footer>
     <span id="conn">connecting…</span>
@@ -456,6 +471,7 @@
     row.dataset.tool = (ev.tool || '').toLowerCase();
     row.dataset.decision = dec;
     row.dataset.severity = sev;
+    row.dataset.source = ev.source || '';
     // Verification badge is derived server-side (verify.go) and arrives on the
     // event; the wall only reads the tag — it holds no key and never verifies.
     const vs = ev.verifyState || 'unknown';
@@ -469,7 +485,7 @@
       ? '<span class="sev">' + sev + '</span>' : '';
     row.innerHTML =
       '<span class="ts">' + esc(hhmmss(ev.ts)) + '</span>' +
-      '<span class="agent">' + esc(ev.agent || '—') + '</span>' +
+      '<span class="agent">' + (ev.source && document.body.dataset.lock === '1' ? '<span class="src ' + (ev.source === 'LOCK' ? 'lock' : 'guard') + '">' + esc(ev.source) + '</span>' : '') + esc(ev.agent || '—') + '</span>' +
       '<span class="tool">' + esc(ev.tool || '') +
         (ev.reason ? '<div class="reason">' + esc(ev.reason) + '</div>' : '') + '</span>' +
       '<span class="verdict">' + vChip + sevChip +
@@ -530,6 +546,34 @@
   }
   checkChain();
   setInterval(checkChain, 15000);
+
+  // --- per-session signed-proof badges -------------------------------------
+  // Verdicts are computed server-side by the same verifier as
+  // `nockguard verify --session`; the server re-verifies when a log changes. The
+  // page only displays them. Only PROTECTED is green.
+  const sessionsEl = document.getElementById('sessions');
+  const VERDICTS = { PROTECTED:1, TAMPERED:1, UNSIGNED:1, UNVERIFIABLE:1, NO_ROWS:1, UNANCHORED:1 };
+  function fp(id) { return id ? id.slice(0, 12) : '—'; }
+  async function checkSessions() {
+    try {
+      const r = await fetch('/sessions', { cache: 'no-store' });
+      if (!r.ok) return;
+      const list = (await r.json()) || [];
+      sessionsEl.hidden = list.length === 0;
+      sessionsEl.replaceChildren(...list.map(s => {
+        const v = VERDICTS[s.verdict] ? s.verdict : 'UNVERIFIABLE';
+        const el = document.createElement('div');
+        el.className = 'sess ' + v;
+        const why = [s.lock.reason, s.guard.reason].filter(Boolean).join(' · ');
+        el.title = 'LOCK ' + s.lock.verdict + ' · GUARD ' + s.guard.verdict + (why ? ' — ' + why : '');
+        el.innerHTML = '<span class="sv">' + v + '</span><span class="sid">' + esc(s.session_id) + '</span>' +
+          '<span class="sk">lock key ' + esc(fp(s.lock.key_id)) + ' · guard key ' + esc(fp(s.guard.key_id)) + '</span>';
+        return el;
+      }));
+    } catch (e) { /* transient fetch failure: leave the badges as-is */ }
+  }
+  checkSessions();
+  setInterval(checkSessions, 5000);
   // Re-apply filters every 30s to age out rows that pass the time window
   setInterval(() => {
     if (fTimerange.value) applyFilters();

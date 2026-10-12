@@ -23,6 +23,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,6 +35,7 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/forward"
 	"github.com/nocktechnologies/nockguard/internal/policy"
+	"github.com/nocktechnologies/nockguard/internal/sessionverify"
 )
 
 // maxWindow bounds how many recent decisions the wall works with: the history
@@ -77,12 +79,18 @@ type event struct {
 	// export's chain walk covered the row, "failed" after a detected break, or
 	// "unsigned" when signing is not configured or the row was not covered.
 	Verification string `json:"verification,omitempty"`
-	auditLine    int    `json:"-"`
+	// Source names the enforcement layer that recorded the row: GUARD (the MCP
+	// firewall) or LOCK (NockLock's fence). Session is the NockLock session id the
+	// row belongs to, when known; it keys the per-session proof badge.
+	Source    string `json:"source,omitempty"`
+	Session   string `json:"session_id,omitempty"`
+	auditLine int    `json:"-"`
 }
 
 // classify tags an event with its derived threat tier. Called at every ingest
 // point so both the SSE stream and the /pulse aggregate carry the severity.
 func classify(ev event) event {
+	ev.Source = sourceGuard // stamped here, never trusted from the audit line; Lock rows overwrite it
 	ev.Severity = forward.Severity(ev.Decision, ev.Reason)
 	return ev
 }
@@ -104,6 +112,18 @@ type broker struct {
 	proofSigner ed25519.PrivateKey
 	vmu         sync.Mutex
 	vsnap       verifyReport
+
+	// NockLock side (all zero without --lock-db). lockPub verifies the Lock chain
+	// for the session badge. view caches the current snapshot (see wallView)
+	// (guarded by smu, held only to read or write the cache); lmu serializes the
+	// verification itself so concurrent callers share one run.
+	lockDB  string
+	lockPub ed25519.PublicKey
+	demo    bool
+	smu     sync.Mutex
+	lmu     sync.Mutex
+	builds  int // views built so far (guarded by smu); lets a waiting fresh caller reuse a build that finished while it waited
+	view    *wallView
 
 	// Test seams for mutating the live files at each capture boundary.
 	// Production leaves both nil.
@@ -221,46 +241,24 @@ func (b *broker) handleSSE(w http.ResponseWriter, r *http.Request) {
 // trail can't flood the page. This is what makes opening the wall show the full
 // record instead of only decisions that arrive after the page loads.
 //
-// It first refreshes the full-chain verification snapshot, then tags each replayed
-// entry with its VerifyState. The line counter increments on EVERY non-empty line
-// — the same rule audit.Verify counts entries by — so the badge index stays
-// aligned with the break position even past a line the wall itself can't render.
+// It reads the current snapshot (see wallView), whose Guard rows were decoded
+// from the very bytes its chain walk verified, and tags each entry with its
+// VerifyState. The line counter increments on EVERY non-empty line — the same
+// rule audit.Verify counts entries by — so the badge index stays aligned with
+// the break position even past a line the wall itself can't render.
 func (b *broker) replayHistory(w io.Writer) {
-	if b.auditPath == "" {
-		return
+	v := b.freshView()
+	evs := make([]event, len(v.guardEvs))
+	for i, ev := range v.guardEvs {
+		ev.VerifyState = lineState(v.rep, ev.auditLine)
+		evs[i] = ev
 	}
-	rep := b.refreshSnapshot()
-	f, err := os.Open(b.auditPath)
-	if err != nil {
-		return
+	if b.lockDB != "" {
+		evs = mergeByTime(evs, v.lock.events)
 	}
-	defer f.Close()
-	var lines [][]byte
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), audit.MaxTrailLineBytes)
-	lineNo := 0
-	for sc.Scan() {
-		raw := sc.Bytes()
-		if len(bytes.TrimSpace(raw)) == 0 {
-			continue
-		}
-		lineNo++ // matches audit.Verify's 1-based entry counting
-		var ev event
-		if json.Unmarshal(raw, &ev) == nil && ev.Decision != "" {
-			ev = classify(ev)
-			ev.VerifyState = lineState(rep, lineNo)
-			line, _ := json.Marshal(ev)
-			lines = append(lines, line)
-			if len(lines) > maxWindow {
-				lines = lines[1:]
-			}
-		}
-	}
-	if err := sc.Err(); err != nil {
-		log.Printf("error replaying history: %v", err)
-	}
-	for _, ln := range lines {
-		fmt.Fprintf(w, "data: %s\n\n", ln)
+	for _, ev := range lastWindow(evs) {
+		line, _ := json.Marshal(ev)
+		fmt.Fprintf(w, "data: %s\n\n", line)
 	}
 }
 
@@ -392,6 +390,10 @@ func computePulse(evs []event, q, decision, severity string, since, until *time.
 		}
 		p.Total++
 		switch bucket(ev.Decision) {
+		case "blocked":
+			if ev.Decision != decisionUnparseable { // unreadable, not a known block
+				p.Blocked++
+			}
 		case "approved":
 			p.Approved++
 		case "pending":
@@ -471,7 +473,7 @@ func loadEventsFrom(r io.Reader) []event {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		log.Printf("error reading audit log for pulse: %v", err)
+		log.Printf("error reading audit log: %v", err)
 	}
 	return evs
 }
@@ -506,7 +508,7 @@ func (b *broker) handlePulse(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	since := parseTimeFilter(q.Get("since"))
 	until := parseTimeFilter(q.Get("until"))
-	p := computePulse(loadEvents(b.auditPath), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
+	p := computePulse(b.windowEvents(), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(p)
 }
@@ -572,11 +574,9 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !b.verifier.enabled() {
-		evs := filterEvents(loadEvents(b.auditPath), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
-		for i := range evs {
-			evs[i].Verification = "unsigned"
-		}
-		writeExport(w, q.Get("format"), evs)
+		// No key: nothing can be verified, but the rows still come from one
+		// snapshot (Guard and Lock together), never separate reads.
+		b.writeViewExport(w, q, b.exportView(), since, until)
 		return
 	}
 
@@ -694,13 +694,27 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(proof)
 		return
 	}
-	rep := b.verifier.verifyBytes(trail, hwm)
 	if b.afterExportSnapshot != nil {
 		b.afterExportSnapshot()
 	}
-	evs := filterEvents(loadEventsFromBytes(trail), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
+	b.writeViewExport(w, q, b.buildView(guardRead{trail: trail, hwm: hwm}), since, until)
+}
+
+// writeViewExport renders one snapshot as an export. Every row, Guard or Lock,
+// is filtered and marked from that snapshot alone: a Guard row by its chain walk,
+// a Lock row by its session's badge, both computed on the bytes rendered here.
+func (b *broker) writeViewExport(w http.ResponseWriter, q url.Values, v *wallView, since, until *time.Time) {
+	if b.lockDB != "" {
+		status := v.lock.status()
+		if status == "ok" && !b.verifier.enabled() {
+			status = "unsigned" // no Guard key: nothing is verified, whatever the Lock side says
+		}
+		w.Header().Set("X-NockGuard-Lock-Verification", status)
+	}
+	evs := filterEvents(v.events(), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
+	verdicts := v.lock.verdicts()
 	for i := range evs {
-		evs[i].Verification = exportVerification(rep, evs[i].auditLine)
+		evs[i].Verification = exportRowVerification(v.rep, verdicts, evs[i])
 	}
 	writeExport(w, q.Get("format"), evs)
 }
@@ -735,11 +749,11 @@ func writeExport(w http.ResponseWriter, format string, evs []event) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="nockguard-wall.csv"`)
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{"ts", "agent", "tool", "decision", "severity", "reason", "verification"})
+	_ = cw.Write([]string{"ts", "agent", "tool", "decision", "severity", "reason", "verification", "source"})
 	for _, ev := range evs {
 		_ = cw.Write([]string{
 			csvSafe(ev.Ts), csvSafe(ev.Agent), csvSafe(ev.Tool),
-			csvSafe(ev.Decision), csvSafe(ev.Severity), csvSafe(ev.Reason), csvSafe(ev.Verification),
+			csvSafe(ev.Decision), csvSafe(ev.Severity), csvSafe(ev.Reason), csvSafe(ev.Verification), csvSafe(ev.Source),
 		})
 	}
 	cw.Flush()
@@ -821,9 +835,15 @@ func demo(ctx context.Context, b *broker) {
 			return
 		case <-t.C:
 			ev := event{Ts: time.Now().Format(time.RFC3339), Agent: agents[r.Intn(len(agents))]}
-			if r.Intn(100) < 68 { // mostly allows, with a steady drip of caught attempts
+			switch n := r.Intn(100); {
+			case n < 25: // a quarter of the stream is synthetic NockLock fence rows
+				ls := lockShots[r.Intn(len(lockShots))]
+				b.emit(toLockEvent(ev.Ts, ls.eventType, ls.detail, strings.HasSuffix(ls.eventType, "_blocked"), demoSessionID))
+				t.Reset(time.Duration(350+r.Intn(900)) * time.Millisecond)
+				continue
+			case n < 25+51: // mostly allows, with a steady drip of caught attempts
 				ev.Tool, ev.Decision = allows[r.Intn(len(allows))], "allow"
-			} else {
+			default:
 				s := bads[r.Intn(len(bads))]
 				ev.Tool, ev.Decision, ev.Reason = s.tool, s.decision, s.reason
 			}
@@ -833,6 +853,16 @@ func demo(ctx context.Context, b *broker) {
 			t.Reset(time.Duration(350+r.Intn(900)) * time.Millisecond)
 		}
 	}
+}
+
+// lockShots are the synthetic NockLock fence rows --demo mixes in.
+var lockShots = []struct{ eventType, detail string }{
+	{"file_blocked", "~/.ssh/id_ed25519"},
+	{"file_passed", "./src/main.go"},
+	{"network_blocked", "paste.example.net:443"},
+	{"network_passed", "api.github.com:443"},
+	{"secret_blocked", "AWS_SECRET_ACCESS_KEY"},
+	{"secret_passed", "NPM_TOKEN"},
 }
 
 func defaultAuditPath() string {
@@ -851,6 +881,9 @@ func main() {
 		"env var holding the HMAC key that verifies the audit chain (alternative to Ed25519; server-side trust)")
 	proofKeyEnv := flag.String("proof-signing-key-env", "",
 		"env var holding the Ed25519 private key used to sign offline export receipts (opt-in)")
+	lockDB := flag.String("lock-db", "", "path to a NockLock events.db to show alongside Guard decisions (opened read-only; no discovery)")
+	lockPubEnv := flag.String("lock-pub-env", "NOCKLOCK_AUDIT_ED25519_PUB",
+		"env var holding the NockLock Ed25519 PUBLIC key for the per-session proof badge. Unset var = badges read UNVERIFIABLE.")
 	flag.Parse()
 	var agentSet, auditSet, pubEnvSet bool
 	flag.Visit(func(f *flag.Flag) {
@@ -904,6 +937,27 @@ func main() {
 		b.proofSigner = priv
 		log.Printf("offline proof signing enabled from %s", *proofKeyEnv)
 	}
+	b.demo = *demoMode
+	if *lockDB != "" {
+		if *demoMode {
+			log.Fatal("--demo and --lock-db cannot be combined: synthetic rows would hide the real Lock badges")
+		}
+		b.lockDB = *lockDB
+		if err := sessionverify.RequireRegularFile(b.lockDB); err != nil {
+			if !os.IsNotExist(err) {
+				log.Fatalf("--lock-db: %v", err)
+			}
+			log.Printf("warning: --lock-db %v (the wall will pick it up if it appears)", err)
+		}
+		if hexKey := strings.TrimSpace(os.Getenv(*lockPubEnv)); hexKey != "" {
+			pub, err := audit.PublicKeyFromHex(hexKey)
+			if err != nil {
+				log.Fatalf("%s: %v", *lockPubEnv, err)
+			}
+			b.lockPub = pub
+		}
+		go tailLock(ctx, b.lockDB, b)
+	}
 	b.refreshSnapshot() // seed the snapshot so live badges have a baseline
 
 	go tail(ctx, *auditPath, b)
@@ -916,6 +970,7 @@ func main() {
 	mux.HandleFunc("/pulse", b.handlePulse)
 	mux.HandleFunc("/export", b.handleExport)
 	mux.HandleFunc("/verify", b.handleVerify)
+	mux.HandleFunc("/sessions", b.handleSessions)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -925,12 +980,15 @@ func main() {
 		if len(b.proofSigner) != 0 {
 			data = bytes.Replace(data, []byte(`id="f-proof" hidden`), []byte(`id="f-proof"`), 1)
 		}
+		if b.lockDB != "" || b.demo {
+			data = bytes.Replace(data, []byte(`data-lock="0"`), []byte(`data-lock="1"`), 1)
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(data)
 	})
 
-	fmt.Printf("NockGuard Live Wall → http://%s   (audit: %s, demo: %v, chain-verify: %v)\n",
-		*addr, *auditPath, *demoMode, v.enabled())
+	fmt.Printf("NockGuard Live Wall → http://%s   (audit: %s, lock: %q, demo: %v, chain-verify: %v)\n",
+		*addr, *auditPath, b.lockDB, *demoMode, v.enabled())
 	srv := &http.Server{
 		Addr:         *addr,
 		Handler:      mux,

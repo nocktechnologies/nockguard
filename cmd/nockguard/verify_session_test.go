@@ -15,6 +15,7 @@ import (
 	"github.com/nocktechnologies/nocklock/pkg/receipt" // also registers the "sqlite" driver used to mutate fixtures
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
+	"github.com/nocktechnologies/nockguard/internal/sessionverify"
 )
 
 // The NockLock fixture (testdata/nocklock-signed.db + .pub) is a byte copy of
@@ -476,7 +477,7 @@ func TestSessionVerify_SnapshotVerifyAndSelectSameBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c := verifyGuardSnapshot(trail, hwm, f.guardPub, sessA); c.Verdict != "INTACT" || c.Rows != 3 || !c.TailVerified {
+	if c := sessionverify.VerifyGuardSnapshot(trail, hwm, f.guardPub, sessA); c.Verdict != "INTACT" || c.Rows != 3 || !c.TailVerified {
 		t.Fatalf("genuine snapshot: %+v, want INTACT/3 rows/tail verified", c)
 	}
 	lines := strings.SplitAfter(strings.TrimRight(string(trail), "\n"), "\n")
@@ -484,13 +485,13 @@ func TestSessionVerify_SnapshotVerifyAndSelectSameBytes(t *testing.T) {
 	// Same line count, one genuine line replaced by an unsigned session line:
 	// the swap an attacker would stage between verify and select.
 	swapped := strings.Join(append(append([]string{}, lines[:2]...), append([]string{string(forgedSessionLine(t))}, lines[3:]...)...), "")
-	if c := verifyGuardSnapshot([]byte(swapped), hwm, f.guardPub, sessA); c.Verdict == "INTACT" || c.Verdict != "TAMPERED" {
+	if c := sessionverify.VerifyGuardSnapshot([]byte(swapped), hwm, f.guardPub, sessA); c.Verdict == "INTACT" || c.Verdict != "TAMPERED" {
 		t.Fatalf("unsigned session line in the snapshot: %+v, want TAMPERED", c)
 	}
 
 	// An extra unsigned session line inserted mid-trail.
 	inserted := strings.Join(append(append([]string{}, lines[:1]...), append([]string{string(forgedSessionLine(t))}, lines[1:]...)...), "")
-	if c := verifyGuardSnapshot([]byte(inserted), hwm, f.guardPub, sessA); c.Verdict != "TAMPERED" {
+	if c := sessionverify.VerifyGuardSnapshot([]byte(inserted), hwm, f.guardPub, sessA); c.Verdict != "TAMPERED" {
 		t.Fatalf("inserted unsigned session line: %+v, want TAMPERED", c)
 	}
 
@@ -502,12 +503,12 @@ func TestSessionVerify_SnapshotVerifyAndSelectSameBytes(t *testing.T) {
 	})
 	ob, _ := os.ReadFile(other)
 	oh, _ := os.ReadFile(other + ".hwm")
-	if c := verifyGuardSnapshot(ob, oh, f.guardPub, sessA); c.Verdict != "TAMPERED" {
+	if c := sessionverify.VerifyGuardSnapshot(ob, oh, f.guardPub, sessA); c.Verdict != "TAMPERED" {
 		t.Fatalf("session line signed by another key: %+v, want TAMPERED", c)
 	}
 
 	// Rows present but the sidecar missing from the snapshot.
-	if c := verifyGuardSnapshot(trail, nil, f.guardPub, sessA); c.Verdict != "TAMPERED" {
+	if c := sessionverify.VerifyGuardSnapshot(trail, nil, f.guardPub, sessA); c.Verdict != "TAMPERED" {
 		t.Fatalf("snapshot without .hwm: %+v, want TAMPERED", c)
 	}
 }
@@ -533,9 +534,9 @@ func TestSessionVerify_GuardTrailReadOnce(t *testing.T) {
 	}
 
 	opens := map[string]int{}
-	orig := guardSnapshotOpen
-	t.Cleanup(func() { guardSnapshotOpen = orig })
-	guardSnapshotOpen = func(name string) (*os.File, error) {
+	orig := sessionverify.GuardSnapshotOpen
+	t.Cleanup(func() { sessionverify.GuardSnapshotOpen = orig })
+	sessionverify.GuardSnapshotOpen = func(name string) (*os.File, error) {
 		fh, err := orig(name)
 		opens[name]++
 		switch name {
@@ -590,9 +591,9 @@ func TestSessionVerify_GuardSymlinkRefused(t *testing.T) {
 func TestSessionVerify_AppendBetweenSnapshotsIsNotTampered(t *testing.T) {
 	f := newSessionFixture(t)
 	opens := 0
-	orig := guardSnapshotOpen
-	t.Cleanup(func() { guardSnapshotOpen = orig })
-	guardSnapshotOpen = func(name string) (*os.File, error) {
+	orig := sessionverify.GuardSnapshotOpen
+	t.Cleanup(func() { sessionverify.GuardSnapshotOpen = orig })
+	sessionverify.GuardSnapshotOpen = func(name string) (*os.File, error) {
 		opens++
 		if opens == 2 {
 			// The first snapshot is taken; the second is not yet opened.

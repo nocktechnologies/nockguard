@@ -6,6 +6,13 @@ All notable changes to NockGuard are documented here.
 
 ### Added
 - Local approver for `ask` verdicts, with no network: set `NOCKGUARD_APPROVER=local` and decide held calls with `nockguard approvals list|approve|deny` (`prune` removes dead sockets left by crashed proxies). Held calls wait on a `0600` unix socket in a `0700` `~/.nockguard/approvals/` (one `<pid>-<random>.sock` per proxy, removed on exit) and are audited as `approval-granted` / `approval-denied` with the approver `local:<uid>`. The listing shows id, agent, tool, reason and age, never arguments. The approver does not start (and `ask` fails closed) if the directory or socket permissions, ownership or type are wrong. A same-uid agent can still approve its own calls; see the README trust boundary.
+- Live Wall shows NockLock and NockGuard in one stream. `nockguard-wall --lock-db <events.db>` reads a NockLock log read-only (file, network and secret fence events, blocked and passed), labeled `LOCK` / `GUARD` and colored by outcome, decision only. `--lock-pub-env` names the NockLock public key (default `NOCKLOCK_AUDIT_ED25519_PUB`).
+- Per-session signed-proof badge on the wall (`GET /sessions`): the same verdict as `nockguard verify --session` (PROTECTED / TAMPERED / UNSIGNED / UNVERIFIABLE / NO_ROWS / UNANCHORED) with both key fingerprints. Every view (badges, stream replay, `/pulse`, signed or unsigned `/export`) is built from one snapshot per refresh: the Guard trail read and verified once, the Lock DB copied once and both its rows and its chain walk taken from that copy. A refresh runs when a log's head moved (at most every 4 s) or every 60 s, never above 100,000 Lock events (then UNVERIFIABLE, too large). An unreadable Lock row shows as UNPARSEABLE and makes its session UNVERIFIABLE without hiding the rest of the batch. Export keeps a per-source row cap and an `X-NockGuard-Lock-Verification` header. A missing key is UNVERIFIABLE, never green.
+- `--demo` cannot be combined with `--lock-db`; it mixes in synthetic Lock rows and an UNSIGNED demo session.
+
+### Changed
+- `/export` CSV and JSON gain a trailing `source` column / field (`GUARD` or `LOCK`). The PROOF export remains NockGuard rows only; the README says so.
+- The `verify --session` core moved to `internal/sessionverify` so the CLI and the wall share one verifier.
 
 ## [0.5.0] - 2026-10-10
 
