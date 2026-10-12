@@ -2,11 +2,13 @@ package approval
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -182,15 +184,104 @@ func mustJSON(v any) []byte {
 	return b
 }
 
+// A decision that lands after the timer fires but before Ask checks the hold
+// was reported OK to the operator, so it must be the verdict.
 func TestLocalTimeoutRaceHonorsReportedDecision(t *testing.T) {
-	a, dir := startLocal(t, 80*time.Millisecond)
+	a, dir := startLocal(t, 50*time.Millisecond)
+	a.beforeTimeoutCheck = func() {
+		h := waitPending(t, dir)
+		if err := Decide(dir, h.ID, true); err != nil {
+			t.Errorf("decide in the race window: %v", err)
+		}
+	}
+	if v := <-askAsync(a); !v.Approved {
+		t.Errorf("operator was told OK but the call was %+v", v)
+	}
+}
+
+// Negative control: once the timeout owns the hold, a late decide is refused.
+func TestLocalLateDecideAfterTimeoutIsRefused(t *testing.T) {
+	a, dir := startLocal(t, 50*time.Millisecond)
 	got := askAsync(a)
 	h := waitPending(t, dir)
-	time.Sleep(60 * time.Millisecond)
-	err := Decide(dir, h.ID, true)
-	v := <-got
-	if err == nil && !v.Approved {
-		t.Errorf("operator was told approve succeeded but the call was %+v", v)
+	if v := <-got; v.Approved || v.Reason != "timeout" {
+		t.Fatalf("want timeout, got %+v", v)
+	}
+	if err := Decide(dir, h.ID, true); err == nil {
+		t.Error("decide after timeout reported success")
+	}
+}
+
+func TestLocalStartupStaleSocketCleanup(t *testing.T) {
+	uid := uint32(os.Getuid())
+	dir := filepath.Dir(shortDir(t))
+	// regular file: refused, left in place
+	f := filepath.Join(dir, "f.sock")
+	os.WriteFile(f, nil, 0o600)
+	if err := clearStaleSocket(f, uid); err == nil {
+		t.Error("removed a regular file")
+	}
+	if _, err := os.Lstat(f); err != nil {
+		t.Error("regular file was deleted")
+	}
+	// dead socket (listener closed, file left behind): removed
+	s := filepath.Join(dir, "s.sock")
+	ln, err := net.Listen("unix", s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	ln.Close()
+	if err := clearStaleSocket(s, uid); err != nil {
+		t.Errorf("stale socket not cleared: %v", err)
+	}
+	if _, err := os.Lstat(s); err == nil {
+		t.Error("stale socket still present")
+	}
+}
+
+func TestLocalListPendingDoesNotUnlinkDeadSockets(t *testing.T) {
+	_, dir := startLocal(t, time.Second)
+	s := filepath.Join(dir, "99999.sock")
+	ln, err := net.Listen("unix", s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	ln.Close()
+	os.Chmod(s, 0o600)
+	if _, err := ListPending(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(s); err != nil {
+		t.Error("ListPending unlinked a socket")
+	}
+}
+
+func TestLocalCLIRefusesSymlinkedDirAndForeignServer(t *testing.T) {
+	real := filepath.Dir(shortDir(t))
+	link := filepath.Join(filepath.Dir(shortDir(t)), "approvals")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ListPending(link); err == nil {
+		t.Error("ListPending followed a symlinked approvals dir")
+	}
+	if err := Decide(link, "1-1", true); err == nil {
+		t.Error("Decide followed a symlinked approvals dir")
+	}
+	// loose perms on the approvals dir
+	loose := shortDir(t)
+	os.Mkdir(loose, 0o755)
+	os.Chmod(loose, 0o755)
+	if _, err := ListPending(loose); err == nil {
+		t.Error("ListPending accepted a 0755 dir")
+	}
+}
+
+func TestLocalAcceptTemporary(t *testing.T) {
+	if !acceptTemporary(syscall.EMFILE) || acceptTemporary(errors.New("boom")) {
+		t.Error("acceptTemporary misclassifies")
 	}
 }
 

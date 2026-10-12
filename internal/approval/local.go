@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -35,6 +36,10 @@ type LocalApprover struct {
 	timeout time.Duration
 	uid     uint32
 	ln      net.Listener
+
+	// beforeTimeoutCheck is a test seam: it runs when the timer fires, before
+	// Ask looks at the hold, so a test can force a decision into that window.
+	beforeTimeoutCheck func()
 
 	mu      sync.Mutex
 	n       int
@@ -85,11 +90,9 @@ func NewLocalApprover(dir string, timeout time.Duration) (*LocalApprover, error)
 		return nil, err
 	}
 	sock := filepath.Join(dir, strconv.Itoa(os.Getpid())+".sock")
-	if c, err := net.DialTimeout("unix", sock, time.Second); err == nil {
-		c.Close()
-		return nil, fmt.Errorf("%s is live (pid collision across namespaces?); refusing to replace it", sock)
+	if err := clearStaleSocket(sock, uid); err != nil {
+		return nil, err
 	}
-	_ = os.Remove(sock) // stale socket from a dead proxy with this pid
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		return nil, err
@@ -105,6 +108,35 @@ func NewLocalApprover(dir string, timeout time.Duration) (*LocalApprover, error)
 	a := &LocalApprover{timeout: timeout, uid: uid, ln: ln, pending: map[string]*localHold{}}
 	go a.serve()
 	return a, nil
+}
+
+// clearStaleSocket makes room for sock. It removes an existing entry only if it
+// is a socket owned by uid that refuses connections (a dead proxy with this
+// pid); anything else — a live socket, a file, a symlink, a foreign owner, or a
+// dial failure other than ECONNREFUSED — is refused.
+func clearStaleSocket(sock string, uid uint32) error {
+	fi, err := os.Lstat(sock)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeType != os.ModeSocket {
+		return fmt.Errorf("%s exists and is not a socket (%v); refusing to remove it", sock, fi.Mode().Type())
+	}
+	if owner, ok := fileOwner(fi); !ok || owner != uid {
+		return fmt.Errorf("%s is not owned by uid %d; refusing to remove it", sock, uid)
+	}
+	c, err := net.DialTimeout("unix", sock, time.Second)
+	if err == nil {
+		c.Close()
+		return fmt.Errorf("%s is live (pid collision across namespaces?); refusing to replace it", sock)
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		return fmt.Errorf("%s: cannot prove it is stale (%v); refusing to remove it", sock, err)
+	}
+	return os.Remove(sock)
 }
 
 // checkOwned fails unless path is (not a symlink) of kind, owned by uid, with exactly perm.
@@ -148,10 +180,17 @@ func (a *LocalApprover) Ask(req Request) Verdict {
 	case v := <-h.decide:
 		return v
 	case <-t.C:
+		if a.beforeTimeoutCheck != nil {
+			a.beforeTimeoutCheck()
+		}
+		// Check and delete under one lock: either the timeout owns the hold (a
+		// later decide gets "no such pending call") or a decide already took it
+		// and its verdict, already reported to the operator, is honored.
 		a.mu.Lock()
 		_, still := a.pending[h.ID]
+		delete(a.pending, h.ID)
 		a.mu.Unlock()
-		if !still { // a decision won the race and was reported to the operator: honor it
+		if !still {
 			return <-h.decide
 		}
 		return Verdict{Approved: false, Reason: "timeout"}
@@ -159,13 +198,35 @@ func (a *LocalApprover) Ask(req Request) Verdict {
 }
 
 func (a *LocalApprover) serve() {
+	var delay time.Duration
 	for {
 		c, err := a.ln.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			if acceptTemporary(err) {
+				log.Printf("nockguard: local approver accept: %v (retrying)", err)
+				if delay == 0 {
+					delay = 5 * time.Millisecond
+				} else if delay *= 2; delay > time.Second {
+					delay = time.Second
+				}
+				time.Sleep(delay)
+				continue
+			}
+			log.Printf("nockguard: local approver STOPPED accepting: %v — every held call will now time out and be denied", err)
 			return
 		}
+		delay = 0
 		go a.handle(c)
 	}
+}
+
+func acceptTemporary(err error) bool {
+	var ne net.Error
+	return errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) ||
+		errors.Is(err, syscall.ECONNABORTED) || (errors.As(err, &ne) && ne.Timeout())
 }
 
 func (a *LocalApprover) handle(c net.Conn) {
@@ -212,12 +273,40 @@ func (a *LocalApprover) handle(c net.Conn) {
 	_ = json.NewEncoder(c).Encode(resp)
 }
 
+// checkClientDir refuses to talk to sockets under dir unless dir (and its
+// parent, typically ~/.nockguard) are real directories owned by us and dir is
+// 0700, so a planted symlink or foreign directory cannot feed us a fake server.
+func checkClientDir(dir string) error {
+	uid := uint32(os.Getuid())
+	parent := filepath.Dir(dir)
+	fi, err := os.Lstat(parent)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s is not a plain directory (symlink?); refusing", parent)
+	}
+	if owner, ok := fileOwner(fi); !ok || owner != uid {
+		return fmt.Errorf("%s is not owned by uid %d; refusing", parent, uid)
+	}
+	return checkOwned(dir, uid, os.ModeDir, 0o700)
+}
+
+// localCall dials sock and talks to it only if the socket is ours (0600, our
+// uid) and the server on the other end runs as our uid.
 func localCall(sock string, m localMsg) (localMsg, error) {
+	uid := uint32(os.Getuid())
+	if err := checkOwned(sock, uid, os.ModeSocket, 0o600); err != nil {
+		return localMsg{}, err
+	}
 	c, err := net.DialTimeout("unix", sock, 2*time.Second)
 	if err != nil {
 		return localMsg{}, err
 	}
 	defer c.Close()
+	if peer, err := peerUID(c); err != nil || peer != uid {
+		return localMsg{}, fmt.Errorf("%s: server is not running as uid %d; refusing", sock, uid)
+	}
 	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
 	if err := json.NewEncoder(c).Encode(m); err != nil {
 		return localMsg{}, err
@@ -233,8 +322,12 @@ func localCall(sock string, m localMsg) (localMsg, error) {
 }
 
 // ListPending asks every live proxy under dir for its held calls, oldest first.
-// Sockets nobody answers on (a proxy that exited) are skipped.
+// Sockets nobody answers on (a proxy that exited) are skipped, never removed:
+// stale cleanup belongs to the proxy at startup.
 func ListPending(dir string) ([]Pending, error) {
+	if err := checkClientDir(dir); err != nil {
+		return nil, err
+	}
 	socks, err := filepath.Glob(filepath.Join(dir, "*.sock"))
 	if err != nil {
 		return nil, err
@@ -242,10 +335,6 @@ func ListPending(dir string) ([]Pending, error) {
 	var all []Pending
 	for _, s := range socks {
 		r, err := localCall(s, localMsg{Op: "list"})
-		if errors.Is(err, syscall.ECONNREFUSED) {
-			_ = os.Remove(s) // proxy is gone
-			continue
-		}
 		if err == nil {
 			all = append(all, r.Pending...)
 		}
@@ -259,6 +348,9 @@ func Decide(dir, id string, approve bool) error {
 	pid, _, ok := strings.Cut(id, "-")
 	if _, err := strconv.Atoi(pid); !ok || err != nil {
 		return fmt.Errorf("malformed id %q", id)
+	}
+	if err := checkClientDir(dir); err != nil {
+		return err
 	}
 	_, err := localCall(filepath.Join(dir, pid+".sock"), localMsg{Op: "decide", ID: id, Approve: approve})
 	return err
