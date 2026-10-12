@@ -39,10 +39,13 @@ func runWall(args []string) int {
 	finished, forwarded := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(forwarded)
-		select {
-		case sig := <-signals:
-			_ = cmd.Process.Signal(sig)
-		case <-finished:
+		for {
+			select {
+			case sig := <-signals:
+				_ = cmd.Process.Signal(sig)
+			case <-finished:
+				return
+			}
 		}
 	}()
 	err := cmd.Wait()
