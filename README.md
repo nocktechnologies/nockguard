@@ -142,7 +142,7 @@ agents:
       max_calls: 5000
 ```
 
-Policy verdict precedence is `deny` first, then `ask`, then normal allow/mode logic. An `Ask` verdict is not a warning or "flag but pass" result: the call is withheld until approval. Any state-write intents attached to the policy decision are also withheld; NockGuard applies them only after approval, and drops them on denial or timeout. The legacy `require_approval` key remains accepted for existing policies, but new policies should use `ask`.
+Policy verdict precedence is `deny` first, then `ask`, then normal allow/mode logic. An `Ask` verdict is not a warning or "flag but pass" result: the call is withheld until approval. Any state-write intents attached to the policy decision are also withheld; NockGuard applies them only after approval, and drops them on denial or timeout. The legacy `require_approval` key remains accepted for existing policies, but new policies should use `ask`. An `ask` call needs an approver: the dedicated Telegram bot, or the network-free local approver (`NOCKGUARD_APPROVER=local`, see "Local approver" under Phase 5 below). With neither, every `ask` call is denied.
 
 Rate limiting and spend caps are opt-in and independent — set one, both, or neither. NockGuard sits at the MCP layer and sees tool *calls*, not upstream API token spend, so the spend cap is denominated in tool calls (a proxy for cost), enforced before the call reaches the server. When a call clears the allowlist and input validation but exceeds a limit, the agent receives a JSON-RPC error (`rate limit exceeded` / `spend cap exceeded`); policy-denied or input-blocked calls never consume budget. Ask calls are metered before the approval prompt, preserving the existing Phase 5 gate order.
 
@@ -415,7 +415,22 @@ What Nock Technologies sells is the part that only makes sense as a **service or
 - [x] Phase 3: Rate limiting and spend caps (per-agent sliding-window rate limit + hard cumulative session cap)
 - [x] Phase 4: Audit trail — structured JSONL trail, NockCC ops-log forwarding, and tamper-evident HMAC hash-chain signing
 - [x] Phase 4+: Non-repudiable audit — Ed25519 asymmetric signing (private-key signs, public-key verifies), `keygen`, standards-aligned
-- [x] Phase 5: Interactive approval gates — human-in-the-loop hold on consequential tools (dedicated Telegram bot, fail-safe deny)
+- [x] Phase 5: Interactive approval gates — human-in-the-loop hold on consequential tools (dedicated Telegram bot or local socket approver, fail-safe deny)
+
+  **Local approver** (no network). Start the proxy with `NOCKGUARD_APPROVER=local` and held calls wait on a unix socket at `~/.nockguard/approvals/<proxy pid>-<16 random hex>.sock` (directory `0700`, socket `0600`, both owned by the proxy's uid; the proxy refuses to start the approver — so every `ask` fails closed — if `~/.nockguard` or the directory is a symlink, the socket is a symlink, is owned by someone else, or has any other mode). Decide from another terminal:
+
+  ```
+  nockguard approvals list            # id, agent, tool, reason, age — never arguments
+  nockguard approvals approve <id>
+  nockguard approvals deny <id>
+  nockguard approvals prune           # remove dead sockets of crashed proxies (run with no proxies running)
+  ```
+
+  A proxy removes only its own socket, on a clean exit; the CLI skips sockets nobody answers on, and only the explicit `approvals prune` command removes sockets. A crashed proxy leaves a harmless dead socket behind; `approvals prune` removes only sockets owned by your uid that refuse two connections 1 s apart (run it when no proxies are running: on macOS a full listen backlog also looks like a refusal). Live sockets, non-sockets and other users' files are left alone.
+
+  The timeout (2 minutes) and deny-on-timeout are unchanged. The decision is audited as `approval-granted` / `approval-denied` with the reason `approved by local:<uid>` / `denied by local:<uid>` (the uid is read from the socket peer, Linux and macOS only; elsewhere the approver does not start).
+
+  **Trust boundary.** The socket is protected by file permissions and a same-uid peer check, nothing else. If the agent runs as the same user as the operator, it can open the socket and approve its own calls: this approver does not stop it on its own. To make the boundary real, run the agent under a different uid, or fence `~/.nockguard` away from it (for example with NockLock's filesystem fence). `NOCKGUARD_APPROVER` is stripped from the upstream MCP child's environment, but that is not a defense against a hostile same-uid agent.
 - [x] Live Wall: real-time local dashboard streaming every policy decision from the audit trail
 
 ## License

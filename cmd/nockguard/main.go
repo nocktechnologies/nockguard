@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
@@ -36,6 +37,19 @@ func buildApprover(logger *log.Logger) approval.Approver {
 	case "deny":
 		return approval.NewStaticApprover(false, "test-auto-deny")
 	}
+	const timeout = 2 * time.Minute
+	if os.Getenv(approval.EnvApprover) == "local" {
+		dir, err := approval.DefaultLocalDir()
+		if err == nil {
+			var a *approval.LocalApprover
+			if a, err = approval.NewLocalApprover(dir, timeout); err == nil {
+				logger.Printf("Phase 5 approval gate ON — local socket in %s (decide with `nockguard approvals`), %s timeout, fail-safe deny", dir, timeout)
+				return a
+			}
+		}
+		logger.Printf("Phase 5 approval gate: local approver REFUSED to start (%v); ALL gated calls fail CLOSED", err)
+		return nil
+	}
 	// Real approver: a DEDICATED Telegram bot (never the fleet's main bot). Both
 	// env vars must be set; otherwise NO approver is wired and every gated call
 	// fails closed (logged loud below). These creds are read HERE, in the proxy
@@ -50,6 +64,14 @@ func buildApprover(logger *log.Logger) approval.Approver {
 	}
 	logger.Printf("Phase 5 approval gate: no approver configured (set NOCKGUARD_APPROVAL_BOT_TOKEN + NOCKGUARD_APPROVAL_CHAT_ID); ALL gated calls fail CLOSED — both `ask` rules and legacy `require_approval` rules will be DENIED until an approver is wired")
 	return nil
+}
+
+// closeApprover removes the local approver's own socket on exit; other
+// approvers hold nothing on disk.
+func closeApprover(a approval.Approver) {
+	if c, ok := a.(io.Closer); ok {
+		_ = c.Close()
+	}
 }
 
 func main() {
@@ -71,6 +93,10 @@ func runCLI(args []string) int {
 	if args[0] == "version" {
 		fmt.Println("nockguard v0.5.0")
 		return 0
+	}
+
+	if args[0] == "approvals" {
+		return runApprovals(args[1:])
 	}
 
 	if args[0] == "audit" {
@@ -272,9 +298,11 @@ func runCLI(args []string) int {
 	logger := log.New(os.Stderr, "[nockguard] ", log.LstdFlags)
 	upstream := parseCommand(upstreamCmd)
 
+	approver := buildApprover(logger)
+	defer closeApprover(approver)
 	p := proxy.NewStdioProxy(upstream, agent, engine, validator, limiter, auditor, forwarder, logger).
 		WithTrust(trustAccumulator).
-		WithApprover(buildApprover(logger))
+		WithApprover(approver)
 	if err := p.Run(); err != nil {
 		logger.Printf("proxy error: %v", err)
 		return 1
@@ -614,9 +642,11 @@ func runMCPListen(args []string) int {
 	logger := log.New(os.Stderr, "[nockguard-mcp-listen] ", log.LstdFlags)
 	logger.Printf("starting MCP enforcement listener listen=%s upstream=%s agent=%s policy=%s", listen, parsedUpstream.Redacted(), agent, policyPath)
 
+	approver := buildApprover(logger)
+	defer closeApprover(approver)
 	gate := proxy.NewStdioProxy(nil, agent, engine, validator, limiter, auditor, forwarder, logger).
 		WithTrust(trustAccumulator).
-		WithApprover(buildApprover(logger))
+		WithApprover(approver)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -1384,6 +1414,7 @@ Usage:
   nockguard trust show --agent <name>
   nockguard audit verify ...   # same as 'nockguard verify' (the audit-namespaced form)
   nockguard evidence --framework soc2 (--agent <name> | --ed25519-pub-env <ENV> | --key-env <ENV>) [--audit <path>] [--audit-dir <dir>] [--from <date>] [--to <date>] [--format html|json] [-o <file>]
+  nockguard approvals (list | approve <id> | deny <id> | prune)  (decide calls held by NOCKGUARD_APPROVER=local; prune removes dead sockets)
   nockguard keygen [--agent <name>] [--force] [--print-env]
   nockguard version
 

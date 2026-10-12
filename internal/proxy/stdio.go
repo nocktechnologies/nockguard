@@ -859,7 +859,7 @@ func (p *StdioProxy) approveAsk(tool string, params json.RawMessage, refs *extra
 		p.resolveAudit(seq)
 		return false
 	}
-	v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: tool, Params: params})
+	v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: tool, Params: params, Reason: dec.Reason})
 	if !v.Approved {
 		p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)
 		p.appendAudit(seq, tool, "approval-denied", v.Reason, refs)
