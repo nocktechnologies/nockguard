@@ -43,16 +43,34 @@ func askAsync(a *LocalApprover) chan Verdict {
 	return ch
 }
 
-func waitPending(t *testing.T, dir string) Pending {
-	t.Helper()
+// pollPending is safe off the test goroutine: it reports instead of failing.
+func pollPending(dir string) (Pending, bool) {
 	for i := 0; i < 200; i++ {
 		if h, _ := ListPending(dir); len(h) == 1 {
-			return h[0]
+			return h[0], true
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("held call never listed")
-	return Pending{}
+	return Pending{}, false
+}
+
+func waitPending(t *testing.T, dir string) Pending {
+	t.Helper()
+	h, ok := pollPending(dir)
+	if !ok {
+		t.Fatal("held call never listed")
+	}
+	return h
+}
+
+// sockPath is the single socket under dir.
+func sockPath(t *testing.T, dir string) string {
+	t.Helper()
+	socks, _ := filepath.Glob(filepath.Join(dir, "*.sock"))
+	if len(socks) != 1 {
+		t.Fatalf("want one socket in %s, got %v", dir, socks)
+	}
+	return socks[0]
 }
 
 func TestLocalApproveAndDeny(t *testing.T) {
@@ -89,7 +107,7 @@ func TestLocalListNeverLeaksArguments(t *testing.T) {
 	if strings.Contains(strings.Join([]string{h.ID, h.Agent, h.Tool, h.Reason}, "|"), "hunter2") {
 		t.Fatal("listing leaked arguments")
 	}
-	raw, err := localCall(filepath.Join(dir, itoa(os.Getpid())+".sock"), localMsg{Op: "list"})
+	raw, err := localCall(sockPath(t, dir), localMsg{Op: "list"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +168,7 @@ func TestLocalRefusesSymlinkDir(t *testing.T) {
 func TestLocalSocketIs0600(t *testing.T) {
 	a, dir := startLocal(t, time.Second)
 	_ = a
-	fi, err := os.Lstat(filepath.Join(dir, itoa(os.Getpid())+".sock"))
+	fi, err := os.Lstat(sockPath(t, dir))
 	if err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("socket mode = %v, err %v", fi.Mode(), err)
 	}
@@ -160,7 +178,7 @@ func TestLocalGarbageDoesNotDecide(t *testing.T) {
 	a, dir := startLocal(t, 5*time.Second)
 	got := askAsync(a)
 	h := waitPending(t, dir)
-	c, err := net.Dial("unix", filepath.Join(dir, itoa(os.Getpid())+".sock"))
+	c, err := net.Dial("unix", sockPath(t, dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,16 +203,24 @@ func mustJSON(v any) []byte {
 }
 
 // A decision that lands after the timer fires but before Ask checks the hold
-// was reported OK to the operator, so it must be the verdict.
+// was reported OK to the operator, so it must be the verdict. The hook runs on
+// the Ask goroutine, so it reports over a channel and the test goroutine fails.
 func TestLocalTimeoutRaceHonorsReportedDecision(t *testing.T) {
 	a, dir := startLocal(t, 50*time.Millisecond)
+	hookErr := make(chan error, 1)
 	a.beforeTimeoutCheck = func() {
-		h := waitPending(t, dir)
-		if err := Decide(dir, h.ID, true); err != nil {
-			t.Errorf("decide in the race window: %v", err)
+		h, ok := pollPending(dir)
+		if !ok {
+			hookErr <- errors.New("held call never listed")
+			return
 		}
+		hookErr <- Decide(dir, h.ID, true)
 	}
-	if v := <-askAsync(a); !v.Approved {
+	v := <-askAsync(a)
+	if err := <-hookErr; err != nil {
+		t.Fatalf("decide in the race window: %v", err)
+	}
+	if !v.Approved {
 		t.Errorf("operator was told OK but the call was %+v", v)
 	}
 }
@@ -212,50 +238,109 @@ func TestLocalLateDecideAfterTimeoutIsRefused(t *testing.T) {
 	}
 }
 
-func TestLocalStartupStaleSocketCleanup(t *testing.T) {
-	uid := uint32(os.Getuid())
-	dir := filepath.Dir(shortDir(t))
-	// regular file: refused, left in place
-	f := filepath.Join(dir, "f.sock")
-	os.WriteFile(f, nil, 0o600)
-	if err := clearStaleSocket(f, uid); err == nil {
-		t.Error("removed a regular file")
-	}
-	if _, err := os.Lstat(f); err != nil {
-		t.Error("regular file was deleted")
-	}
-	// dead socket (listener closed, file left behind): removed
-	s := filepath.Join(dir, "s.sock")
-	ln, err := net.Listen("unix", s)
+// deadSocket leaves a socket file with no listener behind, like a crashed proxy.
+func deadSocket(t *testing.T, path string) {
+	t.Helper()
+	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ln.(*net.UnixListener).SetUnlinkOnClose(false)
 	ln.Close()
-	if err := clearStaleSocket(s, uid); err != nil {
-		t.Errorf("stale socket not cleared: %v", err)
-	}
-	if _, err := os.Lstat(s); err == nil {
-		t.Error("stale socket still present")
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
 func TestLocalListPendingDoesNotUnlinkDeadSockets(t *testing.T) {
 	_, dir := startLocal(t, time.Second)
-	s := filepath.Join(dir, "99999.sock")
-	ln, err := net.Listen("unix", s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ln.(*net.UnixListener).SetUnlinkOnClose(false)
-	ln.Close()
-	os.Chmod(s, 0o600)
+	s := filepath.Join(dir, "99999-0123456789abcdef.sock")
+	deadSocket(t, s)
 	if _, err := ListPending(dir); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(s); err != nil {
 		t.Error("ListPending unlinked a socket")
 	}
+}
+
+func TestLocalSocketNamesAreUniqueAndClosedOnExit(t *testing.T) {
+	a1, dir := startLocal(t, time.Second)
+	a2, err := NewLocalApprover(dir, time.Second)
+	if err != nil {
+		t.Fatalf("second approver in the same process/dir: %v", err)
+	}
+	if a1.base == a2.base {
+		t.Fatalf("socket names collide: %s", a1.base)
+	}
+	if !sockBase.MatchString(a1.base) || !strings.HasPrefix(a1.base, itoa(os.Getpid())+"-") {
+		t.Errorf("socket name %q is not <pid>-<16 hex>", a1.base)
+	}
+	// Close removes only its own socket.
+	if err := a2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, a2.base+".sock")); err == nil {
+		t.Error("Close left its own socket behind")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, a1.base+".sock")); err != nil {
+		t.Error("Close removed another approver's socket")
+	}
+}
+
+func TestLocalPruneStale(t *testing.T) {
+	_, dir := startLocal(t, time.Second) // live: must survive
+	dead := filepath.Join(dir, "99999-0123456789abcdef.sock")
+	deadSocket(t, dead)
+	file := filepath.Join(dir, "plain.sock") // not a socket: must survive
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := PruneStale(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || removed[0] != dead {
+		t.Errorf("removed %v, want only %s", removed, dead)
+	}
+	if _, err := os.Lstat(dead); err == nil {
+		t.Error("dead socket still present")
+	}
+	if _, err := os.Lstat(file); err != nil {
+		t.Error("prune removed a regular file")
+	}
+	socks, _ := filepath.Glob(filepath.Join(dir, "*-*.sock"))
+	if len(socks) != 1 {
+		t.Errorf("live socket was pruned: %v", socks)
+	}
+}
+
+// The proxy must refuse the same symlinked ~/.nockguard the client refuses, so
+// the ask fails closed at startup rather than timing out.
+func TestLocalProxyRefusesSymlinkedParent(t *testing.T) {
+	root := filepath.Dir(shortDir(t))
+	real := filepath.Join(root, "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(link, "approvals")
+	if a, err := NewLocalApprover(dir, time.Second); err == nil {
+		a.Close()
+		t.Error("proxy accepted a symlinked parent the client refuses")
+	}
+	if _, err := ListPending(dir); err == nil {
+		t.Error("client accepted the symlinked parent")
+	}
+	// Positive control: the real directory works.
+	a, err := NewLocalApprover(filepath.Join(real, "approvals"), time.Second)
+	if err != nil {
+		t.Fatalf("real parent must start: %v", err)
+	}
+	a.Close()
 }
 
 func TestLocalCLIRefusesSymlinkedDirAndForeignServer(t *testing.T) {
@@ -282,13 +367,5 @@ func TestLocalCLIRefusesSymlinkedDirAndForeignServer(t *testing.T) {
 func TestLocalAcceptTemporary(t *testing.T) {
 	if !acceptTemporary(syscall.EMFILE) || acceptTemporary(errors.New("boom")) {
 		t.Error("acceptTemporary misclassifies")
-	}
-}
-
-func TestLocalRefusesLiveSocketOfSamePid(t *testing.T) {
-	_, dir := startLocal(t, time.Second)
-	if a2, err := NewLocalApprover(dir, time.Second); err == nil {
-		a2.ln.Close()
-		t.Error("second approver replaced a live socket")
 	}
 }

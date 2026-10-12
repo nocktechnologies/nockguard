@@ -91,6 +91,7 @@ func serveMCPGateway(ctx context.Context, path string) error {
 		logger.Printf("policy warning: %s", warning)
 	}
 	approver := buildApprover(logger)
+	defer closeApprover(approver)
 	// One agent's quota, trust and audit objects are shared. The mutable card
 	// state and audit sequencing belong to each fresh session gate.
 	g, err := gateway.New(c, func() http.Handler {

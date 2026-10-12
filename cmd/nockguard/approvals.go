@@ -42,7 +42,18 @@ func runApprovals(args []string) int {
 		}
 		fmt.Printf("%s %s\n", args[0], args[1])
 		return 0
+	case len(args) == 1 && args[0] == "prune":
+		removed, err := approval.PruneStale(dir)
+		for _, r := range removed {
+			fmt.Println("removed", r)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "approvals:", err)
+			return 1
+		}
+		fmt.Printf("pruned %d stale socket(s)\n", len(removed))
+		return 0
 	}
-	fmt.Fprintln(os.Stderr, "usage: nockguard approvals (list | approve <id> | deny <id>)")
+	fmt.Fprintln(os.Stderr, "usage: nockguard approvals (list | approve <id> | deny <id> | prune)")
 	return 1
 }

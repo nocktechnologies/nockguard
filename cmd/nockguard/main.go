@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
@@ -63,6 +64,14 @@ func buildApprover(logger *log.Logger) approval.Approver {
 	}
 	logger.Printf("Phase 5 approval gate: no approver configured (set NOCKGUARD_APPROVAL_BOT_TOKEN + NOCKGUARD_APPROVAL_CHAT_ID); ALL gated calls fail CLOSED — both `ask` rules and legacy `require_approval` rules will be DENIED until an approver is wired")
 	return nil
+}
+
+// closeApprover removes the local approver's own socket on exit; other
+// approvers hold nothing on disk.
+func closeApprover(a approval.Approver) {
+	if c, ok := a.(io.Closer); ok {
+		_ = c.Close()
+	}
 }
 
 func main() {
@@ -289,9 +298,11 @@ func runCLI(args []string) int {
 	logger := log.New(os.Stderr, "[nockguard] ", log.LstdFlags)
 	upstream := parseCommand(upstreamCmd)
 
+	approver := buildApprover(logger)
+	defer closeApprover(approver)
 	p := proxy.NewStdioProxy(upstream, agent, engine, validator, limiter, auditor, forwarder, logger).
 		WithTrust(trustAccumulator).
-		WithApprover(buildApprover(logger))
+		WithApprover(approver)
 	if err := p.Run(); err != nil {
 		logger.Printf("proxy error: %v", err)
 		return 1
@@ -631,9 +642,11 @@ func runMCPListen(args []string) int {
 	logger := log.New(os.Stderr, "[nockguard-mcp-listen] ", log.LstdFlags)
 	logger.Printf("starting MCP enforcement listener listen=%s upstream=%s agent=%s policy=%s", listen, parsedUpstream.Redacted(), agent, policyPath)
 
+	approver := buildApprover(logger)
+	defer closeApprover(approver)
 	gate := proxy.NewStdioProxy(nil, agent, engine, validator, limiter, auditor, forwarder, logger).
 		WithTrust(trustAccumulator).
-		WithApprover(buildApprover(logger))
+		WithApprover(approver)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -1401,7 +1414,7 @@ Usage:
   nockguard trust show --agent <name>
   nockguard audit verify ...   # same as 'nockguard verify' (the audit-namespaced form)
   nockguard evidence --framework soc2 (--agent <name> | --ed25519-pub-env <ENV> | --key-env <ENV>) [--audit <path>] [--audit-dir <dir>] [--from <date>] [--to <date>] [--format html|json] [-o <file>]
-  nockguard approvals (list | approve <id> | deny <id>)  (decide calls held by NOCKGUARD_APPROVER=local)
+  nockguard approvals (list | approve <id> | deny <id> | prune)  (decide calls held by NOCKGUARD_APPROVER=local; prune removes dead sockets)
   nockguard keygen [--agent <name>] [--force] [--print-env]
   nockguard version
 

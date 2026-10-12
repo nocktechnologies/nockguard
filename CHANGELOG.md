@@ -5,7 +5,7 @@ All notable changes to NockGuard are documented here.
 ## [Unreleased]
 
 ### Added
-- Local approver for `ask` verdicts, with no network: set `NOCKGUARD_APPROVER=local` and decide held calls with `nockguard approvals list|approve|deny`. Held calls wait on a `0600` unix socket in a `0700` `~/.nockguard/approvals/` and are audited as `approval-granted` / `approval-denied` with the approver `local:<uid>`. The listing shows id, agent, tool, reason and age, never arguments. The approver does not start (and `ask` fails closed) if the directory or socket permissions, ownership or type are wrong. A same-uid agent can still approve its own calls; see the README trust boundary.
+- Local approver for `ask` verdicts, with no network: set `NOCKGUARD_APPROVER=local` and decide held calls with `nockguard approvals list|approve|deny` (`prune` removes dead sockets left by crashed proxies). Held calls wait on a `0600` unix socket in a `0700` `~/.nockguard/approvals/` (one `<pid>-<random>.sock` per proxy, removed on exit) and are audited as `approval-granted` / `approval-denied` with the approver `local:<uid>`. The listing shows id, agent, tool, reason and age, never arguments. The approver does not start (and `ask` fails closed) if the directory or socket permissions, ownership or type are wrong. A same-uid agent can still approve its own calls; see the README trust boundary.
 
 ## [0.5.0] - 2026-10-10
 

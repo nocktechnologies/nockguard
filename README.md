@@ -417,13 +417,16 @@ What Nock Technologies sells is the part that only makes sense as a **service or
 - [x] Phase 4+: Non-repudiable audit — Ed25519 asymmetric signing (private-key signs, public-key verifies), `keygen`, standards-aligned
 - [x] Phase 5: Interactive approval gates — human-in-the-loop hold on consequential tools (dedicated Telegram bot or local socket approver, fail-safe deny)
 
-  **Local approver** (no network). Start the proxy with `NOCKGUARD_APPROVER=local` and held calls wait on a unix socket at `~/.nockguard/approvals/<proxy pid>.sock` (directory `0700`, socket `0600`, both owned by the proxy's uid; the proxy refuses to start the approver — so every `ask` fails closed — if the directory or socket is a symlink, is owned by someone else, or has any other mode). Decide from another terminal:
+  **Local approver** (no network). Start the proxy with `NOCKGUARD_APPROVER=local` and held calls wait on a unix socket at `~/.nockguard/approvals/<proxy pid>-<16 random hex>.sock` (directory `0700`, socket `0600`, both owned by the proxy's uid; the proxy refuses to start the approver — so every `ask` fails closed — if `~/.nockguard` or the directory is a symlink, the socket is a symlink, is owned by someone else, or has any other mode). Decide from another terminal:
 
   ```
   nockguard approvals list            # id, agent, tool, reason, age — never arguments
   nockguard approvals approve <id>
   nockguard approvals deny <id>
+  nockguard approvals prune           # remove dead sockets of crashed proxies
   ```
+
+  A proxy removes only its own socket, on a clean exit; the CLI skips sockets nobody answers on and never unlinks anything. A crashed proxy leaves a harmless dead socket behind; `approvals prune` removes only sockets owned by your uid that refuse connection (live sockets, non-sockets and other users' files are left alone).
 
   The timeout (2 minutes) and deny-on-timeout are unchanged. The decision is audited as `approval-granted` / `approval-denied` with the reason `approved by local:<uid>` / `denied by local:<uid>` (the uid is read from the socket peer, Linux and macOS only; elsewhere the approver does not start).
 
