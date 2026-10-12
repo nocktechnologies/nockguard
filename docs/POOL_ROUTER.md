@@ -1,21 +1,19 @@
 # NockGuard Pool Router (`nockguard-pool`)
 
-Status: **V1 in development** (this document is the design contract — the code
-ships against it, and any behavior not documented here is a bug).
+Status: **scaffold**. `nockguard-pool validate` loads and checks config;
+`nockguard-pool serve` refuses to start because routing is not implemented.
+The behavior below is the target V1 contract, not current runtime behavior.
 
-NockGuard's promise is that every agent action passes through an accountable
-gate. The MCP proxy covers *tool calls*; the pool router covers the other half
-of what an agent does: *model traffic*. It pools multiple Codex subscriptions
-behind one local endpoint and routes each request to the account with headroom,
-so multi-subscription fleets stop hand-switching `--codex-home` — with every
-routing decision audited, signed, and visible.
+The MCP proxy covers *tool calls*. The planned pool router would cover *model
+traffic*: pool multiple Codex subscriptions behind one local endpoint and route
+each request to an account with headroom, with routing decisions audited.
 
-## Full disclosure — everything this component does
+## Target V1 contract
 
-This section is the contract. If the binary does something not listed here,
-that is a bug to be reported and fixed, not a feature.
+This section specifies the planned routing behavior. Runtime behavior today is
+limited to config validation and refusing `serve`.
 
-**It does:**
+**Target V1 behavior:**
 
 1. Listen on a localhost port (never a public interface by default).
 2. Reverse-proxy Codex backend traffic (`/backend-api/codex/*`) to one of the
@@ -38,7 +36,7 @@ that is a bug to be reported and fixed, not a feature.
 9. Refresh an upstream's OAuth token on auth failure and persist the rotated
    token back to that account's own `auth.json`.
 
-**It does NOT:**
+**Target V1 exclusions:**
 
 - Log, store, or inspect prompt or response *content*. Bodies stream through;
   routing uses headers and event metadata only.
@@ -50,7 +48,7 @@ that is a bug to be reported and fixed, not a feature.
 - Share, multiplex, or resell account access. It routes one operator's own
   subscriptions for that operator's own agents.
 
-## What is stored, exactly
+## Target V1 storage
 
 | Data | Where | Contents |
 |---|---|---|

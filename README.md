@@ -1,6 +1,6 @@
 # NockGuard™
 
-**The MCP firewall.** Put NockGuard in front of any MCP server and every tool call your agent makes is policy-checked, blocked when it should be, and written to a signed audit trail nobody can quietly edit — including you.
+**The MCP firewall.** Put NockGuard in front of an MCP server and the tool calls routed through it are policy-checked. With auditing and Ed25519 signing enabled, decisions can be recorded in a verifiable trail. A private-key holder can sign new records, and detecting rollback of both the trail and its signed checkpoint requires an external anchor.
 
 Every agent connector is untrusted until proven otherwise. NockGuard is how you prove it.
 
@@ -150,14 +150,14 @@ Rate limiting and spend caps are opt-in and independent — set one, both, or ne
 
 ## Verify a trail in one command
 
-Any signed audit trail can be proven intact and non-repudiable **offline** — no daemon, no signing key, only the public key:
+An Ed25519-signed audit trail can be checked for signature and hash-chain integrity **offline** with only the public key:
 
 ```bash
 nockguard verify --agent coder    # one agent's trail (exit 0 = intact + authentic, 2 = tampered)
 nockguard verify --all          # every per-agent trail in one shot — prove the whole fleet
 ```
 
-`--all` scans the audit dir for every `<agent>.audit.jsonl`, verifies each with that agent's own public key, and prints a per-agent summary (exit 0 = all intact, 2 = any tampered, 1 = any it could not verify). An audit dir with **zero** trails is not "protected": there is nothing to verify, so `--all` prints `VERDICT: NO_TRAILS` and exits 1. That single command replays the whole hash chain and the per-entry signatures: it proves the trail was not edited, reordered, truncated, or signed by anyone but the holder of the agent's private key. `verify` is the first-class form of `audit verify` (below), which documents HMAC vs Ed25519 signing, per-agent keys, and the compliance evidence packs.
+`--all` scans the audit dir for every `<agent>.audit.jsonl`, verifies each with that agent's own public key, and prints a per-agent summary (exit 0 = all intact, 2 = any tampered, 1 = any it could not verify). An audit dir with **zero** trails is not "protected": there is nothing to verify, so `--all` prints `VERDICT: NO_TRAILS` and exits 1. That command replays the hash chain and signatures, detecting edits, reordering, and truncation against the retained signed checkpoint. It cannot distinguish the original writer from another holder of the private key or detect rollback of both trail and checkpoint without an external anchor. `verify` is the first-class form of `audit verify` (below), which documents HMAC vs Ed25519 signing, per-agent keys, and the compliance evidence packs.
 
 ### One verdict for a session across NockGuard and NockLock
 
@@ -364,7 +364,7 @@ and the explicit completeness limit on severity, decision, and text filters.
 
 ### NockLock + NockGuard in one wall
 
-`--lock-db <path>` adds a [NockLock](https://github.com/nocktechnologies/nocklock) `events.db` to the same stream. The path is explicit (no discovery) and is opened read-only (`mode=ro`, `query_only`; never `immutable`, so rows NockLock appends show up live). The wall shows the six fence events — file, network and secret, blocked and passed — labeled `LOCK`, next to `GUARD` decisions and colored by outcome. Lifecycle and fence-status rows are skipped. Like Guard rows, a Lock row is the decision only: the event type and the target NockLock recorded (a path, a host, a secret *name*), never a request body or a secret value.
+`--lock-db <path>` adds a [NockLock](https://github.com/nocktechnologies/nocklock) SQLite `events.db` beside NockGuard's JSONL trail in one Wall view; the sources retain their separate formats. The path is explicit (no discovery) and is opened read-only (`mode=ro`, `query_only`; never `immutable`, so rows NockLock appends show up live). The wall shows the six fence events — file, network and secret, blocked and passed — labeled `LOCK`, next to `GUARD` decisions and colored by outcome. Lifecycle and fence-status rows are skipped. Like Guard rows, a Lock row is the decision only: the event type and the target NockLock recorded (a path, a host, a secret *name*), never a request body or a secret value.
 
 Each recent session also gets one signed-proof badge, computed by the same code as `nockguard verify --session` (NockLock's public `pkg/receipt` for the Lock chain, `audit.VerifyEd25519Bytes` for the Guard trail): `PROTECTED`, `TAMPERED`, `UNSIGNED`, `UNVERIFIABLE`, `NO_ROWS` or `UNANCHORED`, with both key fingerprints. Only `PROTECTED` is green. A missing or unusable key on either side is `UNVERIFIABLE`, never green. The wall builds ONE snapshot per refresh and renders every view from it: the Guard trail and its checkpoint are read once and verified once; the Lock DB is copied once with SQLite `VACUUM INTO` (one read transaction; that connection is `mode=ro` but not `query_only`, which would forbid the copy, and the copy lives in a private temp directory removed after the run) and both the Lock rows and the Lock chain walk use that copy. The badges, the replayed stream, `/pulse` and `/export` (signed or unsigned) read the same slices, so what the wall shows is what was checked. A refresh is not repeated within 4 s, and after that only when a log's size or mtime moved; because those can be preserved by an attacker, a refresh is also forced every 60 s. A Lock log above 100,000 events is not copied or verified: its badges read `UNVERIFIABLE` (too large to verify) and its rows are shown unverified. A Lock row that cannot be read is shown as `UNPARSEABLE` (within the 500-row window) and makes its session `UNVERIFIABLE`; the rest of the batch is unaffected, and the chain walk itself rejects an unreadable row anywhere in the log. A browser reconnect and an export always build a fresh snapshot; `/pulse` and `/sessions` reuse the last one. Reasons name the live Lock DB, never the temporary copy. The Lock DB path must be a regular file, not a symlink. Keys come from the environment, never the browser.
 
@@ -406,22 +406,22 @@ auditing and a per-agent Ed25519 signing key. See the
 [configuration template](docs/gateway.example.yaml). The issuer and ingress must
 be supplied separately; this command does not deploy or switch a live connector.
 
-NockGuard operates at the **MCP transport layer**. It gates messages through its
-stdio proxy or HTTP enforcement listeners. That is its coverage boundary.
+NockGuard gates MCP messages through its stdio proxy or HTTP enforcement listeners.
+Its separate `egress-proxy` covers HTTP/HTTPS clients that use the forward proxy.
 
 **What NockGuard covers:**
 - Every `tools/list` and `tools/call` MCP message the agent sends through the proxy.
 - All policy decisions (allow, deny, ask, rate-limit, spend-cap) on those calls.
-- The full audit trail and Live Wall feed for those decisions.
+- An audit trail and Live Wall feed for those decisions when auditing is enabled.
+- Destination-host decisions for HTTP/HTTPS traffic sent through `egress-proxy` (`--enforce` blocks denied hosts).
 
 **What NockGuard does not cover:**
-- Direct HTTP/REST calls an agent makes to a backend service (e.g., a backend's REST API via `curl` or an HTTP client) that bypass the MCP proxy entirely.
-- Network egress to arbitrary URLs — NockGuard is not an HTTP forward proxy.
+- HTTP/HTTPS traffic that does not use `nockguard egress-proxy`.
 - Calls routed to MCP servers that are not wired through NockGuard (an agent can have multiple MCP servers; only the ones using `nockguard proxy` as their command are gated).
 
-This is a deliberate design constraint, not a defect. An agent that calls the backing REST API directly — rather than through its MCP server — operates outside the gated channel. The accountability guarantee is: **every MCP tool call through NockGuard is policy-checked, audited, and optionally non-repudiably signed**. It does not extend to direct HTTP traffic that never touches the proxy.
+MCP policy enforcement applies to calls routed through NockGuard; direct HTTP calls require separate egress-proxy routing to be seen or enforced.
 
-If your threat model includes agents switching to curl/HTTP as a bypass, enforce that at the network layer (egress firewall, outbound proxy, NockLock seccomp policy) rather than at the MCP layer. HTTP forward-proxy coverage for NockGuard is a planned feature.
+For HTTP/HTTPS clients configured to use it, `nockguard egress-proxy` checks destination hosts, records decisions when auditing is enabled, and can block denied hosts with `--enforce`; without that flag it is observe-only. Clients that bypass the proxy need a network-layer control such as an egress firewall or NockLock network fence.
 
 ## Relationship to NockLock
 
@@ -432,7 +432,7 @@ Same brand, same tap, independent products. Use one or both.
 
 ## What is free, and what is a service
 
-Everything in this repository is MIT and fully functional. There is no license key, no feature flag that phones home, and nothing in the binary that stops working after a date. The on-ramp — `proxy`, `verify` / `audit verify`, `policy propose` / `shadow-report`, `init`, `keygen`, `selftest`, and the Live Wall you run yourself with `nockguard wall` — is the product, and it is yours.
+Everything in this repository is MIT-licensed. `nockguard-pool` is a scaffold: `validate` works, but `serve` refuses to start because routing is not implemented. There is no license key, no feature flag that phones home, and nothing in the binary that stops working after a date. The on-ramp — `proxy`, `verify` / `audit verify`, `policy propose` / `shadow-report`, `init`, `keygen`, `selftest`, and the Live Wall you run yourself with `nockguard wall` — is the product, and it is yours.
 
 What Nock Technologies sells is the part that only makes sense as a **service or at fleet scale**: a hosted Live Wall across many agents and machines, compliance evidence packs generated from your signed trails (`nockguard evidence` today; hosted generation and retention later), fleet-wide trust and egress enforcement, and support. If you never need those, you never need us — and your trail still verifies with the public key alone.
 
