@@ -358,6 +358,30 @@ downloaded file plus the public key to a reviewer. They can run
 [verifying a Live Wall export](docs/verifying-the-trail.md) for the proof scope
 and the explicit completeness limit on severity, decision, and text filters.
 
+### NockLock + NockGuard in one wall
+
+`--lock-db <path>` adds a [NockLock](https://github.com/nocktechnologies/nocklock) `events.db` to the same stream. The path is explicit (no discovery) and is opened read-only (`mode=ro`, `query_only`; never `immutable`, so rows NockLock appends show up live). The wall shows the six fence events — file, network and secret, blocked and passed — labeled `LOCK`, next to `GUARD` decisions and colored by outcome. Lifecycle and fence-status rows are skipped. Like Guard rows, a Lock row is the decision only: the event type and the target NockLock recorded (a path, a host, a secret *name*), never a request body or a secret value.
+
+Each recent session also gets one signed-proof badge, computed by the same code as `nockguard verify --session` (NockLock's public `pkg/receipt` for the Lock chain, `audit.VerifyEd25519Bytes` for the Guard trail): `PROTECTED`, `TAMPERED`, `UNSIGNED`, `UNVERIFIABLE`, `NO_ROWS` or `UNANCHORED`, with both key fingerprints. Only `PROTECTED` is green. A missing or unusable key on either side is `UNVERIFIABLE`, never green. The wall builds ONE snapshot per refresh and renders every view from it: the Guard trail and its checkpoint are read once and verified once; the Lock DB is copied once with SQLite `VACUUM INTO` (one read transaction; that connection is `mode=ro` but not `query_only`, which would forbid the copy, and the copy lives in a private temp directory removed after the run) and both the Lock rows and the Lock chain walk use that copy. The badges, the replayed stream, `/pulse` and `/export` (signed or unsigned) read the same slices, so what the wall shows is what was checked. A refresh is not repeated within 4 s, and after that only when a log's size or mtime moved; because those can be preserved by an attacker, a refresh is also forced every 60 s. A Lock log above 100,000 events is not copied or verified: its badges read `UNVERIFIABLE` (too large to verify) and its rows are shown unverified. A Lock row that cannot be read is shown as `UNPARSEABLE` (within the 500-row window) and makes its session `UNVERIFIABLE`; the rest of the batch is unaffected, and the chain walk itself rejects an unreadable row anywhere in the log. A browser reconnect and an export always build a fresh snapshot; `/pulse` and `/sessions` reuse the last one. Reasons name the live Lock DB, never the temporary copy. The Lock DB path must be a regular file, not a symlink. Keys come from the environment, never the browser.
+
+```bash
+# NockLock session + NockGuard agent "coder": Lock key and Guard key in env vars
+export NOCKLOCK_AUDIT_ED25519_PUB=<lock public key hex>
+export NOCKGUARD_AGENT_CODER_ED25519_PUB=<guard public key hex>
+go run ./cmd/nockguard-wall --agent coder --lock-db ~/path/to/nocklock/events.db
+# explicit form
+go run ./cmd/nockguard-wall --audit ~/.nockguard/logs/coder.audit.jsonl \
+  --verify-ed25519-pub-env GUARD_PUB --lock-db ./events.db --lock-pub-env LOCK_PUB
+```
+
+The badge is the rollback-blind local check `verify --session` makes (it consults no remote anchor); see its printed note.
+
+`--lock-db` shows every session in the log, even with `--agent`; sessions the watched agent never touched badge `NO_ROWS`. Only the 10 most recent sessions get a badge (each badge is a full walk of both chains); export rows from older sessions read `unsigned`, meaning not checked. `--demo` cannot be combined with `--lock-db`.
+
+With `--lock-db`, the `/export` CSV and JSON include every Guard row in the window plus the Lock rows (each source keeps its own 500-row cap). A Lock row reads `verified` only when its session is `PROTECTED` in that same snapshot, `failed` when `TAMPERED`, else `unsigned`. The response header `X-NockGuard-Lock-Verification` is `ok`, `unsigned` when no Guard verification key is configured (nothing is verified), or `unavailable` when the Lock DB could not be snapshotted (then no Lock rows are exported). The PROOF export is NockGuard rows only.
+
+**Proof export scope.** The PROOF button is a signed export of the **NockGuard rows only**; it does not include Lock rows. Verify the Lock side with the session badge or `nockguard verify --session <id> --lock-db <path> --guard-trail <path> ...`. `/pulse` and the CSV/JSON export do include Lock rows (new trailing `source` column; a Lock row reads `verified` only when its whole session badge is `PROTECTED`). `--demo` mixes in synthetic Lock rows and one `UNSIGNED` demo session badge: demo data is never verified.
+
 ## How It Works
 
 NockGuard intercepts two MCP methods:

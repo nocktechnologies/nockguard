@@ -63,3 +63,23 @@ signing key protected: anyone holding it can sign false receipts, just as they
 can sign false audit rows.
 As with ordinary trail verification, rolling both the trail and signed head
 back to an earlier genuine state needs an external anchor to detect.
+
+## Live Wall session badges: completeness limits
+
+With `--lock-db`, the wall's badges, stream replay, pulse and export are all
+rendered from one snapshot per refresh (Guard bytes read and verified once; Lock
+rows and Lock chain walk from one copy of the DB), so a row is never marked
+verified by a check that read different bytes. The limits:
+
+- **Refresh cadence.** Not repeated within 4 s; after that only when a log's size
+  or mtime changed; forced every 60 s because size and mtime can be preserved by
+  an attacker. A view can therefore be up to 60 s old when nothing visibly moved.
+- **Row limit.** The Lock chain walk is whole-chain, so its cost grows with the
+  log. Above 100,000 Lock events nothing is copied or verified: every badge is
+  `UNVERIFIABLE` (too large to verify) and the rows show unverified. The Guard
+  trail is bounded by the wall's 64 MiB snapshot limit the same way.
+- **Unparseable rows.** A fence row the wall cannot read is listed as
+  `UNPARSEABLE` (row id only, none of its content) and its session, or every
+  session if the row names none, reads at best `UNVERIFIABLE`.
+- **Live rows.** Rows streamed live between refreshes are marked `unknown`, never
+  verified.

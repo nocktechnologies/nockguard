@@ -5,5 +5,8 @@
 /bin/
 /nockguard.new
 /nockguard-wall
+/cmd/nockguard-wall/nockguard-wall
 /nockguard.bak-*
 /.githooks/
+cmd/nockguard-wall/testdata/*.db-shm
+cmd/nockguard-wall/testdata/*.db-wal

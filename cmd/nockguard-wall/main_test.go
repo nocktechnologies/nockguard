@@ -168,7 +168,7 @@ func TestReplayHistoryLogsScannerErrors(t *testing.T) {
 	b.auditPath = f.Name()
 	b.replayHistory(&bytes.Buffer{})
 
-	if !strings.Contains(logs.String(), "error replaying history") {
+	if !strings.Contains(logs.String(), "error reading audit log") {
 		t.Fatalf("expected scanner error log, got %q", logs.String())
 	}
 }
@@ -289,7 +289,7 @@ func TestHandleExportCSV(t *testing.T) {
 	if len(recs) != 2 { // header + 1 filtered row
 		t.Fatalf("csv rows: got %d want 2 (header + block row)", len(recs))
 	}
-	if got := strings.Join(recs[0], ","); got != "ts,agent,tool,decision,severity,reason,verification" {
+	if got := strings.Join(recs[0], ","); got != "ts,agent,tool,decision,severity,reason,verification,source" {
 		t.Fatalf("csv header: got %q", got)
 	}
 	// The block row's reason "=DANGER()" must be prefixed with a quote.
