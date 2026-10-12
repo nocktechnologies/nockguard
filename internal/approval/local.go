@@ -1,7 +1,6 @@
 package approval
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,7 +30,6 @@ import (
 // The listing and the audit trail carry the agent, tool and reason only — never
 // the call's arguments.
 type LocalApprover struct {
-	dir     string
 	timeout time.Duration
 	uid     uint32
 	ln      net.Listener
@@ -78,10 +76,7 @@ func DefaultLocalDir() (string, error) {
 // NewLocalApprover creates dir (0700) if absent, verifies it, and listens.
 func NewLocalApprover(dir string, timeout time.Duration) (*LocalApprover, error) {
 	uid := uint32(os.Getuid())
-	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
-		return nil, err
-	}
-	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	if err := checkOwned(dir, uid, os.ModeDir, 0o700); err != nil {
@@ -101,7 +96,7 @@ func NewLocalApprover(dir string, timeout time.Duration) (*LocalApprover, error)
 		ln.Close()
 		return nil, err
 	}
-	a := &LocalApprover{dir: dir, timeout: timeout, uid: uid, ln: ln, pending: map[string]*localHold{}}
+	a := &LocalApprover{timeout: timeout, uid: uid, ln: ln, pending: map[string]*localHold{}}
 	go a.serve()
 	return a, nil
 }
@@ -169,7 +164,7 @@ func (a *LocalApprover) handle(c net.Conn) {
 		return // wrong or unknowable peer: say nothing, decide nothing
 	}
 	var m localMsg
-	if json.NewDecoder(bufio.NewReader(c)).Decode(&m) != nil {
+	if json.NewDecoder(c).Decode(&m) != nil {
 		return
 	}
 	var resp localMsg
@@ -193,11 +188,11 @@ func (a *LocalApprover) handle(c net.Conn) {
 			break
 		}
 		who := fmt.Sprintf("local:%d", peer)
+		verb := "denied"
 		if m.Approve {
-			h.decide <- Verdict{Approved: true, Reason: "approved by " + who}
-		} else {
-			h.decide <- Verdict{Approved: false, Reason: "denied by " + who}
+			verb = "approved"
 		}
+		h.decide <- Verdict{Approved: m.Approve, Reason: verb + " by " + who}
 		resp.OK = true
 	default:
 		resp.Error = "unknown op"
