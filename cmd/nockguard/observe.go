@@ -112,6 +112,14 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 	} else if !info.IsDir() {
 		return nil, nil, fmt.Errorf("home path %s is not a directory", home)
 	}
+	// Serialize first-run directory creation and permission tightening before
+	// the per-agent lock in keys/ exists. The home directory is already open and
+	// stable, so concurrent starters can all acquire this lock safely.
+	unlockState, err := lockAgentKeys(homeDir, ".nockguard")
+	if err != nil {
+		return nil, nil, fmt.Errorf("locking observe state directory setup: %w", err)
+	}
+	defer unlockState()
 
 	nockguardDir, err := openOrCreateObserveDir(int(homeDir.Fd()), ".nockguard", 0o700, unix.Fsync)
 	if err != nil {
