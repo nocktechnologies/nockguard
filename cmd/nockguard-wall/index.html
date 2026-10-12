@@ -42,6 +42,7 @@
   .pill .l { font-size:10px; letter-spacing:1px; color:var(--dim); text-transform:uppercase; }
   .pill.allowed .n{color:var(--allow)} .pill.blocked .n{color:var(--block)}
   .pill.limited .n{color:var(--ratelimit)} .pill.denied .n{color:var(--deny)}
+  .pill.unreadable .n{color:var(--dim)}
   .pill.caught .n{color:var(--block)}
   .toggle { background:var(--panel); border:1px solid var(--line); color:var(--dim);
             border-radius:8px; padding:8px 12px; font:inherit; font-size:12px; cursor:pointer;
@@ -71,6 +72,7 @@
   .ptile.approved { border-left-color:var(--allow); } .ptile.approved .pn{ color:var(--allow); }
   .ptile.blocked  { border-left-color:var(--block); } .ptile.blocked .pn{ color:var(--block); }
   .ptile.limited  { border-left-color:var(--ratelimit); } .ptile.limited .pn{ color:var(--ratelimit); }
+  .ptile.unreadable { border-left-color:var(--hide); } .ptile.unreadable .pn{ color:var(--dim); }
   .ptile.critical { border-left-color:var(--block); } .ptile.critical .pn{ color:var(--block); }
   .ptile.high     { border-left-color:var(--deny); }  .ptile.high .pn{ color:var(--deny); }
 
@@ -225,6 +227,7 @@
       <div class="pill allowed"><span class="n" id="c-allow">—</span><span class="l">allowed</span></div>
       <div class="pill blocked"><span class="n" id="c-block">—</span><span class="l">rejected</span></div>
       <div class="pill limited"><span class="n" id="c-rate">—</span><span class="l">rate limited</span></div>
+      <div class="pill unreadable"><span class="n" id="c-unreadable">—</span><span class="l">unreadable</span></div>
       <div class="pill caught"><span class="n" id="c-caught">—</span><span class="l">catch rate</span></div>
       <button class="toggle snd" id="t-sound" title="beep when something is blocked">🔊 SOUND</button>
     </div>
@@ -271,6 +274,7 @@
       <div class="ptile approved"><span class="pn" id="p-approved">—</span><span class="pl">approved</span></div>
       <div class="ptile blocked"><span class="pn" id="p-blocked">—</span><span class="pl">rejected</span></div>
       <div class="ptile limited"><span class="pn" id="p-limited">—</span><span class="pl">rate limited</span></div>
+      <div class="ptile unreadable"><span class="pn" id="p-unreadable">—</span><span class="pl">unreadable</span></div>
     </div>
     <div class="ptop">
       <span class="ptop-label">top agents</span>
@@ -423,6 +427,7 @@
   const pApproved = document.getElementById('p-approved');
   const pBlocked = document.getElementById('p-blocked');
   const pLimited = document.getElementById('p-limited');
+  const pUnreadable = document.getElementById('p-unreadable');
   const pThreats = document.getElementById('p-threats');
   const pCritical = document.getElementById('p-critical');
   const pHigh = document.getElementById('p-high');
@@ -453,10 +458,11 @@
       const a = row.dataset.agentName || '';
       if (a) byAgent.set(a, (byAgent.get(a) || 0) + 1);
     }
-    const shown = n => hasEvidence && !unreadable ? n : '—';
+    const shown = n => hasEvidence ? n : '—';
     pApproved.textContent = shown(approved);
     pBlocked.textContent = shown(blocked);
     pLimited.textContent = shown(limited);
+    pUnreadable.textContent = shown(unreadable);
     pThreats.textContent = shown(threats);
     pCritical.textContent = shown(critical);
     pHigh.textContent = shown(high);
@@ -464,6 +470,7 @@
     document.getElementById('c-allow').textContent = shown(approved);
     document.getElementById('c-block').textContent = shown(blocked);
     document.getElementById('c-rate').textContent = shown(limited);
+    document.getElementById('c-unreadable').textContent = shown(unreadable);
     document.getElementById('c-caught').textContent = hasEvidence && totalRows && !unreadable ? Math.round(blocked / totalRows * 100) + '%' : '—';
     const top = [...byAgent.entries()]
       .sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1))
@@ -504,9 +511,6 @@
       document.getElementById('context-session').textContent = recentSession;
     }
     const dec = Object.hasOwn(KNOWN, ev.decision) ? ev.decision : 'unknown';
-    if (ev.decision && !Object.hasOwn(KNOWN, ev.decision) && ![...fDecision.options].some(o => o.value === ev.decision)) {
-      fDecision.add(new Option(ev.decision, ev.decision));
-    }
     const sev = SEV[ev.severity] ? ev.severity : 'none';
     const row = document.createElement('div');
     row.className = 'row ' + dec;
@@ -537,6 +541,17 @@
         '<span class="badge">' + esc(ev.decision || '?') + '</span></span>';
     feed.prepend(row);
     while (feed.childElementCount > MAX_ROWS) feed.lastElementChild.remove();
+    const selectedDecision = fDecision.value;
+    while (fDecision.options.length > 6) fDecision.remove(6);
+    const unknown = new Set();
+    for (const kept of feed.children) {
+      const decision = kept.dataset.decision;
+      if (decision && !Object.hasOwn(KNOWN, decision) && !unknown.has(decision)) {
+        unknown.add(decision);
+        fDecision.add(new Option(decision, decision));
+      }
+    }
+    fDecision.value = selectedDecision;
     if (fq || fdec || fsev || ftimerange) applyFilters(); // refresh the "shown / total" count
     else renderPulse();                     // (applyFilters already refreshes the pulse)
     // The alarm fires on the loudest signals: any block, and any critical catch
