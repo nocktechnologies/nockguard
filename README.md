@@ -8,7 +8,7 @@ Every agent connector is untrusted until proven otherwise. NockGuard is how you 
 Agent (Claude Code, Codex, Cursor, any MCP client)
     |
     v
-NockGuard  ── allow / deny / ask ──▶  signed audit trail  ──▶  `nockguard verify`
+NockGuard  ── allow / deny / ask ──▶  optional signed audit trail  ──▶  `nockguard verify`
     |
     v
 MCP server (filesystem, GitHub, your own)
@@ -42,10 +42,10 @@ The generated policy allows `coder` to call the filesystem server's `read_file` 
 }
 ```
 
-Ask your MCP client to call `read_file` with `{"path":"<QS>/hello.txt"}`: it should return `NockGuard read succeeded`. After the call, run:
+Ask your MCP client to call `read_file` with `{"path":"<QS>/hello.txt"}`: it should return `NockGuard read succeeded`. Each `tools/call` routed through this proxy is policy-checked; with auditing enabled and the per-agent key available, its decision is recorded in a signed audit trail. After the call, run:
 
 ```bash
-nockguard verify --agent coder        # exit 0 and PROTECTED for the signed trail
+nockguard verify --agent coder        # reads ~/.nockguard/keys/coder.pub; exit 0 and PROTECTED for the signed trail, exit 2 on tampering
 nockguard wall --agent coder          # open the Live Wall for coder's signed trail
 ```
 
@@ -153,8 +153,8 @@ Rate limiting and spend caps are opt-in and independent — set one, both, or ne
 An Ed25519-signed audit trail can be checked for signature and hash-chain integrity **offline** with only the public key:
 
 ```bash
-nockguard verify --agent coder    # one agent's trail (exit 0 = intact + authentic, 2 = tampered)
-nockguard verify --all          # every per-agent trail in one shot — prove the whole fleet
+nockguard verify --agent coder    # one agent's trail (exit 0 = signatures and retained chain check out, 2 = tampered)
+nockguard verify --all          # check every per-agent trail found in the audit directory
 ```
 
 `--all` scans the audit dir for every `<agent>.audit.jsonl`, verifies each with that agent's own public key, and prints a per-agent summary (exit 0 = all intact, 2 = any tampered, 1 = any it could not verify). An audit dir with **zero** trails is not "protected": there is nothing to verify, so `--all` prints `VERDICT: NO_TRAILS` and exits 1. That command replays the hash chain and signatures, detecting edits, reordering, and truncation against the retained signed checkpoint. It cannot distinguish the original writer from another holder of the private key or detect rollback of both trail and checkpoint without an external anchor. `verify` is the first-class form of `audit verify` (below), which documents HMAC vs Ed25519 signing, per-agent keys, and the compliance evidence packs.
@@ -245,7 +245,7 @@ Forwarding is **asynchronous and fail-open**: events post on a background worker
 
 ## Observe to Enforce
 
-Use the signed audit trail to derive enforcement from the tools an agent actually
+Use the audit trail to derive enforcement from the tools an agent actually
 used:
 
 ```bash
@@ -269,15 +269,15 @@ Zero-config observe persists its per-agent signing seed at
 
 ### Tamper-evidence (HMAC hash-chain)
 
-Audit entries can be signed with an HMAC hash-chain — each entry's signature covers its own content plus the previous entry's signature, so any insertion, deletion, or edit anywhere in the trail breaks the chain from that point forward. Signing is opt-in (provide a key); without one, the trail behaves exactly as the unsigned JSONL above. This closes Phase 4.
+Audit entries can be signed with an HMAC hash-chain — each entry's signature covers its own content plus the previous entry's signature, so changes within the retained trail break the chain. A holder of the HMAC key can sign a replacement chain, and rolling back both trail and checkpoint requires an external anchor to detect. Signing is opt-in (provide a key); without one, the trail behaves exactly as the unsigned JSONL above. This closes Phase 4.
 
 ```bash
 nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY   # exit 0 = intact, 2 = tampered
 ```
 
-### Non-repudiation (Ed25519)
+### Public-key signing (Ed25519)
 
-HMAC is *tamper-evident* but symmetric: whoever verifies the trail holds the same key that produced the signatures, and could therefore forge them. **Ed25519** signing closes that gap — it is asymmetric. A private key signs; the trail is verified with the corresponding **public key**, which *cannot* produce signatures. So a passing verification is proof that the holder of the private key signed every entry — the verifier never has the power to forge one. That is the difference between "this trail wasn't edited" and "this trail is *non-repudiable*": court-credible, and aligned with the emerging [IETF agent-audit-trail](https://datatracker.ietf.org) direction (hash-chain + asymmetric signatures).
+HMAC is symmetric: whoever verifies the trail holds the same key that signs it. With **Ed25519**, a private key signs and the corresponding **public key** verifies; a public-key holder cannot sign new records. A passing check shows that the retained entries and checkpoint match signatures made with the private key. It cannot identify which private-key holder wrote them, and a holder can sign a replacement trail and checkpoint. Detecting rollback of both requires an external anchor.
 
 **Key files.** `nockguard keygen --agent <name>` writes the keypair instead of printing it, so the private seed never lands in terminal scrollback, shell history or an agent transcript:
 
@@ -312,11 +312,12 @@ audit:
 `sign_ed25519_key_env` takes precedence over `sign_key_env` when both are set. Verify the trail with only the public key — the signer's secret is never needed to audit it:
 
 ```bash
-nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB   # exit 0 = intact + authentic, 2 = tampered or wrong signer
+nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB   # exit 0 = signatures and retained chain check out, 2 = tampered or wrong key
+```
 
 ### Auditable References (observe mode)
 
-When your policy allows `nockcc_nock_*` tool calls, NockGuard extracts the NockCC card ID from each call and records it in the audit trail. This links every policy decision to the card it acted for — not just "the agent called nockcc_nock_get" but "the agent called it for card #12345". The extracted reference is part of the signed payload, so it is tamper-evident proof of *what* the call acted for.
+When your policy allows `nockcc_nock_*` tool calls, NockGuard extracts the NockCC card ID from each call and records it in the audit trail. This links a policy decision to the card ID named by the call. With signing enabled, the extracted reference is covered by the signature; it does not prove that the upstream action succeeded.
 
 Each audit entry can carry these extracted fields:
 
@@ -333,26 +334,26 @@ For example, a sequence of tool calls:
 {"ts":"2026-06-03T18:30:02Z","agent":"kit","tool":"nockcc_nock_release","decision":"allow","nock_id":12345,"sig":"ghi789..."}
 ```
 
-All three rows carry `nock_id:12345` — the claim sets it, the update extracts it from its own arguments, and the release confirms it. The signature chain includes the nock_id field, so verifying the trail also proves each card reference was not altered after recording.
+All three rows carry `nock_id:12345`, extracted from each call. When signing is enabled, the signature chain includes the nock_id field, so verification detects alteration of a recorded card reference against the retained checkpoint.
 
 Extraction is conservative: only known tools and typed parameter patterns are recognized. Unknown tools, missing parameters, or malformed arguments yield no extracted field for that row. The feature never guesses. This keeps the audit trail faithful to what actually happened.
 
 ## Live Wall
 
-The audit trail is a file; the **Live Wall** makes it something you watch. `nockguard-wall` tails the audit JSONL and streams each policy decision to a local browser dashboard in real time, color-coded by outcome — every tool call an agent attempted and exactly what the firewall did about it. It is the visible layer over NockGuard's invisible enforcement: visceral proof of the accountability moat.
+The audit trail is a file; the **Live Wall** makes it something you watch. `nockguard-wall` tails the audit JSONL and streams recorded policy decisions to a local browser dashboard in real time, color-coded by outcome. Auditing must be enabled for decisions to appear.
 
 ```bash
 nockguard wall                              # serves http://127.0.0.1:8787 (loopback = private)
-nockguard wall --agent coder               # watch this agent's signed audit trail
-nockguard wall --demo                      # synthesize a sample stream when there's no live traffic
-nockguard wall --audit <path>              # point at a specific audit JSONL
+nockguard wall --agent coder                # watch this agent's signed audit trail
+nockguard wall --demo                       # synthesize a sample stream when there's no live traffic
+nockguard wall --audit <path>               # point at a specific audit JSONL
 ```
 
 `nockguard wall` starts the companion `nockguard-wall` binary and passes its flags through, including `--verify-ed25519-pub-env`, `--verify-key-env`, and the opt-in `--proof-signing-key-env`. The wall reports the public-key source from `/verify`; `PROTECTED` requires a non-empty trail whose signed checkpoint covers every entry. Empty trails report `NO_ROWS`, and signed entries beyond the checkpoint report `UNANCHORED`. Receipt signing still requires the separate private-key flag.
 
 The Wall binds to loopback by default (private), embeds its own page (no assets to ship), and replays the existing audit record on open so it is populated immediately, then streams new decisions as they land. It reads only the recorded decision (agent, tool, outcome, reason) — never raw tool-call parameters, consistent with the audit trail's no-payload rule.
 
-With `--agent`, the wall reads `~/.nockguard/logs/<agent>.audit.jsonl` and resolves the public key from `NOCKGUARD_AGENT_<AGENT>_ED25519_PUB`, then `~/.nockguard/keys/<agent>.pub`. Explicit `--audit` and `--verify-ed25519-pub-env` values take precedence.
+With `--agent`, the wall reads `~/.nockguard/logs/<agent>.audit.jsonl` and resolves the public key from `NOCKGUARD_AGENT_<AGENT>_ED25519_PUB`, then `~/.nockguard/keys/<agent>.pub`. Explicit `--audit` and `--verify-ed25519-pub-env` values take precedence. Without a verification key, the Wall displays unverified records.
 
 For an Ed25519-signed incident window, start the Wall with
 `--proof-signing-key-env <ENV>` pointing at the trail's private key, click
@@ -434,7 +435,7 @@ Same brand, same tap, independent products. Use one or both.
 
 Everything in this repository is MIT-licensed. `nockguard-pool` is a scaffold: `validate` works, but `serve` refuses to start because routing is not implemented. There is no license key, no feature flag that phones home, and nothing in the binary that stops working after a date. The on-ramp — `proxy`, `verify` / `audit verify`, `policy propose` / `shadow-report`, `init`, `keygen`, `selftest`, and the Live Wall you run yourself with `nockguard wall` — is the product, and it is yours.
 
-What Nock Technologies sells is the part that only makes sense as a **service or at fleet scale**: a hosted Live Wall across many agents and machines, compliance evidence packs generated from your signed trails (`nockguard evidence` today; hosted generation and retention later), fleet-wide trust and egress enforcement, and support. If you never need those, you never need us — and your trail still verifies with the public key alone.
+What Nock Technologies sells is the part that only makes sense as a **service or at fleet scale**: a hosted Live Wall across many agents and machines, hosted generation and retention of compliance evidence packs (`nockguard evidence` runs locally today), fleet-wide trust services, and support. Local Ed25519-signed trails can be checked with the public key alone, subject to the key-holder and rollback limits above.
 
 ## Roadmap
 
@@ -442,7 +443,7 @@ What Nock Technologies sells is the part that only makes sense as a **service or
 - [x] Phase 2: Input validation (SQLi / path-traversal / secrets rule sets + custom regex on tool-call arguments)
 - [x] Phase 3: Rate limiting and spend caps (per-agent sliding-window rate limit + hard cumulative session cap)
 - [x] Phase 4: Audit trail — structured JSONL trail, NockCC ops-log forwarding, and tamper-evident HMAC hash-chain signing
-- [x] Phase 4+: Non-repudiable audit — Ed25519 asymmetric signing (private-key signs, public-key verifies), `keygen`, standards-aligned
+- [x] Phase 4+: Ed25519 audit signing (private-key signs, public-key verifies; key-holder and rollback limits above), `keygen`
 - [x] Phase 5: Interactive approval gates — human-in-the-loop hold on consequential tools (dedicated Telegram bot or local socket approver, fail-safe deny)
 
   **Local approver** (no network). Start the proxy with `NOCKGUARD_APPROVER=local` and held calls wait on a unix socket at `~/.nockguard/approvals/<proxy pid>-<16 random hex>.sock` (directory `0700`, socket `0600`, both owned by the proxy's uid; the proxy refuses to start the approver — so every `ask` fails closed — if `~/.nockguard` or the directory is a symlink, the socket is a symlink, is owned by someone else, or has any other mode). Decide from another terminal:
@@ -459,7 +460,7 @@ What Nock Technologies sells is the part that only makes sense as a **service or
   The timeout (2 minutes) and deny-on-timeout are unchanged. The decision is audited as `approval-granted` / `approval-denied` with the reason `approved by local:<uid>` / `denied by local:<uid>` (the uid is read from the socket peer, Linux and macOS only; elsewhere the approver does not start).
 
   **Trust boundary.** The socket is protected by file permissions and a same-uid peer check, nothing else. If the agent runs as the same user as the operator, it can open the socket and approve its own calls: this approver does not stop it on its own. To make the boundary real, run the agent under a different uid, or fence `~/.nockguard` away from it (for example with NockLock's filesystem fence). `NOCKGUARD_APPROVER` is stripped from the upstream MCP child's environment, but that is not a defense against a hostile same-uid agent.
-- [x] Live Wall: real-time local dashboard streaming every policy decision from the audit trail
+- [x] Live Wall: real-time local dashboard streaming recorded policy decisions when auditing is enabled
 
 ## License
 
