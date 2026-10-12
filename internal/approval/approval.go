@@ -13,6 +13,7 @@ type Request struct {
 	Agent  string
 	Tool   string
 	Params json.RawMessage // MCP tools/call params, including name and arguments
+	Reason string          // why the call is held (policy reason); never arguments
 }
 
 // Verdict is the human (or fail-safe) answer. Reason is recorded in the audit
@@ -54,6 +55,8 @@ const (
 	EnvBotToken = "NOCKGUARD_APPROVAL_BOT_TOKEN"
 	EnvChatID   = "NOCKGUARD_APPROVAL_CHAT_ID"
 	EnvTestSeam = "NOCKGUARD_APPROVAL_TEST"
+	// EnvApprover selects the approver: "local" = operator-only unix socket, no network.
+	EnvApprover = "NOCKGUARD_APPROVER"
 )
 
 // CredEnvNames returns the environment variable names carrying approval-gate
@@ -66,5 +69,5 @@ const (
 // (policy.SigningKeyEnvNamesFor). EnvTestSeam is stripped too so a child can
 // never forge the deterministic approve/deny seam.
 func CredEnvNames() []string {
-	return []string{EnvBotToken, EnvChatID, EnvTestSeam}
+	return []string{EnvBotToken, EnvChatID, EnvTestSeam, EnvApprover}
 }

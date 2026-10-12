@@ -36,6 +36,18 @@ func buildApprover(logger *log.Logger) approval.Approver {
 	case "deny":
 		return approval.NewStaticApprover(false, "test-auto-deny")
 	}
+	if os.Getenv(approval.EnvApprover) == "local" {
+		dir, err := approval.DefaultLocalDir()
+		if err == nil {
+			var a *approval.LocalApprover
+			if a, err = approval.NewLocalApprover(dir, 2*time.Minute); err == nil {
+				logger.Printf("Phase 5 approval gate ON — local socket in %s (decide with `nockguard approvals`), 2m0s timeout, fail-safe deny", dir)
+				return a
+			}
+		}
+		logger.Printf("Phase 5 approval gate: local approver REFUSED to start (%v); ALL gated calls fail CLOSED", err)
+		return nil
+	}
 	// Real approver: a DEDICATED Telegram bot (never the fleet's main bot). Both
 	// env vars must be set; otherwise NO approver is wired and every gated call
 	// fails closed (logged loud below). These creds are read HERE, in the proxy
@@ -71,6 +83,10 @@ func runCLI(args []string) int {
 	if args[0] == "version" {
 		fmt.Println("nockguard v0.5.0")
 		return 0
+	}
+
+	if args[0] == "approvals" {
+		return runApprovals(args[1:])
 	}
 
 	if args[0] == "audit" {
@@ -1384,6 +1400,7 @@ Usage:
   nockguard trust show --agent <name>
   nockguard audit verify ...   # same as 'nockguard verify' (the audit-namespaced form)
   nockguard evidence --framework soc2 (--agent <name> | --ed25519-pub-env <ENV> | --key-env <ENV>) [--audit <path>] [--audit-dir <dir>] [--from <date>] [--to <date>] [--format html|json] [-o <file>]
+  nockguard approvals (list | approve <id> | deny <id>)  (decide calls held by NOCKGUARD_APPROVER=local)
   nockguard keygen [--agent <name>] [--force] [--print-env]
   nockguard version
 
