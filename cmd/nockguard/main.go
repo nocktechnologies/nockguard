@@ -1300,9 +1300,9 @@ func runInit(args []string) int {
 	}
 	fmt.Printf("Wrote starter policy: %s\n\n", policyPath)
 	fmt.Println("Next:")
-	fmt.Printf("  1. Edit %s — rename the agent and set its allow/deny lists.\n", policyPath)
-	fmt.Println("  2. Run the firewall in front of your MCP server:")
-	fmt.Printf("     nockguard proxy --upstream \"<your mcp server cmd>\" --agent <name> --policy %s\n", policyPath)
+	fmt.Println("  1. Run nockguard keygen --agent coder to create a signing key.")
+	fmt.Println("  2. Run the firewall in front of the filesystem MCP server:")
+	fmt.Printf("     nockguard proxy --upstream \"npx -y @modelcontextprotocol/server-filesystem /tmp/nockguard-quickstart\" --agent coder --policy %s\n", policyPath)
 	return 0
 }
 
