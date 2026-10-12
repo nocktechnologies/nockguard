@@ -423,10 +423,10 @@ What Nock Technologies sells is the part that only makes sense as a **service or
   nockguard approvals list            # id, agent, tool, reason, age — never arguments
   nockguard approvals approve <id>
   nockguard approvals deny <id>
-  nockguard approvals prune           # remove dead sockets of crashed proxies
+  nockguard approvals prune           # remove dead sockets of crashed proxies (run with no proxies running)
   ```
 
-  A proxy removes only its own socket, on a clean exit; the CLI skips sockets nobody answers on and never unlinks anything. A crashed proxy leaves a harmless dead socket behind; `approvals prune` removes only sockets owned by your uid that refuse connection (live sockets, non-sockets and other users' files are left alone).
+  A proxy removes only its own socket, on a clean exit; the CLI skips sockets nobody answers on, and only the explicit `approvals prune` command removes sockets. A crashed proxy leaves a harmless dead socket behind; `approvals prune` removes only sockets owned by your uid that refuse two connections 1 s apart (run it when no proxies are running: on macOS a full listen backlog also looks like a refusal). Live sockets, non-sockets and other users' files are left alone.
 
   The timeout (2 minutes) and deny-on-timeout are unchanged. The decision is audited as `approval-granted` / `approval-denied` with the reason `approved by local:<uid>` / `denied by local:<uid>` (the uid is read from the socket peer, Linux and macOS only; elsewhere the approver does not start).
 

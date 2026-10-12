@@ -54,6 +54,6 @@ func runApprovals(args []string) int {
 		fmt.Printf("pruned %d stale socket(s)\n", len(removed))
 		return 0
 	}
-	fmt.Fprintln(os.Stderr, "usage: nockguard approvals (list | approve <id> | deny <id> | prune)")
+	fmt.Fprintln(os.Stderr, "usage: nockguard approvals (list | approve <id> | deny <id> | prune)\n  prune removes sockets of dead proxies; run it when no proxies are running")
 	return 1
 }

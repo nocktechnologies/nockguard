@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -89,7 +90,16 @@ func DefaultLocalDir() (string, error) {
 // clears them.
 func NewLocalApprover(dir string, timeout time.Duration) (*LocalApprover, error) {
 	uid := uint32(os.Getuid())
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	// Create only what is absent, and refuse a symlink before creating anything
+	// beneath it, so nothing is ever made through a symlink.
+	parent := filepath.Dir(dir)
+	if err := mkdirIfAbsent(parent); err != nil {
+		return nil, err
+	}
+	if err := checkParentDir(parent, uid); err != nil {
+		return nil, err
+	}
+	if err := mkdirIfAbsent(dir); err != nil {
 		return nil, err
 	}
 	if err := checkClientDir(dir); err != nil {
@@ -262,7 +272,22 @@ func (a *LocalApprover) handle(c net.Conn) {
 // The proxy applies the same check before listening, so both sides agree.
 func checkClientDir(dir string) error {
 	uid := uint32(os.Getuid())
-	parent := filepath.Dir(dir)
+	if err := checkParentDir(filepath.Dir(dir), uid); err != nil {
+		return err
+	}
+	return checkOwned(dir, uid, os.ModeDir, 0o700)
+}
+
+// mkdirIfAbsent creates d (0700) only when Lstat says nothing is there.
+func mkdirIfAbsent(d string) error {
+	if _, err := os.Lstat(d); !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return os.Mkdir(d, 0o700)
+}
+
+// checkParentDir fails unless parent is a plain directory (not a symlink) owned by uid.
+func checkParentDir(parent string, uid uint32) error {
 	fi, err := os.Lstat(parent)
 	if err != nil {
 		return err
@@ -273,7 +298,7 @@ func checkClientDir(dir string) error {
 	if owner, ok := fileOwner(fi); !ok || owner != uid {
 		return fmt.Errorf("%s is not owned by uid %d; refusing", parent, uid)
 	}
-	return checkOwned(dir, uid, os.ModeDir, 0o700)
+	return nil
 }
 
 // localCall dials sock and talks to it only if the socket is ours (0600, our
@@ -344,9 +369,11 @@ func Decide(dir, id string, approve bool) error {
 }
 
 // PruneStale removes sockets under dir that are owned by our uid and refuse
-// connections (ECONNREFUSED: nobody is listening). Anything else — a live
-// socket, a non-socket, a foreign owner, or any other dial error — is left alone.
-// It returns the removed paths.
+// two dials 1 s apart (ECONNREFUSED: nobody is listening). On macOS a full
+// listen backlog also reports ECONNREFUSED, so one refusal is not proof; run it
+// when no proxies are running. Anything else — a live socket, a non-socket, a
+// foreign owner, or any other dial error — is left alone. It returns the
+// removed paths.
 func PruneStale(dir string) ([]string, error) {
 	if err := checkClientDir(dir); err != nil {
 		return nil, err
@@ -365,12 +392,7 @@ func PruneStale(dir string) ([]string, error) {
 		if owner, ok := fileOwner(fi); !ok || owner != uid {
 			continue
 		}
-		c, err := net.DialTimeout("unix", s, time.Second)
-		if err == nil {
-			c.Close()
-			continue
-		}
-		if !errors.Is(err, syscall.ECONNREFUSED) {
+		if !refusedTwice(s) {
 			continue
 		}
 		if err := os.Remove(s); err != nil {
@@ -379,4 +401,22 @@ func PruneStale(dir string) ([]string, error) {
 		removed = append(removed, s)
 	}
 	return removed, nil
+}
+
+// refusedTwice reports whether two dials of sock, 1 s apart, were both refused.
+func refusedTwice(sock string) bool {
+	for i := 0; i < 2; i++ {
+		if i > 0 {
+			time.Sleep(time.Second)
+		}
+		c, err := net.DialTimeout("unix", sock, time.Second)
+		if err == nil {
+			c.Close()
+			return false
+		}
+		if !errors.Is(err, syscall.ECONNREFUSED) {
+			return false
+		}
+	}
+	return true
 }

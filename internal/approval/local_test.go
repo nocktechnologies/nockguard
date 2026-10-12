@@ -369,3 +369,39 @@ func TestLocalAcceptTemporary(t *testing.T) {
 		t.Error("acceptTemporary misclassifies")
 	}
 }
+
+// Nothing may be created through a symlink: the checks run before any mkdir.
+func TestLocalNothingCreatedThroughSymlink(t *testing.T) {
+	root := filepath.Dir(shortDir(t))
+	real := filepath.Join(root, "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	// Symlinked parent: the target must stay empty.
+	if a, err := NewLocalApprover(filepath.Join(link, "approvals"), time.Second); err == nil {
+		a.Close()
+		t.Fatal("accepted a symlinked parent")
+	}
+	if ents, _ := os.ReadDir(real); len(ents) != 0 {
+		t.Errorf("created %d entries through the parent symlink", len(ents))
+	}
+	// Symlinked approvals dir: refused, target stays empty.
+	parent := filepath.Join(root, "parent")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(parent, "approvals")); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := NewLocalApprover(filepath.Join(parent, "approvals"), time.Second); err == nil {
+		a.Close()
+		t.Fatal("accepted a symlinked approvals dir")
+	}
+	if ents, _ := os.ReadDir(real); len(ents) != 0 {
+		t.Errorf("created %d entries through the approvals symlink", len(ents))
+	}
+}
