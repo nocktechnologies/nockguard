@@ -114,7 +114,7 @@ func (v lockView) verdicts() map[string]string {
 
 // windowEvents is the working window (pulse, unsigned export) of the current
 // snapshot.
-func (b *broker) windowEvents() []event { return b.currentView().events() }
+func (b *broker) windowEvents() []event { return lastWindow(b.currentView().events()) }
 
 // events is the working window of a view: Guard decisions and Lock fence events
 // merged oldest-first, each source bounded to maxWindow so neither can displace
@@ -155,15 +155,25 @@ func (b *broker) getView(force bool) *wallView {
 	if v, ok := fresh(); ok {
 		return v
 	}
+	b.smu.Lock()
+	seen := b.builds
+	b.smu.Unlock()
 	b.lmu.Lock()
 	defer b.lmu.Unlock()
-	if v, ok := fresh(); ok { // another caller built one while this one waited
+	b.smu.Lock()
+	reuse, cur := b.builds != seen, b.view
+	b.smu.Unlock()
+	if reuse { // a build ran while this caller waited: share it, even for a forced refresh
+		return cur
+	}
+	if v, ok := fresh(); ok {
 		return v
 	}
 	v := b.buildView(b.readGuard())
 	v.sig = sig
 	b.smu.Lock()
 	b.view = v
+	b.builds++
 	b.smu.Unlock()
 	return v
 }
@@ -239,12 +249,10 @@ func (b *broker) buildLockView(guardEvs []event, gc *sessionverify.GuardCheck, g
 		// Not created yet: the wall waits for it, so there is nothing to badge.
 		return lockView{err: err, badges: []sessionverify.Result{}}
 	case errors.As(err, &big):
-		// Nothing is copied or verified. The rows still show (windowed, read
-		// live) but every badge says why it is not checked.
-		return b.unverifiedLockView(guardEvs, loadLockEvents(b.lockDB), err)
+		// No snapshot, no Lock rows: nothing is shown that was not verified.
+		return b.unverifiedLockView(guardEvs, err)
 	case err != nil:
-		// Transient copy failure (e.g. busy): the rows still show, unverified.
-		return lockView{events: loadLockEvents(b.lockDB), err: err, badges: []sessionverify.Result{b.unverifiable("lock-db", err)}}
+		return lockView{err: err, badges: []sessionverify.Result{b.unverifiable("lock-db", err)}}
 	}
 	defer snap.Close()
 	v := lockView{events: loadLockEvents(snap.Path), badges: []sessionverify.Result{}}
@@ -270,12 +278,11 @@ func (b *broker) buildLockView(guardEvs []event, gc *sessionverify.GuardCheck, g
 	return v
 }
 
-// unverifiedLockView is the Lock half when the log is not verified at all: the
-// rows are shown (read live, so none is marked verified) and every recent
-// session's badge carries the reason.
-func (b *broker) unverifiedLockView(guardEvs, lockEvs []event, why error) lockView {
-	v := lockView{events: lockEvs, err: why, badges: []sessionverify.Result{}}
-	for _, s := range recentSessions(mergeByTime(guardEvs, lockEvs)) {
+// unverifiedLockView is the Lock half when the log is not verified at all: no
+// rows, and every recent Guard session's badge carries the reason.
+func (b *broker) unverifiedLockView(guardEvs []event, why error) lockView {
+	v := lockView{err: why, badges: []sessionverify.Result{}}
+	for _, s := range recentSessions(guardEvs) {
 		v.badges = append(v.badges, b.unverifiable(s, why))
 	}
 	return v

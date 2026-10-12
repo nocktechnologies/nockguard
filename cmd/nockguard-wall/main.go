@@ -122,6 +122,7 @@ type broker struct {
 	demo    bool
 	smu     sync.Mutex
 	lmu     sync.Mutex
+	builds  int // views built so far (guarded by smu); lets a waiting fresh caller reuse a build that finished while it waited
 	view    *wallView
 
 	// Test seams for mutating the live files at each capture boundary.
@@ -389,6 +390,10 @@ func computePulse(evs []event, q, decision, severity string, since, until *time.
 		}
 		p.Total++
 		switch bucket(ev.Decision) {
+		case "blocked":
+			if ev.Decision != decisionUnparseable { // unreadable, not a known block
+				p.Blocked++
+			}
 		case "approved":
 			p.Approved++
 		case "pending":
@@ -701,7 +706,7 @@ func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
 func (b *broker) writeViewExport(w http.ResponseWriter, q url.Values, v *wallView, since, until *time.Time) {
 	if b.lockDB != "" {
 		status := v.lock.status()
-		if !b.verifier.enabled() {
+		if status == "ok" && !b.verifier.enabled() {
 			status = "unsigned" // no Guard key: nothing is verified, whatever the Lock side says
 		}
 		w.Header().Set("X-NockGuard-Lock-Verification", status)

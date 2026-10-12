@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -292,8 +293,8 @@ func TestOverRowLimitIsUnverifiableNotFrozen(t *testing.T) {
 			t.Fatalf("badge over the limit = %s %q", b.Verdict, b.Lock.Reason)
 		}
 	}
-	if len(v.lock.events) == 0 {
-		t.Fatal("rows vanished instead of being shown unverified")
+	if len(v.lock.events) != 0 || v.lock.status() != "unavailable" {
+		t.Fatalf("unverified Lock rows shown: %d rows, status %s", len(v.lock.events), v.lock.status())
 	}
 	if got := exportRowVerification(v.rep, v.lock.verdicts(), event{Source: sourceLock, Session: lockSessA}); got != "unsigned" {
 		t.Fatalf("export row over the limit = %q, want unsigned", got)
@@ -324,5 +325,121 @@ func TestReasonsNeverShowSnapshotPath(t *testing.T) {
 	defer snap.Close()
 	if got := snap.scrub("open " + snap.Path + " in " + snap.dir); got != "open "+w.lockDB+" in "+filepath.Dir(w.lockDB) {
 		t.Fatalf("scrub = %q", got)
+	}
+}
+
+// No snapshot, no Lock rows: a Lock DB swapped for a symlink after startup is
+// refused, and the export carries zero Lock rows and says so.
+func TestSymlinkedLockDBAfterStartupYieldsNoLockRows(t *testing.T) {
+	w := newLockWall(t)
+	if _, out := lockExportJSON(t, w); len(out) == 0 {
+		t.Fatal("setup: export empty")
+	}
+	real := w.lockDB + ".real"
+	if err := os.Rename(w.lockDB, real); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, w.lockDB); err != nil {
+		t.Skip(err)
+	}
+	for _, signed := range []bool{true, false} {
+		if !signed {
+			w.b.verifier = nil
+		}
+		rec, out := lockExportJSON(t, w)
+		if h := rec.Header().Get("X-NockGuard-Lock-Verification"); h != "unavailable" {
+			t.Fatalf("signed=%v lock header = %q, want unavailable", signed, h)
+		}
+		for _, ev := range out {
+			if ev.Source == sourceLock {
+				t.Fatalf("signed=%v Lock row exported without a snapshot: %+v", signed, ev)
+			}
+		}
+	}
+	if v := w.b.currentView(); len(v.lock.events) != 0 || v.lock.err == nil {
+		t.Fatalf("view after symlink swap: %d rows, err %v", len(v.lock.events), v.lock.err)
+	}
+}
+
+// Pulse and replay both see at most maxWindow rows of the merged streams.
+func TestPulseWindowIsBoundedAcrossSources(t *testing.T) {
+	w := newLockWall(t)
+	w.b.verifier = nil
+	var sb strings.Builder
+	for i := 0; i < maxWindow; i++ {
+		sb.WriteString(`{"timestamp":"2026-10-12T00:00:00Z","agent":"coder","tool":"Read","decision":"allow"}` + "\n")
+	}
+	if err := os.WriteFile(w.b.auditPath, []byte(sb.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.exec(t, `DELETE FROM events`)
+	w.exec(t, `WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < ?)
+		INSERT INTO events (timestamp, event_type, category, detail, blocked, session_id)
+		SELECT '2026-10-12T00:00:01Z', 'file_blocked', 'file', '/etc/shadow', 1, 's' FROM c`, maxWindow)
+	w.b.view = nil
+	rec := httptest.NewRecorder()
+	w.b.handlePulse(rec, httptest.NewRequest(http.MethodGet, "/pulse", nil))
+	var p pulse
+	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Total != maxWindow {
+		t.Fatalf("pulse total = %d, want %d", p.Total, maxWindow)
+	}
+}
+
+// A non-text event_type is UNPARSEABLE, but the status-row filter still applies.
+func TestNonTextEventTypeObeysStatusFilter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`CREATE TABLE events (id INTEGER PRIMARY KEY, timestamp TEXT, event_type, detail TEXT, blocked INTEGER, session_id TEXT)`,
+		`INSERT INTO events VALUES (1, '2026-10-12T00:00:00Z', CAST('network_passed' AS BLOB), 'proxy=x domains=1', 0, 's')`,
+		`INSERT INTO events VALUES (2, '2026-10-12T00:00:01Z', CAST('network_passed' AS BLOB), 'evil.example:443', 0, 's')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	evs := loadLockEvents(path)
+	if len(evs) != 1 || evs[0].Decision != decisionUnparseable || evs[0].Tool != "row #2" {
+		t.Fatalf("rows = %+v, want only row #2 as UNPARSEABLE", evs)
+	}
+}
+
+// UNPARSEABLE rows are not counted as blocked.
+func TestUnparseableNotCountedBlocked(t *testing.T) {
+	p := computePulse([]event{{Decision: decisionUnparseable}, {Decision: "block"}}, "", "", "", nil, nil)
+	if p.Blocked != 1 || p.Total != 2 {
+		t.Fatalf("pulse = %+v, want blocked 1 of total 2", p)
+	}
+}
+
+// A connect that arrives while a fresh build runs reuses that build.
+func TestFreshViewSingleFlight(t *testing.T) {
+	w := newLockWall(t)
+	n := w.countTrailOpens(t)
+	inner := sessionverify.GuardSnapshotOpen
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	sessionverify.GuardSnapshotOpen = func(name string) (*os.File, error) {
+		if name == w.b.auditPath {
+			once.Do(func() { close(entered); <-release })
+		}
+		return inner(name)
+	}
+	done := make(chan *wallView, 2)
+	go func() { done <- w.b.freshView() }()
+	<-entered
+	go func() { done <- w.b.freshView() }()
+	time.Sleep(100 * time.Millisecond) // let the second caller queue behind the build
+	close(release)
+	a, b := <-done, <-done
+	if a != b || *n != 1 {
+		t.Fatalf("builds: same view %v, trail opens %d, want shared view and 1 open", a == b, *n)
 	}
 }

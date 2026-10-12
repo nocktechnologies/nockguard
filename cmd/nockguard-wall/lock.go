@@ -38,10 +38,9 @@ const decisionUnparseable = "unparseable"
 // status, not decisions ("proxy=… domains=N" and "netns tproxy egress fence
 // active …"); they are excluded. A row whose event_type is not text cannot be
 // classified, so it is selected too and surfaces as UNPARSEABLE.
-const lockSelect = `SELECT id, timestamp, event_type, detail, blocked, session_id FROM events WHERE (` +
-	`(event_type IN (` + lockEventTypes + `)` +
-	` AND NOT (event_type = 'network_passed' AND (COALESCE(detail, '') LIKE 'proxy=%' OR COALESCE(detail, '') LIKE 'netns tproxy egress fence%')))` +
-	` OR typeof(event_type) <> 'text')`
+const lockSelect = `SELECT id, timestamp, event_type, detail, blocked, session_id FROM events WHERE ` +
+	`NOT (CAST(event_type AS TEXT) = 'network_passed' AND (COALESCE(detail, '') LIKE 'proxy=%' OR COALESCE(detail, '') LIKE 'netns tproxy egress fence%'))` +
+	` AND (event_type IN (` + lockEventTypes + `) OR typeof(event_type) <> 'text')`
 
 // openLockDB opens the NockLock log read-only. mode=ro plus query_only means
 // the wall can never write it; immutable is deliberately NOT set so SQLite
@@ -125,7 +124,7 @@ func scanLockRows(rows *sql.Rows) ([]event, error) {
 			continue
 		}
 		t, ok1 := lockText(ts)
-		et, ok2 := lockText(eventType)
+		et, ok2 := eventType.(string) // a BLOB event_type is not text either
 		d, ok3 := lockText(detail)
 		s, ok4 := lockText(sess)
 		bl, ok5 := blocked.(int64)
