@@ -99,11 +99,13 @@ func classify(ev event) event {
 // browser.
 type broker struct {
 	auditPath string // replayed to each newly-connected client as history
+	agent     string
 	// exportTrailLimit bounds verifier-enabled immutable snapshots. Tests lower
 	// it to exercise the boundary without constructing a 64 MiB fixture.
 	exportTrailLimit int64
 	mu               sync.Mutex
 	clients          map[chan event]struct{}
+	demoEvents       []event // synthetic rows retained for demo replay and pulse
 
 	// verifier holds the server-side trusted key used to verify the audit chain;
 	// vsnap caches the most recent full-verify result so per-event badges (replay
@@ -188,6 +190,9 @@ func (b *broker) unregister(c chan event) {
 func (b *broker) emit(ev event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.demo {
+		b.demoEvents = lastWindow(append(b.demoEvents, ev))
+	}
 	for c := range b.clients {
 		select {
 		case c <- ev:
@@ -247,6 +252,13 @@ func (b *broker) handleSSE(w http.ResponseWriter, r *http.Request) {
 // rule audit.Verify counts entries by — so the badge index stays aligned with
 // the break position even past a line the wall itself can't render.
 func (b *broker) replayHistory(w io.Writer) {
+	if b.demo {
+		for _, ev := range b.windowEvents() {
+			line, _ := json.Marshal(ev)
+			fmt.Fprintf(w, "data: %s\n\n", line)
+		}
+		return
+	}
 	v := b.freshView()
 	evs := make([]event, len(v.guardEvs))
 	for i, ev := range v.guardEvs {
@@ -267,10 +279,11 @@ func (b *broker) replayHistory(w io.Writer) {
 // It mirrors what the Live Wall's pulse header shows so the same numbers are
 // available to scripts and headless monitors (GET /pulse), not just the browser.
 type pulse struct {
-	Approved int `json:"approved"` // allow
-	Blocked  int `json:"blocked"`  // deny | block | hide
-	Pending  int `json:"pending"`  // ratelimit (held / throttled)
-	Total    int `json:"total"`
+	Approved    int `json:"approved"`    // allow
+	Blocked     int `json:"blocked"`     // deny | block | hide | ratelimit | unknown
+	Pending     int `json:"pending"`     // held calls (none of the current decisions)
+	RateLimited int `json:"rateLimited"` // rejected by rate or spend limit; subset of Blocked
+	Total       int `json:"total"`
 	// Threat breakdown by severity (forward.Severity). Threats is every non-allow
 	// catch (critical+high+low); Critical/High are broken out so the wall's hero
 	// counter and critical/high pane don't have to re-classify in the browser.
@@ -284,20 +297,6 @@ type pulse struct {
 type agentCount struct {
 	Agent string `json:"agent"`
 	Count int    `json:"count"`
-}
-
-// bucket folds a NockGuard decision into one of the pulse's three at-a-glance
-// buckets. Anything that isn't a clean allow or a rate-limit hold is treated as
-// blocked, so unknown/future enforcement outcomes surface rather than vanish.
-func bucket(decision string) string {
-	switch decision {
-	case "allow":
-		return "approved"
-	case "ratelimit":
-		return "pending"
-	default: // deny | block | hide and any unknown enforcement outcome
-		return "blocked"
-	}
 }
 
 // matches reports whether an event survives the wall's three filters: an exact
@@ -389,16 +388,12 @@ func computePulse(evs []event, q, decision, severity string, since, until *time.
 			continue
 		}
 		p.Total++
-		switch bucket(ev.Decision) {
-		case "blocked":
-			if ev.Decision != decisionUnparseable { // unreadable, not a known block
-				p.Blocked++
-			}
-		case "approved":
+		if ev.Decision == "ratelimit" {
+			p.RateLimited++
+		}
+		if ev.Decision == "allow" {
 			p.Approved++
-		case "pending":
-			p.Pending++
-		default:
+		} else if ev.Decision != decisionUnparseable { // unreadable, not a known block
 			p.Blocked++
 		}
 		switch forward.Severity(ev.Decision, ev.Reason) {
@@ -513,6 +508,25 @@ func (b *broker) handlePulse(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(p)
 }
 
+// handleContext names the configured evidence sources and the scope of this
+// wall. Verification itself is read from /verify and /sessions.
+func (b *broker) handleContext(w http.ResponseWriter, r *http.Request) {
+	agent := b.agent
+	if agent == "" {
+		agent = "from selected trail (unfiltered)"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(struct {
+		GuardTrail string `json:"guardTrail"`
+		LockDB     string `json:"lockDB"`
+		Agent      string `json:"agent"`
+		Demo       bool   `json:"demo"`
+		Proof      bool   `json:"proof"`
+		Window     int    `json:"window"`
+	}{b.auditPath, b.lockDB, agent, b.demo, len(b.proofSigner) != 0 && !b.demo, maxWindow})
+}
+
 // filterEvents returns the subset of the audit window that survives the wall's
 // ?q=/?decision=/?severity= filters, in window order (oldest first). It shares
 // the exact matches predicate the pulse aggregate uses, so the export can never
@@ -559,6 +573,10 @@ func csvSafe(s string) string {
 // what /events and /pulse already serve over the same loopback bind — the
 // audit trail never records raw tool-call arguments — so it widens nothing.
 func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {
+	if b.demo {
+		http.Error(w, "demo data is synthetic and cannot be exported as evidence", http.StatusConflict)
+		return
+	}
 	q := r.URL.Query()
 	since := parseTimeFilter(q.Get("since"))
 	until := parseTimeFilter(q.Get("until"))
@@ -913,6 +931,12 @@ func main() {
 
 	b := newBroker()
 	b.auditPath = *auditPath
+	if agentSet {
+		b.agent = *agent + " (configured trail selection)"
+		if auditSet {
+			b.agent = *agent + " (key selection; explicit trail may contain other agents)"
+		}
+	}
 
 	v, verr := newVerifier(*verifyPubEnv, *verifyKeyEnv)
 	if verr != nil {
@@ -960,14 +984,16 @@ func main() {
 	}
 	b.refreshSnapshot() // seed the snapshot so live badges have a baseline
 
-	go tail(ctx, *auditPath, b)
 	if *demoMode {
 		go demo(ctx, b)
+	} else {
+		go tail(ctx, *auditPath, b)
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/events", b.handleSSE)
 	mux.HandleFunc("/pulse", b.handlePulse)
+	mux.HandleFunc("/context", b.handleContext)
 	mux.HandleFunc("/export", b.handleExport)
 	mux.HandleFunc("/verify", b.handleVerify)
 	mux.HandleFunc("/sessions", b.handleSessions)
@@ -977,7 +1003,7 @@ func main() {
 			return
 		}
 		data, _ := indexFS.ReadFile("index.html")
-		if len(b.proofSigner) != 0 {
+		if len(b.proofSigner) != 0 && !b.demo {
 			data = bytes.Replace(data, []byte(`id="f-proof" hidden`), []byte(`id="f-proof"`), 1)
 		}
 		if b.lockDB != "" || b.demo {

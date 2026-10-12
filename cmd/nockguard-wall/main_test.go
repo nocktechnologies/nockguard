@@ -53,8 +53,8 @@ func TestComputePulse(t *testing.T) {
 	if p.Total != 8 {
 		t.Fatalf("total: got %d want 8", p.Total)
 	}
-	if p.Approved != 3 || p.Pending != 1 || p.Blocked != 4 {
-		t.Fatalf("buckets: approved=%d pending=%d blocked=%d want 3/1/4", p.Approved, p.Pending, p.Blocked)
+	if p.Approved != 3 || p.Pending != 0 || p.Blocked != 5 {
+		t.Fatalf("buckets: approved=%d pending=%d blocked=%d want 3/0/5", p.Approved, p.Pending, p.Blocked)
 	}
 	// Threat tiers, derived from (decision, reason): the "rm -rf" block is
 	// critical, the reasonless deny is high, and the ratelimit + two hides are
@@ -83,8 +83,8 @@ func TestComputePulse(t *testing.T) {
 	if pk := computePulse(evs, "KIT", "", "", nil, nil); pk.Total != 2 || pk.Approved != 1 || pk.Blocked != 1 {
 		t.Fatalf("agent text filter: got %+v want total 2, approved 1, blocked 1", pk)
 	}
-	if pf := computePulse(evs, "webfetch", "", "", nil, nil); pf.Total != 1 || pf.Pending != 1 {
-		t.Fatalf("tool text filter: got %+v want total 1, pending 1", pf)
+	if pf := computePulse(evs, "webfetch", "", "", nil, nil); pf.Total != 1 || pf.Blocked != 1 || pf.Pending != 0 {
+		t.Fatalf("tool text filter: got %+v want total 1, blocked 1, pending 0", pf)
 	}
 
 	// Severity filter respected. "threat" = any live catch (crit+high+low): the 3
@@ -115,6 +115,78 @@ func TestComputePulse(t *testing.T) {
 	// reasonless deny (high) — three threats; ash's allow drops as none.
 	if pcs := computePulse(evs, "ash", "", "threat", nil, nil); pcs.Total != 3 || pcs.Threats != 3 || pcs.Critical != 1 || pcs.High != 1 || pcs.Low != 1 {
 		t.Fatalf("combined text+severity filter: got %+v want total 3, threats 3, crit/high/low 1/1/1", pcs)
+	}
+}
+
+func TestRateLimitRejectedAndUnknownDecisionRetained(t *testing.T) {
+	got := computePulse([]event{{Decision: "allow"}, {Decision: "ratelimit"}, {Decision: "approval-denied"}}, "", "", "", nil, nil)
+	if got.Total != 3 || got.Approved != 1 || got.Blocked != 2 || got.RateLimited != 1 || got.Pending != 0 {
+		t.Fatalf("pulse = %+v, want one allow and two rejections including the rate limit", got)
+	}
+}
+
+func TestDemoReplayAndPulseUseSameWindow(t *testing.T) {
+	b := newBroker()
+	b.demo = true
+	b.auditPath = "/unused/real-trail.jsonl"
+	b.verifier = &verifier{mode: modeNone}
+	for i := 0; i < maxWindow+1; i++ {
+		decision := "allow"
+		if i == maxWindow {
+			decision = "ratelimit"
+		}
+		b.emit(event{Agent: "demo", Tool: fmt.Sprintf("tool-%d", i), Decision: decision})
+	}
+	var replay strings.Builder
+	b.replayHistory(&replay)
+	if strings.Contains(replay.String(), `"tool":"tool-0"`) || !strings.Contains(replay.String(), `"tool":"tool-500"`) {
+		t.Fatal("demo replay did not keep the newest bounded window")
+	}
+	rec := httptest.NewRecorder()
+	b.handlePulse(rec, httptest.NewRequest(http.MethodGet, "/pulse", nil))
+	var p pulse
+	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Total != maxWindow || p.Blocked != 1 || p.RateLimited != 1 || p.Pending != 0 {
+		t.Fatalf("demo pulse = %+v, want same %d rows as replay and one rate rejection", p, maxWindow)
+	}
+	rec = httptest.NewRecorder()
+	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("demo evidence export status = %d, want conflict", rec.Code)
+	}
+}
+
+func TestContextNamesSourcesAndDemoScope(t *testing.T) {
+	b := newBroker()
+	b.auditPath = "/tmp/guard.jsonl"
+	b.lockDB = "/tmp/lock.db"
+	b.agent = "coder"
+	rec := httptest.NewRecorder()
+	b.handleContext(rec, httptest.NewRequest(http.MethodGet, "/context", nil))
+	var got struct {
+		GuardTrail, LockDB, Agent string
+		Demo, Proof               bool
+		Window                    int
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.GuardTrail != b.auditPath || got.LockDB != b.lockDB || got.Agent != "coder" || got.Demo || got.Proof || got.Window != maxWindow {
+		t.Fatalf("context = %+v", got)
+	}
+	b.agent = ""
+	rec = httptest.NewRecorder()
+	b.handleContext(rec, httptest.NewRequest(http.MethodGet, "/context", nil))
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got.Agent != "from selected trail (unfiltered)" {
+		t.Fatalf("unfiltered context = %+v, error %v", got, err)
+	}
+	b.demo = true
+	rec = httptest.NewRecorder()
+	b.handleContext(rec, httptest.NewRequest(http.MethodGet, "/context", nil))
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || !got.Demo {
+		t.Fatalf("demo context = %+v, error %v", got, err)
 	}
 }
 

@@ -339,6 +339,8 @@ Extraction is conservative: only known tools and typed parameter patterns are re
 
 The audit trail is a file; the **Live Wall** makes it something you watch. `nockguard-wall` tails the audit JSONL and streams each policy decision to a local browser dashboard in real time, color-coded by outcome — every tool call an agent attempted and exactly what the firewall did about it. It is the visible layer over NockGuard's invisible enforcement: visceral proof of the accountability moat.
 
+The Wall leads with its configured Guard trail and optional Lock DB, agent and recent session, verification status and last check time, and export scope. Its badges and browser pulse count the same filtered view of the newest 500 decisions; `/pulse` uses that same 500-row window. `ratelimit` is a rejected call and counts under blocked/rejected (also under `rateLimited`), never pending. Unknown decision names stay visible with a neutral badge. An empty or unreadable source is not presented as proof of zero violations; the empty view shows commands for generating sample or real audited traffic.
+
 ```bash
 go run ./cmd/nockguard-wall                 # serves http://127.0.0.1:8787 (loopback = private)
 go run ./cmd/nockguard-wall --agent local-agent # watch this agent's signed audit trail
@@ -380,7 +382,7 @@ The badge is the rollback-blind local check `verify --session` makes (it consult
 
 With `--lock-db`, the `/export` CSV and JSON include every Guard row in the window plus the Lock rows (each source keeps its own 500-row cap). A Lock row reads `verified` only when its session is `PROTECTED` in that same snapshot, `failed` when `TAMPERED`, else `unsigned`. The response header `X-NockGuard-Lock-Verification` is `ok`, `unsigned` when no Guard verification key is configured (nothing is verified), or `unavailable` when the Lock DB could not be snapshotted (then no Lock rows are exported). The PROOF export is NockGuard rows only.
 
-**Proof export scope.** The PROOF button is a signed export of the **NockGuard rows only**; it does not include Lock rows. Verify the Lock side with the session badge or `nockguard verify --session <id> --lock-db <path> --guard-trail <path> ...`. `/pulse` and the CSV/JSON export do include Lock rows (new trailing `source` column; a Lock row reads `verified` only when its whole session badge is `PROTECTED`). `--demo` mixes in synthetic Lock rows and one `UNSIGNED` demo session badge: demo data is never verified.
+**Proof export scope.** The PROOF button is a signed export of the **NockGuard rows only**; it does not include Lock rows. Verify the Lock side with the session badge or `nockguard verify --session <id> --lock-db <path> --guard-trail <path> ...`. `/pulse` and the CSV/JSON export do include Lock rows (new trailing `source` column; a Lock row reads `verified` only when its whole session badge is `PROTECTED`). `--demo` shows a prominent **DEMO DATA** banner, synthetic Lock rows, and one `UNSIGNED` demo session badge. Demo rows are retained for replay and `/pulse`, but evidence exports are disabled because demo data is never verified.
 
 ## How It Works
 
