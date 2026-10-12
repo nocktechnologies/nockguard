@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
+	"github.com/nocktechnologies/nockguard/internal/policy"
+	"github.com/nocktechnologies/nockguard/internal/sessionverify"
 )
 
 // Verification status values reported in verifyReport.Status. They let the
@@ -22,6 +24,8 @@ const (
 	statusTampered     = "tampered"     // a real chain/signature break (banner fires)
 	statusUnavailable  = "unavailable"  // read/scan/IO error — chain_intact stays null
 	statusUnconfigured = "unconfigured" // no signing key configured — chain_intact null
+	statusNoRows       = "no_rows"      // no audit evidence to verify
+	statusUnanchored   = "unanchored"   // signatures pass, but the checkpoint misses the trail tail
 )
 
 // verifyMode names the cryptographic mode the wall uses to verify the audit chain.
@@ -40,9 +44,10 @@ const (
 // parameter, so a client cannot swap in a key that would make a tampered trail
 // verify clean (decision b).
 type verifier struct {
-	mode verifyMode
-	key  []byte            // HMAC key (modeHMAC)
-	pub  ed25519.PublicKey // Ed25519 public key (modeEd25519)
+	mode      verifyMode
+	key       []byte            // HMAC key (modeHMAC)
+	pub       ed25519.PublicKey // Ed25519 public key (modeEd25519)
+	pubSource string
 }
 
 // enabled reports whether a verification key is configured. Nil-safe so a broker
@@ -50,24 +55,32 @@ type verifier struct {
 // panicking.
 func (v *verifier) enabled() bool { return v != nil && v.mode != modeNone }
 
-// newVerifier resolves the wall's TRUSTED verification key from the environment,
-// by env-var NAME supplied server-side — the same sourcing the `nockguard audit
-// verify` CLI uses (cmd/nockguard/main.go:704-722). Ed25519 (public key) takes
-// precedence over HMAC when both env vars are populated, mirroring the auditor's
-// own precedence (internal/policy/policy.go auditorAt). When neither var is set
-// the verifier is disabled (mode none): the wall still tails, per-event badges
-// read "unknown", and /verify reports chain_intact:null so no false tamper banner
-// fires.
-func newVerifier(pubEnv, keyEnv string) (*verifier, error) {
+// newVerifier resolves trusted keys server-side. Agent Ed25519 keys use the
+// same resolver as `nockguard verify --agent`: the canonical env var wins, then
+// the protected per-agent .pub file. Explicit custom env-var flags remain
+// environment-only. Ed25519 takes precedence over HMAC when both are set.
+func newVerifier(pubEnv, keyEnv, agent string) (*verifier, error) {
 	v := &verifier{mode: modeNone}
 	if pubEnv != "" {
-		if pubHex := strings.TrimSpace(os.Getenv(pubEnv)); pubHex != "" {
+		var pubHex, source string
+		if agent != "" && pubEnv == policy.AgentPubKeyEnvName(agent) {
+			var err error
+			pubHex, source, err = policy.ResolveAgentPub(agent)
+			if err != nil {
+				return nil, fmt.Errorf("resolve public key for agent %s: %w", agent, err)
+			}
+		} else {
+			pubHex = strings.TrimSpace(os.Getenv(pubEnv))
+			source = pubEnv
+		}
+		if pubHex != "" {
 			pub, err := audit.PublicKeyFromHex(pubHex)
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", pubEnv, err)
 			}
 			v.mode = modeEd25519
 			v.pub = pub
+			v.pubSource = source
 			return v, nil
 		}
 	}
@@ -89,14 +102,16 @@ func newVerifier(pubEnv, keyEnv string) (*verifier, error) {
 // tamper break_at == entries_verified+1.
 type verifyReport struct {
 	ChainIntact     *bool   `json:"chain_intact"`
+	Verdict         string  `json:"verdict"`
+	PublicKeySource string  `json:"public_key_source,omitempty"`
 	EntriesVerified int     `json:"entries_verified"`
 	BreakAt         *int    `json:"break_at"`
 	LastVerifiedAt  string  `json:"last_verified_at"`
 	Detail          *string `json:"detail"`
 	// Status names the verification outcome so the browser can distinguish an
 	// UNAVAILABLE trail (a read/scan error — chain_intact null) from a real
-	// TAMPER (chain_intact false). Only "tampered" fires the banner; "unavailable"
-	// and "unconfigured" are quiet null-chain_intact states. See N9870.
+	// TAMPER (chain_intact false). Only "tampered" fires the banner; other
+	// non-protected states are shown as status notes. See N9870.
 	Status string `json:"status"`
 }
 
@@ -106,38 +121,28 @@ func intptr(i int) *int       { return &i }
 
 // verify runs the EXISTING internal/audit chain verification over the trail at
 // path and folds the result into a verifyReport. It NEVER reimplements the crypto
-// — it calls audit.Verify (HMAC) / audit.VerifyEd25519 (Ed25519), the same
-// functions `nockguard audit verify` runs.
+// — it calls the snapshot variants of audit.Verify (HMAC) / audit.VerifyEd25519
+// (Ed25519), using the same verification as `nockguard audit verify`.
 func (v *verifier) verify(path string) verifyReport {
 	now := time.Now().Format(time.RFC3339)
 	if !v.enabled() {
-		return verifyReport{
-			LastVerifiedAt: now,
-			Status:         statusUnconfigured,
-			Detail:         strptr("audit signing not configured — chain not verified (set --verify-ed25519-pub-env or --verify-key-env)"),
-		}
+		return v.verifySnapshot(nil, nil, now)
 	}
-	var (
-		n   int
-		err error
-	)
-	switch v.mode {
-	case modeEd25519:
-		n, err = audit.VerifyEd25519(path, v.pub)
-	default:
-		n, err = audit.Verify(path, v.key)
+	trail, hwm, err := sessionverify.ReadGuard(path, maxExportTrailBytes)
+	if err != nil {
+		rep := classifyVerifyResult(0, err, now)
+		rep.PublicKeySource = v.pubSource
+		return rep
 	}
-	return classifyVerifyResult(n, err, now)
+	return v.verifySnapshot(trail, hwm, now)
 }
 
-// verifyBytes verifies one immutable trail/checkpoint snapshot, so callers can
-// decode exactly the bytes whose signatures were checked.
-func (v *verifier) verifyBytes(trail, hwm []byte) verifyReport {
-	now := time.Now().Format(time.RFC3339)
+func (v *verifier) verifySnapshot(trail, hwm []byte, now string) verifyReport {
 	if !v.enabled() {
 		return verifyReport{
 			LastVerifiedAt: now,
 			Status:         statusUnconfigured,
+			Verdict:        "UNCONFIGURED",
 			Detail:         strptr("audit signing not configured — chain not verified (set --verify-ed25519-pub-env or --verify-key-env)"),
 		}
 	}
@@ -151,7 +156,34 @@ func (v *verifier) verifyBytes(trail, hwm []byte) verifyReport {
 	default:
 		n, err = audit.VerifyBytes(trail, hwm, v.key)
 	}
-	return classifyVerifyResult(n, err, now)
+	rep := classifyVerifyResult(n, err, now)
+	if err == nil {
+		switch {
+		case n == 0:
+			rep.Status = statusNoRows
+			rep.Verdict = "NO_ROWS"
+			rep.Detail = strptr("audit trail is empty; there are no entries to verify")
+		default:
+			var mark struct {
+				Count int `json:"count"`
+			}
+			if len(hwm) == 0 || json.Unmarshal(hwm, &mark) != nil || mark.Count != n {
+				rep.Status = statusUnanchored
+				rep.Verdict = "UNANCHORED"
+				rep.Detail = strptr("signed checkpoint does not cover the full audit trail; retry once the writer is idle")
+			} else {
+				rep.Verdict = "PROTECTED"
+			}
+		}
+	}
+	rep.PublicKeySource = v.pubSource
+	return rep
+}
+
+// verifyBytes verifies one immutable trail/checkpoint snapshot, so callers can
+// decode exactly the bytes whose signatures were checked.
+func (v *verifier) verifyBytes(trail, hwm []byte) verifyReport {
+	return v.verifySnapshot(trail, hwm, time.Now().Format(time.RFC3339))
 }
 
 // classifyVerifyResult folds internal/audit's (entries, err) contract into a
@@ -180,6 +212,7 @@ func classifyVerifyResult(n int, err error, now string) verifyReport {
 		rep.ChainIntact = boolptr(false)
 		rep.Detail = strptr(err.Error())
 		rep.Status = statusTampered
+		rep.Verdict = "TAMPERED"
 		line := 0
 		var te *audit.TamperError
 		if errors.As(err, &te) {
@@ -208,6 +241,7 @@ func classifyVerifyResult(n int, err error, now string) verifyReport {
 	// keeps whatever count was read before the failure as information.
 	rep.EntriesVerified = n
 	rep.Status = statusUnavailable
+	rep.Verdict = "UNAVAILABLE"
 	rep.Detail = strptr(err.Error())
 	return rep
 }
