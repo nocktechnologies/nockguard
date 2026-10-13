@@ -42,7 +42,7 @@ The generated policy allows `coder` to call the filesystem server's `read_file` 
 Ask your MCP client to call `read_file` with `{"path":"<QS>/hello.txt"}`: it should return `NockGuard read succeeded`. Each `tools/call` routed through this proxy is policy-checked; with auditing enabled and the per-agent key available, its decision is recorded in a signed audit trail. After the call, run:
 
 ```bash
-nockguard verify --agent coder        # reads ~/.nockguard/keys/coder.pub; exit 0 and PROTECTED for the signed trail
+nockguard verify --agent coder        # reads ~/.nockguard/keys/coder.pub; exit 0 and PROTECTED for a non-empty, fully checkpointed trail
 nockguard wall --agent coder          # open the Live Wall for coder's signed trail
 ```
 
@@ -159,11 +159,11 @@ Rate limiting and spend caps are opt-in and independent — set one, both, or ne
 An Ed25519-signed audit trail can be checked for signature and hash-chain integrity **offline** with only the public key:
 
 ```bash
-nockguard verify --agent coder    # one agent's trail (exit 0 = verified, 2 = read or integrity failure)
+nockguard verify --agent coder    # one agent's trail (exit 0 = non-empty and fully checkpointed)
 nockguard verify --all          # check every per-agent trail found in the audit directory
 ```
 
-`--all` scans the audit dir for every `<agent>.audit.jsonl`, verifies each with that agent's own public key, and prints a per-agent summary (exit 0 = all intact, 2 = any tampered, 1 = any it could not verify). An audit dir with **zero** trails is not "protected": there is nothing to verify, so `--all` prints `VERDICT: NO_TRAILS` and exits 1. That command replays the hash chain and signatures, detecting edits, reordering, and truncation against the retained signed checkpoint. It cannot distinguish the original writer from another holder of the private key or detect rollback of both trail and checkpoint without an external anchor. `verify` is the first-class form of `audit verify` (below), which documents HMAC vs Ed25519 signing, per-agent keys, and the compliance evidence packs.
+`PROTECTED` requires at least one verified entry and a signed checkpoint covering the whole trail. A present but empty trail reports `NO_ROWS`; a valid checkpoint behind the trail tail reports `UNANCHORED`. Both exit 1. `--all` scans the audit dir for every `<agent>.audit.jsonl`, verifies each with that agent's own public key, and reports each trail's verdict. Its aggregate exit is 0 when all trails are protected, 2 when any is tampered, and 1 when any is empty, unanchored, unverifiable or when there are no trails. An audit dir with **zero** trails prints `VERDICT: NO_TRAILS` and exits 1. Verification replays the hash chain and signatures, detecting edits, reordering, and truncation against the retained signed checkpoint. It cannot distinguish the original writer from another holder of the private key or detect rollback of both trail and checkpoint without an external anchor. `verify` is the first-class form of `audit verify` (below), which documents HMAC vs Ed25519 signing, per-agent keys, and the compliance evidence packs.
 
 ### One verdict for a session across NockGuard and NockLock
 
@@ -288,7 +288,7 @@ Zero-config observe persists its per-agent signing seed at
 Audit entries can be signed with an HMAC hash-chain — each entry's signature covers its own content plus the previous entry's signature, so changes within the retained trail break the chain. A holder of the HMAC key can sign a replacement chain, and rolling back both trail and checkpoint requires an external anchor to detect. Signing is opt-in (provide a key); without one, the trail behaves exactly as the unsigned JSONL above. This closes Phase 4.
 
 ```bash
-nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY   # exit 0 = intact, 2 = tampered
+nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY   # exit 0 = non-empty and fully checkpointed; 1 = NO_ROWS or UNANCHORED; 2 = tampered
 ```
 
 ### Public-key signing (Ed25519)
@@ -328,7 +328,7 @@ audit:
 `sign_ed25519_key_env` takes precedence over `sign_key_env` when both are set. Verify the trail with only the public key — the signer's secret is never needed to audit it:
 
 ```bash
-nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB   # exit 0 = signatures and retained chain check out, 2 = tampered or wrong key
+nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB   # exit 0 = non-empty and fully checkpointed; 1 = NO_ROWS or UNANCHORED; 2 = tampered or wrong key
 ```
 
 ### Auditable References (observe mode)
