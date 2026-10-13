@@ -21,5 +21,5 @@ isolated allow/deny check with a local MCP stub. CI runs it on Linux; it does
 not certify a customer's connector.
 
 Source: `internal/policy/init.go`, `cmd/nockguard/keygen.go`,
-`cmd/nockguard/main.go:81`, `cmd/nockguard/selftest.go:64`,
-`scripts/quickstart-acceptance.py`, `.github/workflows/ci.yml:40`.
+[cmd/nockguard/main.go](../../cmd/nockguard/main.go), [cmd/nockguard/selftest.go](../../cmd/nockguard/selftest.go),
+`scripts/quickstart-acceptance.py`, [.github/workflows/ci.yml](../../.github/workflows/ci.yml).

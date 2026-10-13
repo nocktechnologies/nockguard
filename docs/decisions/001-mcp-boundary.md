@@ -13,4 +13,4 @@ network bypasses need separate controls. `mcp-http` remains observe-only.
 
 Sources: [HTTP interception design](../http-mcp-interception.md),
 [N8761 correction](../design/n8761-phase0-http-listener-forward-proxy.md),
-`internal/proxy/stdio.go`, `cmd/nockguard/main.go:1312`.
+`internal/proxy/stdio.go`, [cmd/nockguard/main.go](../../cmd/nockguard/main.go).
