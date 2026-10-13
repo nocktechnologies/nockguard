@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nocktechnologies/nockguard/internal/forward"
 	"github.com/nocktechnologies/nockguard/internal/sessionverify"
 	_ "modernc.org/sqlite" // registers the "sqlite" driver (already linked via nocklock/pkg/receipt)
 )
@@ -29,7 +30,7 @@ var lockEventTypes = []string{"file_blocked", "file_passed", "network_blocked", 
 
 // decisionUnparseable marks a fence row that could not be read. It is shown in
 // the stream (never silently dropped) and counts against its session's badge.
-const decisionUnparseable = "unparseable"
+const decisionUnparseable = forward.DecisionUnparseable
 
 // lockSelect reads the decision columns only, by id; the caller adds the id
 // range. The chain columns (prev_hash, entry_hash, entry_sig) are the verifier's

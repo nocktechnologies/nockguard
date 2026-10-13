@@ -114,7 +114,14 @@ func (v lockView) verdicts() map[string]string {
 
 // windowEvents is the working window (pulse, unsigned export) of the current
 // snapshot.
-func (b *broker) windowEvents() []event { return lastWindow(b.currentView().events()) }
+func (b *broker) windowEvents() []event {
+	if b.demo {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return append([]event(nil), b.demoEvents...)
+	}
+	return lastWindow(b.currentView().events())
+}
 
 // events is the working window of a view: Guard decisions and Lock fence events
 // merged oldest-first, each source bounded to maxWindow so neither can displace

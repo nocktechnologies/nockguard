@@ -193,10 +193,35 @@ func severityFor(decision string) string {
 // a routine allowlist deny, instead of every non-allow reading flat as blocked.
 const (
 	ThreatCritical = "critical" // a block/deny whose reason smells of secret-exfil or destruction
-	ThreatHigh     = "high"     // other blocks/denies of consequence, and unknown enforcement
+	ThreatHigh     = "high"     // other rejections of consequence and unknown decisions
 	ThreatLow      = "low"      // routine allowlist denies, rate-limit holds, hidden tools
 	ThreatNone     = "none"     // allows, dry-run shadow would-denies, observe-mode audits — not a live catch
 )
+
+const DecisionUnparseable = "unparseable"
+
+// decisionBuckets is the decision vocabulary shared by threat tiers and Wall
+// counts. Unknown values remain visible as "other" and rate high.
+var decisionBuckets = map[string]string{
+	"": "approved", "allow": "approved", "would-deny": "approved",
+	"observe": "approved", "dispatch": "approved", "state-write": "approved",
+	"approval-granted": "approved",
+	"deny":             "blocked", "block": "blocked", "ratelimit": "blocked",
+	"hide": "blocked", "approval-denied": "blocked",
+	"inject": "other", "budget-ask": "other", "downgrade": "other",
+	DecisionUnparseable: "unreadable",
+}
+
+// DecisionBucket gives the Wall's count bucket for a recorded decision.
+func DecisionBucket(decision string) string {
+	if bucket, ok := decisionBuckets[decision]; ok {
+		return bucket
+	}
+	return "other"
+}
+
+// IsRejection reports decisions that actually refused a call or hid a tool.
+func IsRejection(decision string) bool { return DecisionBucket(decision) == "blocked" }
 
 // Severity classifies a (decision, reason) pair into a threat tier. It is a PURE
 // function (no I/O, no state) so the forwarder and the Live Wall share one source
@@ -208,12 +233,11 @@ const (
 // — the built-in validate rule names (internal/validate) and the policy deny
 // reasons (internal/policy) — plus the wall's own demo phrasing.
 func Severity(decision, reason string) string {
-	switch decision {
-	// "observe" is the mcp-http bridge's per-call audit decision (observe-mode
-	// dogfood): nothing was blocked, so it is NOT a live catch — without this it
-	// falls through to ThreatHigh and floods the wall with routine MCP traffic.
-	case "allow", "would-deny", "observe", "":
+	switch DecisionBucket(decision) {
+	case "approved", "unreadable":
 		return ThreatNone
+	case "other":
+		return ThreatHigh
 	}
 	r := strings.ToLower(reason)
 	if (decision == "block" || decision == "deny") && (secretExfil(r) || destructive(r)) {
@@ -225,8 +249,7 @@ func Severity(decision, reason string) string {
 	if decision == "ratelimit" || decision == "hide" {
 		return ThreatLow
 	}
-	// Other blocks/denies of consequence — and any unknown enforcement outcome,
-	// which we surface as high rather than swallow (cf. the wall's bucket()).
+	// Other rejections and unknown decisions stay loud without changing counts.
 	return ThreatHigh
 }
 
