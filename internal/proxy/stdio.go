@@ -477,10 +477,13 @@ func (p *StdioProxy) drainAudits() {
 	p.flushAuditsLocked()
 }
 
-// Once the upstream leader exits, Run has at most this long to deliver its
-// remaining output and in-flight errors. Bytes still in the pipe are dropped
-// at the deadline, including when the client stops reading stdout.
+// The leader wait, output drain, and client replies share this shutdown bound.
+// Audit draining gets another 500ms after the group is killed and reaped, so
+// the total shutdown bound is 1.5s plus kill/reap scheduling. Forced kills
+// intentionally return a nonzero upstream exit. Unread output is dropped at
+// the first deadline, including when the client stops reading stdout.
 const upstreamShutdownBound = time.Second
+const auditDrainBound = 500 * time.Millisecond
 
 func (p *StdioProxy) Run() error {
 
@@ -579,7 +582,7 @@ func (p *StdioProxy) Run() error {
 		return fmt.Errorf("proxy received %s", sig)
 	}
 	// One absolute deadline starts at the first shutdown event and covers the
-	// leader wait, output drain, client replies, and audit cleanup.
+	// leader wait, output drain, and client replies.
 	shutdown, cancel := context.WithTimeout(context.Background(), upstreamShutdownBound)
 	defer cancel()
 	outputTimedOut, shutdownTimedOut := false, false
@@ -634,22 +637,25 @@ func (p *StdioProxy) Run() error {
 			return fmt.Errorf("proxy received %s", sig)
 		}
 	}
-	audited := make(chan struct{})
-	go func() { p.drainAudits(); close(audited) }()
-	select {
-	case <-audited:
-	case <-shutdown.Done():
-		shutdownTimedOut = true
-		p.logger.Print("upstream exited: audit drain deadline reached")
-	case sig := <-signals:
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		return fmt.Errorf("proxy received %s", sig)
-	}
 	// Linux and macOS waitid leave the leader unreaped until this kill, so
 	// the PGID cannot have been reused. Output errors and signals also kill
 	// the group before waiting for the leader.
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	waitErr := reapLeader(cmd, observed)
+	// A leader that used the whole shutdown bound must not consume the time
+	// reserved for deferred audits from unanswered forwarded calls.
+	auditShutdown, cancelAudit := context.WithTimeout(context.Background(), auditDrainBound)
+	defer cancelAudit()
+	audited := make(chan struct{})
+	go func() { p.drainAudits(); close(audited) }()
+	select {
+	case <-audited:
+	case <-auditShutdown.Done():
+		shutdownTimedOut = true
+		p.logger.Print("upstream exited: audit drain deadline reached")
+	case sig := <-signals:
+		return fmt.Errorf("proxy received %s", sig)
+	}
 	if !outputTimedOut {
 		select {
 		case e := <-outputErrCh:
