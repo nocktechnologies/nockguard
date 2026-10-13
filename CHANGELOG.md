@@ -6,7 +6,7 @@ All notable changes to NockGuard are documented here.
 
 ### Fixed
 - Build CI and release archives with Go 1.26.9 and gate source and release binaries with `govulncheck`.
-- `nockguard proxy` now exits nonzero as soon as the upstream process dies, even while the client holds stdin open. In-flight requests get a JSON-RPC `-32603` error first. Before, it stayed running until the client closed stdin.
+- `nockguard proxy` now starts a one-second shutdown deadline when the upstream dies, even while the client holds stdin open or stops reading stdout. It sends JSON-RPC `-32603` errors for in-flight requests when the client can receive them, then stops the upstream process group and exits nonzero.
 - `verify --agent` now verifies an explicitly supplied `--audit` file instead of silently checking the agent's default trail.
 
 ### Changed

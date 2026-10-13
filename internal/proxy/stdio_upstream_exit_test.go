@@ -76,6 +76,18 @@ func waitNonzeroExit(t *testing.T, exited <-chan error) {
 	}
 }
 
+func waitGrandchildGone(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatal("grandchild still running after proxy exit")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func TestProxyExitsWhenUpstreamDiesBeforeInitialize(t *testing.T) {
 	_, _, exited := runWithOpenStdin(t, "false")
 	waitNonzeroExit(t, exited)
@@ -121,6 +133,40 @@ func TestProxyAnswersInFlightCallWhenUpstreamDies(t *testing.T) {
 	waitNonzeroExit(t, exited)
 }
 
+func TestProxyAnswersInFlightInitializeWhenUpstreamDies(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "die-on-initialize.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/bash\nread -r line\nexit 3\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	in, out, exited := runWithOpenStdin(t, "bash "+script)
+	if _, err := io.WriteString(in, `{"jsonrpc":"2.0","id":8,"method":"initialize"}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	lineCh := make(chan string, 1)
+	go func() {
+		if out.Scan() {
+			lineCh <- out.Text()
+		}
+		close(lineCh)
+	}()
+	select {
+	case line, ok := <-lineCh:
+		if !ok {
+			t.Fatal("stdout closed without an error response for initialize")
+		}
+		var resp struct {
+			ID    json.RawMessage `json:"id"`
+			Error *struct{}       `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(line), &resp); err != nil || string(resp.ID) != "8" || resp.Error == nil {
+			t.Fatalf("want JSON-RPC error for initialize id 8, got %q (%v)", line, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no response for in-flight initialize")
+	}
+	waitNonzeroExit(t, exited)
+}
+
 // A grandchild that inherited stdout must not keep the proxy alive after the
 // upstream itself has exited, and must not outlive it.
 func TestProxyExitsWhenGrandchildHoldsStdout(t *testing.T) {
@@ -142,14 +188,7 @@ func TestProxyExitsWhenGrandchildHoldsStdout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for syscall.Kill(pid, 0) == nil {
-		if time.Now().After(deadline) {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-			t.Fatal("grandchild still running after the proxy exited")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	waitGrandchildGone(t, pid)
 }
 
 // A client that stops reading stdout must not keep the proxy alive after the
@@ -166,9 +205,149 @@ func TestProxyExitsWhenClientStopsReadingStdout(t *testing.T) {
 	// Stdout is deliberately never read.
 	_, _, exited, stderr := runWithOpenStdinStderr(t, "bash "+script)
 	waitNonzeroExit(t, exited)
-	if !strings.Contains(stderr.String(), "output loop stuck") {
+	if !strings.Contains(stderr.String(), "output drain deadline reached") {
 		t.Fatalf("shutdown did not take the stuck-output path; stderr:\n%s", stderr.String())
 	}
+}
+
+// Replies for pending calls share the same deadline as output draining. A
+// client that never reads stdout must not block shutdown after its pipe fills.
+func TestProxyExitsWhenPendingRepliesFillUnreadStdout(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "die-after-requests.sh")
+	body := "#!/bin/bash\nfor ((i=0;i<3000;i++)); do IFS= read -r line || exit 2; done\nexit 3\n"
+	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+		t.Fatal(err)
+	}
+	in, _, exited, stderr := runWithOpenStdinStderr(t, "bash "+script)
+	var input strings.Builder
+	for i := 0; i < 3000; i++ {
+		input.WriteString(`{"jsonrpc":"2.0","id":`)
+		input.WriteString(strconv.Itoa(i))
+		input.WriteString(`,"method":"tools/call","params":{"name":"nockcc_nock_list"}}` + "\n")
+	}
+	if _, err := io.WriteString(in, input.String()); err != nil {
+		t.Fatal(err)
+	}
+	waitNonzeroExit(t, exited)
+	if !strings.Contains(stderr.String(), "client reply deadline reached") {
+		t.Fatalf("shutdown did not reach the blocked-reply path; stderr:\n%s", stderr.String())
+	}
+}
+
+// A grandchild that keeps writing cannot renew the shutdown period forever.
+func TestProxyExitsWhenGrandchildWritesForever(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "grandchild.pid")
+	script := filepath.Join(dir, "writer.sh")
+	body := "#!/bin/bash\n(while :; do echo aaaa; done) &\necho $! > " + pidFile + "\nexit 3\n"
+	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+		t.Fatal(err)
+	}
+	_, _, exited := runWithOpenStdin(t, "bash "+script)
+	waitNonzeroExit(t, exited)
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitGrandchildGone(t, pid)
+}
+
+func TestProxyGracefulExitKillsGrandchild(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "grandchild.pid")
+	script := filepath.Join(dir, "graceful.sh")
+	body := "#!/bin/bash\nsleep 30 >/dev/null 2>&1 &\necho $! > " + pidFile + "\nIFS= read -r line || true\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+		t.Fatal(err)
+	}
+	in, _, exited := runWithOpenStdin(t, "bash "+script)
+	if err := in.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("graceful proxy exit failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy did not exit after client EOF")
+	}
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitGrandchildGone(t, pid)
+}
+
+func TestProxyAllowsUpstreamToFinishAfterClosingStdout(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "close-stdout-then-exit.sh")
+	body := "#!/bin/bash\nIFS= read -r line || true\necho DONE\nexec 1>&-\nsleep 0.1\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+		t.Fatal(err)
+	}
+	in, out, exited := runWithOpenStdin(t, "bash "+script)
+	if err := in.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Scan() || out.Text() != "DONE" {
+		t.Fatalf("missing final upstream output: %q", out.Text())
+	}
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("upstream should finish cleanly after closing stdout: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy did not exit after upstream finished")
+	}
+}
+
+func TestProxySignalKillsGrandchild(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "grandchild.pid")
+	script := filepath.Join(dir, "wait.sh")
+	body := "#!/bin/bash\nsleep 30 &\necho $! > " + pidFile + "\nwait\n"
+	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(buildBinary(t), "proxy", "--upstream", "bash "+script,
+		"--agent", "kit", "--policy", writePolicyFile(t))
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = io.Discard
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	defer in.Close()
+	var pid int
+	deadline := time.Now().Add(5 * time.Second)
+	for pid == 0 && time.Now().Before(deadline) {
+		if raw, err := os.ReadFile(pidFile); err == nil {
+			pid, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pid == 0 {
+		t.Fatal("upstream grandchild did not start")
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	waitNonzeroExit(t, exited)
+	waitGrandchildGone(t, pid)
 }
 
 // Output the upstream wrote before exiting must reach a client that is still
