@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -73,6 +74,37 @@ func TestPolicyLintListsEveryAgentKey(t *testing.T) {
 	for _, key := range yamlKeys(t, reflect.TypeOf(policy.AgentPolicy{})) {
 		if !bytes.Contains(valid, []byte("'"+key+"'")) {
 			t.Errorf("policy-lint.md E002 valid-key set omits agent key %q", key)
+		}
+	}
+}
+
+// Line numbers go stale and the Warden template copies these files into users'
+// projects; cite function names. Checks must also report their own failures, so
+// no template may discard a probe's stderr.
+func TestShippedTemplatesCiteFunctionsAndKeepStderr(t *testing.T) {
+	root := filepath.Join("..", "..")
+	stderrDiscard := regexp.MustCompile(`2> ?/dev/null|&> ?/dev/null`)
+	lineRef := regexp.MustCompile(`\.go:[0-9]+`)
+	files := []string{filepath.Join("templates", "warden", "CLAUDE.md")}
+	for _, dir := range []string{filepath.Join(".claude", "commands"), filepath.Join("templates", "warden", ".claude", "commands")} {
+		entries, err := os.ReadDir(filepath.Join(root, dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			files = append(files, filepath.Join(dir, e.Name()))
+		}
+	}
+	for _, f := range files {
+		body, err := os.ReadFile(filepath.Join(root, f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := lineRef.Find(body); m != nil {
+			t.Errorf("%s cites a source line number (%q); name the function instead", f, m)
+		}
+		if stderrDiscard.Match(body) {
+			t.Errorf("%s discards a check's stderr to /dev/null; report the failure instead", f)
 		}
 	}
 }
