@@ -62,10 +62,12 @@ brew install nocktechnologies/tap/nockguard
 ```
 
 On Linux, download the [latest release](https://github.com/nocktechnologies/nockguard/releases/latest)
-archive for your architecture into an empty directory, then run these commands
-there:
+archive for your architecture into an empty directory, and download `SHA256SUMS`
+from the same release. Run these commands there, and continue only if the check
+prints `OK` for your archive:
 
 ```bash
+sha256sum --check --ignore-missing SHA256SUMS
 tar -xzf nockguard_*_linux_*.tar.gz
 sudo install -m 0755 nockguard nockguard-wall /usr/local/bin/
 ```
