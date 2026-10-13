@@ -168,9 +168,19 @@ func writeKeyFiles(home, name, seedHex, pubHex string, force bool) (replaced boo
 // publication, so two writers cannot interleave into a pub that does not match
 // the seed. The lock file is opened no-follow and non-blocking (a FIFO planted at
 // the name cannot hang the open) and must be a regular file we own.
+//
+// Create and open are separate steps: O_CREAT|O_EXCL, then a plain open on
+// EEXIST. On macOS 26.5 (xnu-12377.121), openat(dirfd, O_CREAT) without
+// O_EXCL fails with ENOENT in the process that loses a create race, so
+// concurrent first starts could not take the lock. Lock files are never
+// removed, so the open after EEXIST finds the winner's file.
 func lockAgentKeys(keyDir *os.File, name string) (func(), error) {
 	lockName := name + ".lock"
-	fd, err := unix.Openat(int(keyDir.Fd()), lockName, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0o600)
+	const openFlags = unix.O_RDWR | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC
+	fd, err := unix.Openat(int(keyDir.Fd()), lockName, openFlags|unix.O_CREAT|unix.O_EXCL, 0o600)
+	if errors.Is(err, unix.EEXIST) {
+		fd, err = unix.Openat(int(keyDir.Fd()), lockName, openFlags, 0)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("opening key lock %s: %w", lockName, err)
 	}
