@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const { test } = require('node:test');
 
-function wall(contextPayload) {
+function wall(contextPayload, mediaQuery) {
   const elements = new Map();
   function element() {
     const classes = new Set();
@@ -61,7 +61,7 @@ function wall(contextPayload) {
     },
   });
   const context = vm.createContext({
-    document, window: {}, Date, URLSearchParams,
+    document, window: mediaQuery ? { matchMedia: () => mediaQuery } : {}, Date, URLSearchParams,
     Option: function(label, value) { this.label = label; this.value = value; },
     EventSource: class {}, fetch: () => contextPayload === undefined
       ? new Promise(() => {})
@@ -71,6 +71,27 @@ function wall(contextPayload) {
   vm.runInContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], context);
   return { context, elements, decisions };
 }
+
+test('evidence details follow narrow and wide resizes with current and legacy listeners', () => {
+  for (const legacy of [false, true]) {
+    let onChange;
+    const mediaQuery = { matches: false };
+    if (legacy) mediaQuery.addListener = listener => { onChange = listener; };
+    else mediaQuery.addEventListener = (type, listener) => {
+      assert.equal(type, 'change');
+      onChange = listener;
+    };
+    const w = wall(undefined, mediaQuery);
+    const details = w.elements.get('evidence-details');
+    assert.equal(details.open, false);
+    assert.equal(typeof onChange, 'function');
+    onChange({ matches: true });
+    assert.equal(details.open, true);
+    onChange({ matches: false });
+    assert.equal(details.open, false);
+    assert.ok(w.elements.has('f-text')); // initialization continued past media query setup
+  }
+});
 
 test('context window stays a bounded positive integer', async () => {
   for (const [window, expected] of [

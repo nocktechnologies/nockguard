@@ -31,6 +31,8 @@
   .evidence .label { color:var(--dim); }
   .evidence .value { overflow-wrap:anywhere; }
   .evidence .scope { grid-column:1 / -1; color:var(--dim); }
+  .evidence summary { cursor:pointer; }
+  .evidence details .scope { margin-top:5px; }
   .demo-banner { padding:9px 22px; background:rgba(210,153,34,.2); color:var(--ratelimit);
                  font-weight:800; letter-spacing:1px; border-bottom:1px solid var(--ratelimit); }
   .demo-banner[hidden] { display:none; }
@@ -53,19 +55,19 @@
   .toggle.on { color:var(--block); border-color:rgba(255,77,77,.5); background:rgba(255,77,77,.08); }
   .toggle.snd.on { color:var(--accent); border-color:rgba(88,166,255,.5); background:rgba(88,166,255,.08); }
 
-  .filters { flex-basis:100%; display:flex; gap:9px; align-items:center; margin-top:2px; }
+  .filters { flex-basis:100%; display:flex; flex-wrap:wrap; gap:9px; align-items:center; margin-top:2px; }
   .finput { background:var(--panel); border:1px solid var(--line); color:var(--text);
             border-radius:8px; padding:8px 12px; font:inherit; font-size:12px; }
   .finput::placeholder { color:var(--dim); }
   .finput:focus { outline:none; border-color:var(--accent); }
-  #f-text { flex:1; max-width:360px; }
+  #f-text { flex:1 1 200px; min-width:0; max-width:360px; }
   .fcount { color:var(--dim); font-size:11px; letter-spacing:.5px; margin-left:2px; }
 
   /* pulse header: at-a-glance aggregate of what's currently on the wall */
   .pulse { display:flex; align-items:center; gap:24px; flex-wrap:wrap;
            padding:12px 22px; border-bottom:1px solid var(--line);
            background:linear-gradient(180deg, rgba(255,255,255,.02), transparent); }
-  .pgroup { display:flex; gap:10px; }
+  .pgroup { display:flex; flex-wrap:wrap; gap:10px; }
   .ptile { min-width:98px; padding:8px 16px; border:1px solid var(--line);
            border-left-width:4px; border-radius:10px; background:var(--panel); }
   .ptile .pn { font-size:24px; font-weight:700; line-height:1.05; display:block; }
@@ -192,6 +194,30 @@
     18%{ opacity:1; box-shadow:inset 0 0 240px 70px rgba(255,77,77,.45); }
     100%{ opacity:0; box-shadow:inset 0 0 200px 40px rgba(255,77,77,0); }
   }
+
+  /* narrow screens: wrap, stack, and keep the feed reachable on the first screen */
+  @media (max-width:600px) {
+    body { height:auto; min-height:100vh; overflow:auto; }
+    header, .pulse, .demo-banner, .tamper, .chainnote, #sessions { padding-left:12px; padding-right:12px; }
+    .brand { flex-wrap:wrap; }
+    .evidence { grid-template-columns:minmax(0,1fr); }
+    .stats { margin-left:0; }
+    .filters, .ptop-list, .row .verdict { min-width:0; }
+    .filters .finput, .ptop-list, .pagent { max-width:100%; }
+    .pagent, .row .badge { overflow-wrap:anywhere; }
+    .pill, .ptile { min-width:0; flex:1 1 72px; }
+    .hero { border-right:0; padding-right:0; flex-basis:100%; }
+    .ptop { flex-wrap:wrap; }
+    #feed { flex:none; min-height:50vh; overflow:visible; padding:10px 12px; }
+    .row { grid-template-columns:auto minmax(0,1fr); gap:6px 10px; }
+    .row .tool, .row .reason, .row .verdict { grid-column:1 / -1; }
+    .row .tool, .row .reason { white-space:normal; overflow-wrap:anywhere; }
+    .row .verdict { justify-self:start; flex-wrap:wrap; }
+    .tamper { flex-wrap:wrap; }
+    .tamper .tamper-detail { margin-left:0; max-width:none; white-space:normal; flex-basis:100%; }
+    .chainnote .chainnote-detail { margin-left:0; }
+    .sess { max-width:100%; min-width:0; overflow-wrap:anywhere; }
+  }
 </style>
 </head>
 <body data-lock="0">
@@ -226,8 +252,10 @@
       <div><span class="label">Lock DB:</span> <span class="value" id="source-lock">loading…</span></div>
       <div><span class="label">Agent:</span> <span class="value" id="context-agent">loading…</span> · <span class="label">Session:</span> <span class="value" id="context-session">none observed</span></div>
       <div><span class="label">Verification:</span> <span class="value" id="verification-status">checking…</span> · <span class="label">last check:</span> <span class="value" id="verification-time">—</span></div>
+      <details class="scope" id="evidence-details"><summary>Evidence details</summary>
       <div class="scope" id="export-scope">PROOF: signed Guard rows only when enabled; never Lock rows. CSV/JSON: Guard rows plus available Lock snapshot; Lock rows are marked verified only for protected sessions.</div>
       <div class="scope">Counts and pulse cover the same filtered view of the newest <span id="window-size">500</span> decisions. A blank source or unverified trail is not a zero-violation finding.</div>
+      </details>
     </section>
     <div class="stats">
       <div class="pill"><span class="n" id="c-total">—</span><span class="l">records in view</span></div>
@@ -307,6 +335,15 @@
   let MAX_ROWS = 500;
   let demoMode = false;
   let recentSession = '';
+  // open on wide screens, collapsed on narrow; follows resizes across the breakpoint
+  const wideMQ = typeof window.matchMedia === 'function' ? window.matchMedia('(min-width:601px)') : null;
+  const evDetails = document.getElementById('evidence-details');
+  evDetails.open = wideMQ ? wideMQ.matches : true;
+  if (wideMQ) {
+    const syncEvidence = e => { evDetails.open = e.matches; };
+    if (typeof wideMQ.addEventListener === 'function') wideMQ.addEventListener('change', syncEvidence);
+    else if (typeof wideMQ.addListener === 'function') wideMQ.addListener(syncEvidence);
+  }
 
   fetch('/context', { cache:'no-store' }).then(r => r.json()).then(c => {
     MAX_ROWS = Number.isSafeInteger(c.window) && c.window > 0 ? Math.min(c.window, 500) : 500;
