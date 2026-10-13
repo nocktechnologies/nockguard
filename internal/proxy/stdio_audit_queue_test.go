@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"sort"
@@ -62,6 +63,117 @@ func TestStdioOutOfOrderResponseAuditLimit(t *testing.T) {
 	rows = readAuditEvents(t, path)
 	if len(rows) != 4 || rows[2].Tool != "first_tool" || rows[2].Decision != "allow" || rows[3].Tool != "second_tool" || rows[3].Decision != "allow" {
 		t.Fatalf("deferred decisions not written in request order: %+v", rows)
+	}
+}
+
+func TestStdioPendingRequestRegisteredBeforeWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		respondDuringWrite bool
+	}{
+		{name: "response before write returns", respondDuringWrite: true},
+		{name: "response after write returns", respondDuringWrite: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+			pending := &sync.Map{}
+			var agent bytes.Buffer
+			response := `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}` + "\n"
+			forward := auditWriteCheck(func(p []byte) (int, error) {
+				if !strings.Contains(string(p), "nockcc_nock_claim") {
+					t.Errorf("upstream write = %s, want claim request", p)
+				}
+				if tc.respondDuringWrite {
+					if _, ok := pending.Load("1"); !ok {
+						t.Error("pending request was not registered before upstream Write")
+					}
+					if err := gate.upstreamToAgent(strings.NewReader(response), &agent, pending); err != nil {
+						return 0, err
+					}
+				}
+				return len(p), nil
+			})
+
+			call := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":11711}}}` + "\n"
+			if err := gate.agentToUpstream(strings.NewReader(call), forward, pending); err != nil {
+				t.Fatalf("agentToUpstream: %v", err)
+			}
+			if !tc.respondDuringWrite {
+				if err := gate.upstreamToAgent(strings.NewReader(response), &agent, pending); err != nil {
+					t.Fatalf("upstreamToAgent: %v", err)
+				}
+			}
+
+			gate.cardMu.Lock()
+			currentCard := gate.currentCard
+			gate.cardMu.Unlock()
+			if currentCard != 11711 {
+				t.Errorf("currentCard = %d, want 11711", currentCard)
+			}
+			if !strings.Contains(agent.String(), `"id":1`) {
+				t.Errorf("response was not forwarded to agent: %s", agent.String())
+			}
+			if _, ok := pending.Load("1"); ok {
+				t.Error("pending request remains after its response")
+			}
+
+			assertStdioAuditQueueResolved(t, gate)
+		})
+	}
+}
+
+func TestStdioUpstreamWriteFailureRemovesPendingAndResolvesAudit(t *testing.T) {
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	pending := &sync.Map{}
+	writeErr := errors.New("upstream write failed")
+	forward := auditWriteCheck(func([]byte) (int, error) { return 0, writeErr })
+	call := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":11711}}}` + "\n"
+	if err := gate.agentToUpstream(strings.NewReader(call), forward, pending); !errors.Is(err, writeErr) {
+		t.Fatalf("agentToUpstream error = %v, want %v", err, writeErr)
+	}
+	if _, ok := pending.Load("1"); ok {
+		t.Fatal("pending request remains after upstream write failure")
+	}
+	assertStdioAuditQueueResolved(t, gate)
+}
+
+func assertStdioAuditQueueResolved(t *testing.T, gate *StdioProxy) {
+	t.Helper()
+	gate.auditMutex.Lock()
+	defer gate.auditMutex.Unlock()
+	if gate.auditNext != 1 || len(gate.auditTodo) != 0 || len(gate.auditResolved) != 0 {
+		t.Errorf("audit queue = next %d, todo %d, resolved %d; want next 1 with empty queues",
+			gate.auditNext, len(gate.auditTodo), len(gate.auditResolved))
+	}
+}
+
+func TestStdioWriteFailureLeavesResolutionToResponseOwner(t *testing.T) {
+	for _, method := range []string{"tools/call", "tools/list"} {
+		t.Run(method, func(t *testing.T) {
+			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+			pending := &sync.Map{}
+			writeErr := errors.New("upstream write failed")
+			forward := auditWriteCheck(func([]byte) (int, error) {
+				// Pause the response path after it claims the entry, before it
+				// commits response-backed state and resolves the sequence.
+				if _, ok := pending.LoadAndDelete("1"); !ok {
+					t.Fatal("response path could not claim pending request")
+				}
+				return 0, writeErr
+			})
+			call := `{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":{"name":"nockcc_nock_claim","arguments":{"id":11711}}}` + "\n"
+			if err := gate.agentToUpstream(strings.NewReader(call), forward, pending); !errors.Is(err, writeErr) {
+				t.Fatalf("agentToUpstream error = %v, want %v", err, writeErr)
+			}
+			gate.auditMutex.Lock()
+			next := gate.auditNext
+			gate.auditMutex.Unlock()
+			if next != 0 {
+				t.Fatalf("write failure resolved response-owned sequence: auditNext = %d", next)
+			}
+			gate.resolveAudit(0)
+			assertStdioAuditQueueResolved(t, gate)
+		})
 	}
 }
 
