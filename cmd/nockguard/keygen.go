@@ -114,6 +114,14 @@ func writeKeyFiles(home, name, seedHex, pubHex string, force bool) (replaced boo
 		return false, fmt.Errorf("opening nockguard state dir: %w", err)
 	}
 	defer nockguardDir.Close()
+	// Share the observe setup lock while opening keys/. Directory setup is
+	// mkdir-if-absent; neither keygen nor observe replaces an existing directory.
+	unlockState, err := lockAgentKeys(nockguardDir, observeSetupLockName)
+	if err != nil {
+		return false, fmt.Errorf("locking key state directory setup: %w", err)
+	}
+	defer unlockState()
+
 	keyDir, err := openOrCreateObserveDir(int(nockguardDir.Fd()), "keys", 0o700, unix.Fsync)
 	if err != nil {
 		return false, fmt.Errorf("opening key dir: %w", err)
