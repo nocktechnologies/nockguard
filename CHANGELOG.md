@@ -10,6 +10,7 @@ All notable changes to NockGuard are documented here.
 
 ### Changed
 - `tools/list` now keeps tools with an `Ask` verdict visible while holding their calls for local or Telegram approval; denied tools stay hidden. Approved calls record their final `allow` audit row before dispatch.
+- The Wall counts audit records, not calls, and says so: the header reads "records in view" and "threat records". `tools/list` hides now show as a separate "tools hidden" count and no longer count as rejected records, threats or toward the rejected share, so one rejected call no longer reads as 13 threats caught.
 
 ### Fixed
 - The stdio proxy registers response correlation before writing a request upstream, and clears pending state and resolves its audit sequence when the write fails.

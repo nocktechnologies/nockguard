@@ -194,7 +194,7 @@ func severityFor(decision string) string {
 const (
 	ThreatCritical = "critical" // a block/deny whose reason smells of secret-exfil or destruction
 	ThreatHigh     = "high"     // other rejections of consequence and unknown decisions
-	ThreatLow      = "low"      // routine allowlist denies, rate-limit holds, hidden tools
+	ThreatLow      = "low"      // routine allowlist denies, rate-limit holds
 	ThreatNone     = "none"     // allows, dry-run shadow would-denies, observe-mode audits — not a live catch
 )
 
@@ -207,8 +207,9 @@ var decisionBuckets = map[string]string{
 	"observe": "approved", "dispatch": "approved", "state-write": "approved",
 	"approval-granted": "approved",
 	"deny":             "blocked", "block": "blocked", "ratelimit": "blocked",
-	"hide": "blocked", "approval-denied": "blocked",
-	"inject": "other", "budget-ask": "other", "downgrade": "other",
+	"approval-denied": "blocked",
+	"hide":            "hidden", // tools/list filtering is discovery, not a refused call
+	"inject":          "other", "budget-ask": "other", "downgrade": "other",
 	DecisionUnparseable: "unreadable",
 }
 
@@ -220,7 +221,7 @@ func DecisionBucket(decision string) string {
 	return "other"
 }
 
-// IsRejection reports decisions that actually refused a call or hid a tool.
+// IsRejection reports decisions that actually refused a call.
 func IsRejection(decision string) bool { return DecisionBucket(decision) == "blocked" }
 
 // Severity classifies a (decision, reason) pair into a threat tier. It is a PURE
@@ -234,7 +235,7 @@ func IsRejection(decision string) bool { return DecisionBucket(decision) == "blo
 // reasons (internal/policy) — plus the wall's own demo phrasing.
 func Severity(decision, reason string) string {
 	switch DecisionBucket(decision) {
-	case "approved", "unreadable":
+	case "approved", "hidden", "unreadable":
 		return ThreatNone
 	case "other":
 		return ThreatHigh
@@ -246,7 +247,7 @@ func Severity(decision, reason string) string {
 	if decision == "deny" && routineAllowlistDeny(r) {
 		return ThreatLow
 	}
-	if decision == "ratelimit" || decision == "hide" {
+	if decision == "ratelimit" {
 		return ThreatLow
 	}
 	// Other rejections and unknown decisions stay loud without changing counts.

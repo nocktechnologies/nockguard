@@ -124,6 +124,21 @@ test('pulse uses the server bucket for routine decisions', () => {
   assert.equal(w.elements.get('p-other').textContent, 1);
 });
 
+test('tools/list hides are counted apart from rejected calls and threats', () => {
+  const w = wall();
+  vm.runInContext("render({decision:'deny', bucket:'blocked', severity:'low', agent:'a'})", w.context);
+  assert.equal(w.elements.get('c-caught').textContent, '100%');
+  for (let i = 0; i < 12; i++) vm.runInContext("render({decision:'hide', bucket:'hidden', severity:'none', agent:'a'})", w.context);
+  // Negative control: twelve hides must not move the rejected, threat or rate figures.
+  assert.equal(w.elements.get('p-hidden').textContent, 12);
+  assert.equal(w.elements.get('c-hidden').textContent, 12);
+  assert.equal(w.elements.get('p-blocked').textContent, 1);
+  assert.equal(w.elements.get('p-threats').textContent, 1);
+  assert.equal(w.elements.get('p-other').textContent, 0);
+  assert.equal(w.elements.get('c-caught').textContent, '100%');
+  assert.equal(w.elements.get('c-total').textContent, 13);
+});
+
 test('approval-denied uses rejection styling and a fixed decision filter option', () => {
   const w = wall();
   vm.runInContext("render({decision:'approval-denied', bucket:'blocked', severity:'high'})", w.context);
