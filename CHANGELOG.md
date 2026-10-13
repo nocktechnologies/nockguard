@@ -5,6 +5,7 @@ All notable changes to NockGuard are documented here.
 ## [Unreleased]
 
 ### Fixed
+- Build CI and release archives with Go 1.26.9 and gate source and release binaries with `govulncheck`.
 - `verify --agent` now verifies an explicitly supplied `--audit` file instead of silently checking the agent's default trail.
 
 ### Changed
