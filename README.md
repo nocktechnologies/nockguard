@@ -16,12 +16,9 @@ MCP server (filesystem, GitHub, your own)
 
 ## See it in 30 seconds
 
-```bash
-# This quickstart needs main at d56e697 or later; v0.5.0's init uses
-# my-agent and leaves audit disabled.
-go install github.com/nocktechnologies/nockguard/cmd/nockguard@main
-go install github.com/nocktechnologies/nockguard/cmd/nockguard-wall@main
+First [install NockGuard](#install), then run:
 
+```bash
 QS=$(mktemp -d)                                  # private fixture directory (not a predictable /tmp path)
 printf 'NockGuard read succeeded\n' > "$QS/hello.txt"
 echo "$QS"                                        # substitute this path for <QS> below
@@ -49,10 +46,6 @@ nockguard verify --agent coder        # reads ~/.nockguard/keys/coder.pub; exit 
 nockguard wall --agent coder          # open the Live Wall for coder's signed trail
 ```
 
-The tap currently installs v0.5.0, which predates this quickstart and the
-`nockguard wall` command. The source on main now builds both binaries into
-release archives; a Homebrew formula update is due with the next release.
-
 To exercise the blocked canary as well, run `python3 scripts/quickstart-acceptance.py` from a source checkout. This Linux CI test runs the commands above in an empty home with a local MCP stub using the filesystem server's tool names. It confirms both reads succeed, a direct `write_file` call is denied without creating a file, `verify` exits 0 with `PROTECTED`, and the signed trail records both allow and deny decisions. Denied tools are hidden from normal MCP tool discovery, so the test sends the canary call directly.
 
 ### Observe first, then enforce
@@ -61,12 +54,23 @@ You do not have to write a policy up front. Run in `mode: allow` with the audit 
 
 ## Install
 
+On macOS, Homebrew installs both `nockguard` and `nockguard-wall` from the
+current release:
+
 ```bash
-brew install nocktechnologies/tap/nockguard # currently v0.5.0: CLI only
+brew install nocktechnologies/tap/nockguard
 ```
 
-For the `coder` quickstart and `nockguard wall`, install both binaries from
-main as shown in [See it in 30 seconds](#see-it-in-30-seconds).
+On Linux, download the [latest release](https://github.com/nocktechnologies/nockguard/releases/latest)
+archive for your architecture into an empty directory, then run these commands
+there:
+
+```bash
+tar -xzf nockguard_*_linux_*.tar.gz
+sudo install -m 0755 nockguard nockguard-wall /usr/local/bin/
+```
+
+Run `nockguard wall` to start the Live Wall.
 
 ## Writing a policy
 

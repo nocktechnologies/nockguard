@@ -4,6 +4,9 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Documentation
+- Document Homebrew and Linux archive installation, including the Live Wall.
+
 ## [0.6.0] - 2026-10-13
 
 ### Breaking
