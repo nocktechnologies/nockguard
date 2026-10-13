@@ -44,7 +44,7 @@ go vet ./...
 ## Rules that bite
 - Fail closed. An unknown agent, a malformed glob, or an unknown `validate_input` category must DENY, never quietly pass — `internal/policy/policy.go` plus the `*_failopen_test.go` guards.
 - The audit trail and the wall record the decision only (agent, tool, outcome, reason) — never tool-call arguments or payloads (`internal/audit/audit.go`, README "Live Wall").
-- Signing keys are read from env vars only: never written into `policy.yaml`, never committed. `gitleaks` scans every branch against `.gitleaks-baseline.json`.
+- Signing keys come from per-agent env vars, configured policy env vars, or protected `~/.nockguard/keys/<agent>.ed25519` files (in that order); never put a key value in `policy.yaml` or commit it. `gitleaks` scans every branch against `.gitleaks-baseline.json`.
 - Listeners bind loopback by default (wall, `mcp-listen`, pool router); do not widen a bind without saying so in the PR.
 - Anything `nockguard-pool` does that `docs/POOL_ROUTER.md` does not describe is a bug — change the contract in the same PR as the behavior.
 - Work on a branch and merge by PR with CI green (gofmt, vet, build, `-race` tests, gitleaks). Never commit the built `/nockguard` binary; it is gitignored on purpose.
