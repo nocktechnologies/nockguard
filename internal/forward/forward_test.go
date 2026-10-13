@@ -140,6 +140,9 @@ func TestSeverityMapping(t *testing.T) {
 }
 
 func TestSeverityThreatTiers(t *testing.T) {
+	if IsRejection(DecisionUnparseable) {
+		t.Fatal("unparseable decision must not count as a rejection")
+	}
 	cases := []struct {
 		decision, reason, want string
 	}{
@@ -149,6 +152,7 @@ func TestSeverityThreatTiers(t *testing.T) {
 		{"would-deny", "would-deny shadow (no shadow-rule matched)", ThreatNone},
 		{"observe", "mcp-http-intercept", ThreatNone}, // observe-mode MCP audits are not live catches
 		{"", "", ThreatNone},
+		{"unparseable", "", ThreatNone},
 
 		// critical: secret-exfil — real validate rule names + demo phrasing.
 		{"block", "aws-access-key", ThreatCritical},
@@ -214,6 +218,7 @@ func TestEmittedDecisionCensus(t *testing.T) {
 		{"inject", "inject.go:appendAudit", "other"},
 		{"budget-ask", "budget.go:enqueueBudgetEvent", "other"},
 		{"downgrade", "budget.go:enqueueBudgetEvent", "other"},
+		{"unparseable", "lock.go:unparseableLockEvent", "unreadable"},
 	}
 	seen := map[string]bool{}
 	for _, c := range emitted {

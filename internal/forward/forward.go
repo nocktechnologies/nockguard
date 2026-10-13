@@ -198,6 +198,8 @@ const (
 	ThreatNone     = "none"     // allows, dry-run shadow would-denies, observe-mode audits — not a live catch
 )
 
+const DecisionUnparseable = "unparseable"
+
 // decisionBuckets is the decision vocabulary shared by threat tiers and Wall
 // counts. Unknown values remain visible as "other" and rate high.
 var decisionBuckets = map[string]string{
@@ -207,6 +209,7 @@ var decisionBuckets = map[string]string{
 	"deny":             "blocked", "block": "blocked", "ratelimit": "blocked",
 	"hide": "blocked", "approval-denied": "blocked",
 	"inject": "other", "budget-ask": "other", "downgrade": "other",
+	DecisionUnparseable: "unreadable",
 }
 
 // DecisionBucket gives the Wall's count bucket for a recorded decision.
@@ -231,7 +234,7 @@ func IsRejection(decision string) bool { return DecisionBucket(decision) == "blo
 // reasons (internal/policy) — plus the wall's own demo phrasing.
 func Severity(decision, reason string) string {
 	switch DecisionBucket(decision) {
-	case "approved":
+	case "approved", "unreadable":
 		return ThreatNone
 	case "other":
 		return ThreatHigh

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
+	"github.com/nocktechnologies/nockguard/internal/forward"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 )
 
@@ -171,6 +172,26 @@ func TestUnreadableRowsAreNotPulseThreats(t *testing.T) {
 	got := computePulse([]event{{Decision: decisionUnparseable}}, "", "", "", nil, nil)
 	if got.Total != 1 || got.Blocked != 0 || got.Other != 0 || got.High != 0 || got.Threats != 0 {
 		t.Fatalf("pulse = %+v, want unreadable row counted in total only", got)
+	}
+}
+
+func TestUnreadableRowClassifiedOnceForEveryView(t *testing.T) {
+	ev := unparseableLockEvent(int64(7), "2026-10-13T00:00:00Z", "s1")
+	if ev.Severity != forward.ThreatNone || ev.Bucket != "unreadable" {
+		t.Fatalf("unreadable event classified as severity=%q bucket=%q", ev.Severity, ev.Bucket)
+	}
+	evs := []event{ev, classify(event{Decision: "block", Reason: "x"})}
+	for _, severity := range []string{"threat", "high"} {
+		filtered := filterEvents(evs, "", "", severity, nil, nil)
+		got := computePulse(evs, "", "", severity, nil, nil)
+		if len(filtered) != 1 || got.Total != 1 || got.Threats != 1 {
+			t.Errorf("severity=%q: filtered=%d pulse=%+v", severity, len(filtered), got)
+		}
+	}
+	filtered := filterEvents(evs, "", "", "none", nil, nil)
+	got := computePulse(evs, "", "", "none", nil, nil)
+	if len(filtered) != 1 || filtered[0].Decision != decisionUnparseable || got.Total != 1 || got.Threats != 0 || got.Other != 0 {
+		t.Errorf("severity=none: filtered=%v pulse=%+v", filtered, got)
 	}
 }
 

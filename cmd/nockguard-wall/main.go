@@ -94,9 +94,6 @@ func classify(ev event) event {
 	ev.Source = sourceGuard // stamped here, never trusted from the audit line; Lock rows overwrite it
 	ev.Severity = forward.Severity(ev.Decision, ev.Reason)
 	ev.Bucket = forward.DecisionBucket(ev.Decision)
-	if ev.Decision == decisionUnparseable {
-		ev.Bucket = "unreadable"
-	}
 	return ev
 }
 
@@ -404,15 +401,12 @@ func computePulse(evs []event, q, decision, severity string, since, until *time.
 			p.Approved++
 		case "blocked":
 			p.Blocked++
+		case "unreadable":
+			// Unreadable evidence has no decision count.
 		default:
-			if ev.Decision != decisionUnparseable {
-				p.Other++
-			}
+			p.Other++
 		}
 		sev := forward.Severity(ev.Decision, ev.Reason)
-		if ev.Decision == decisionUnparseable {
-			sev = forward.ThreatNone // unreadable evidence is unknown, not a threat
-		}
 		switch sev {
 		case forward.ThreatCritical:
 			p.Critical++
