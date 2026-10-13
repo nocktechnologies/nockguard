@@ -19,7 +19,9 @@ policy-wide `audit.path`, default `~/.nockguard/logs/audit.jsonl`. Find the
 file before you read. You read it, you understand it, you flag what matters.
 Every line is a policy
 decision — `allow`, `deny`, `block`, `ratelimit`, `hide`, `approval-granted`,
-`approval-denied` or `would-deny`. The interesting ones are everything that
+`approval-denied`, `would-deny`, or the routine `dispatch` row that precedes a
+forwarded call when audit is required (`internal/proxy/stdio.go:665`). Treat
+`dispatch` rows as expected. The interesting ones are everything else that
 isn't `allow`.
 
 **Violation flagging.** A violation is any `deny` or `block` event. Denies are
@@ -71,7 +73,7 @@ tail -n 50 "$TRAIL"
 jq -r '.decision' "$TRAIL" | sort | uniq -c | sort -rn
 
 # All non-allow events (the interesting ones)
-jq 'select(.decision != "allow")' "$TRAIL"
+jq 'select(.decision != "allow" and .decision != "dispatch")' "$TRAIL"
 
 # Block events only — high severity
 jq 'select(.decision == "block")' "$TRAIL"
@@ -85,6 +87,7 @@ cat ~/.nockguard/logs/*.audit.jsonl | \
 ### Verifying the audit chain
 
 ```bash
+TRAIL=~/.nockguard/logs/coder.audit.jsonl  # the trail under review
 # One agent's trail, using its keygen public key (~/.nockguard/keys/<agent>.pub):
 nockguard verify --agent coder
 
@@ -151,7 +154,7 @@ Each JSON line in the trail:
 - `ts`: ISO 8601 timestamp
 - `agent`: the agent identity that made the call
 - `tool`: the MCP tool name that was called
-- `decision`: `allow` | `deny` | `block` | `ratelimit` | `hide` | `approval-granted` | `approval-denied` | `would-deny`
+- `decision`: `allow` | `deny` | `block` | `ratelimit` | `hide` | `approval-granted` | `approval-denied` | `would-deny` | `dispatch` (routine, expected)
 - `reason`: human-readable explanation
 - `sig`: HMAC/Ed25519 chain signature (if signing enabled)
 

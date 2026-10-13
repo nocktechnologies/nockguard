@@ -70,14 +70,39 @@ func TestPolicyLintListsEveryAgentKey(t *testing.T) {
 	if valid == nil {
 		t.Fatal("policy-lint.md has no E002 `valid = {` set")
 	}
-	rt := reflect.TypeOf(policy.AgentPolicy{})
-	for i := 0; i < rt.NumField(); i++ {
-		key := strings.Split(rt.Field(i).Tag.Get("yaml"), ",")[0]
-		if key == "" {
-			continue
-		}
+	for _, key := range yamlKeys(reflect.TypeOf(policy.AgentPolicy{})) {
 		if !bytes.Contains(valid, []byte("'"+key+"'")) {
 			t.Errorf("policy-lint.md E002 valid-key set omits agent key %q", key)
 		}
 	}
+}
+
+// yamlKeys lists the keys yaml.v3 accepts for a struct: the tag name, else the
+// lowercased field name; inline structs contribute their own keys.
+func yamlKeys(rt reflect.Type) []string {
+	var keys []string
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		tag := f.Tag.Get("yaml")
+		if tag == "-" {
+			continue
+		}
+		parts := strings.Split(tag, ",")
+		inline := false
+		for _, o := range parts[1:] {
+			inline = inline || o == "inline"
+		}
+		if inline {
+			keys = append(keys, yamlKeys(f.Type)...)
+			continue
+		}
+		if parts[0] == "" {
+			parts[0] = strings.ToLower(f.Name)
+		}
+		keys = append(keys, parts[0])
+	}
+	return keys
 }
