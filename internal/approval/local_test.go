@@ -16,12 +16,42 @@ import (
 // shortDir keeps the socket path under the unix sun_path limit.
 func shortDir(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp("", "ng")
+	d, err := os.MkdirTemp("/tmp", "ng")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(d) })
 	return filepath.Join(d, "approvals")
+}
+
+func TestDefaultLocalDirUsesShortPathWhenHomeIsTooLong(t *testing.T) {
+	home := filepath.Join("/tmp", strings.Repeat("h", 80))
+	t.Setenv("HOME", home)
+
+	dir, err := DefaultLocalDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(dir, home) {
+		t.Fatalf("long home path was retained: %s", dir)
+	}
+	if want := "nockguard-" + itoa(os.Getuid()); filepath.Base(filepath.Dir(dir)) != want {
+		t.Fatalf("short approver dir = %s, want parent %s", dir, want)
+	}
+	if n := len(filepath.Join(dir, maxLocalSocketName)); n > maxUnixSocketPathBytes {
+		t.Fatalf("maximum socket path is %d bytes, want at most %d", n, maxUnixSocketPathBytes)
+	}
+}
+
+func TestNewLocalApproverRejectsLongSocketPathClearly(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), strings.Repeat("x", 80), "approvals")
+	_, err := NewLocalApprover(dir, time.Second)
+	if err == nil {
+		t.Fatal("approver started with a socket path over the safe limit")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "unix socket path") || !strings.Contains(strings.ToLower(err.Error()), "too long") {
+		t.Fatalf("long socket path error is unclear: %v", err)
+	}
 }
 
 func startLocal(t *testing.T, timeout time.Duration) (*LocalApprover, string) {

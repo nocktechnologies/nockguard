@@ -19,6 +19,13 @@ import (
 	"time"
 )
 
+// Darwin's sockaddr_un.sun_path is 104 bytes including the terminator. Keep
+// paths below that limit so the same bound is safe on supported Unix systems.
+const maxUnixSocketPathBytes = 100
+
+// Twenty PID digits, a hyphen, sixteen random hex digits, and ".sock".
+const maxLocalSocketName = "18446744073709551615-0123456789abcdef.sock"
+
 // LocalApprover holds a call until the operator decides it over a unix socket on
 // the same machine — no network. The socket lives at <dir>/<pid>-<16 hex>.sock
 // (random, so two proxies never collide); dir is
@@ -75,13 +82,27 @@ type localMsg struct {
 	Error   string    `json:"error,omitempty"`
 }
 
-// DefaultLocalDir is ~/.nockguard/approvals.
+// DefaultLocalDir is ~/.nockguard/approvals unless that would make the longest
+// local socket name exceed the safe Unix socket path length. Long home or temp
+// paths use a private per-uid directory under the resolved /tmp instead.
 func DefaultLocalDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".nockguard", "approvals"), nil
+	dir := filepath.Join(home, ".nockguard", "approvals")
+	if len(filepath.Join(dir, maxLocalSocketName)) <= maxUnixSocketPathBytes {
+		return dir, nil
+	}
+	tmp, err := filepath.EvalSymlinks("/tmp")
+	if err != nil {
+		return "", fmt.Errorf("resolve short local approver directory /tmp: %w", err)
+	}
+	dir = filepath.Join(tmp, fmt.Sprintf("nockguard-%d", os.Getuid()), "approvals")
+	if n := len(filepath.Join(dir, maxLocalSocketName)); n > maxUnixSocketPathBytes {
+		return "", fmt.Errorf("short local approver Unix socket path is %d bytes, exceeding the safe limit of %d", n, maxUnixSocketPathBytes)
+	}
+	return dir, nil
 }
 
 // NewLocalApprover creates dir (0700) if absent, verifies it and its parent, and
@@ -89,6 +110,10 @@ func DefaultLocalDir() (string, error) {
 // create: leftovers from crashed proxies are harmless and `approvals prune`
 // clears them.
 func NewLocalApprover(dir string, timeout time.Duration) (*LocalApprover, error) {
+	maxSock := filepath.Join(dir, maxLocalSocketName)
+	if n := len(maxSock); n > maxUnixSocketPathBytes {
+		return nil, fmt.Errorf("local approver Unix socket path is too long (%d bytes; maximum %d): %s", n, maxUnixSocketPathBytes, maxSock)
+	}
 	uid := uint32(os.Getuid())
 	// Create only what is absent, and refuse a symlink before creating anything
 	// beneath it, so nothing is ever made through a symlink.
@@ -113,7 +138,7 @@ func NewLocalApprover(dir string, timeout time.Duration) (*LocalApprover, error)
 	sock := filepath.Join(dir, base+".sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("bind local approver Unix socket %s: %w", sock, err)
 	}
 	if err := os.Chmod(sock, 0o600); err != nil {
 		ln.Close()

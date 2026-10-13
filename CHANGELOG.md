@@ -20,6 +20,9 @@ All notable changes to NockGuard are documented here.
 - `/export` CSV and JSON gain a trailing `source` column / field (`GUARD` or `LOCK`). The PROOF export remains NockGuard rows only; the README says so.
 - The `verify --session` core moved to `internal/sessionverify` so the CLI and the wall share one verifier.
 
+### Fixed
+- macOS 26.5: two nockguard processes starting at once on a fresh machine no longer fail with "opening key lock ... no such file or directory".
+
 ## [0.5.0] - 2026-10-10
 
 ### Changed
