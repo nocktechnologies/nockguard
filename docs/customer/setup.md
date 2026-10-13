@@ -1,12 +1,8 @@
 # Install, first run, verify
 
-For the steps below, install with
-`go install github.com/nocktechnologies/nockguard/cmd/nockguard@main`.
+For the steps below, [install NockGuard](../../README.md#install) first.
 The [README quickstart](../../README.md#see-it-in-30-seconds) gives a complete
-MCP client example. Its generated `coder` policy with audit enabled requires
-main at d56e697 or later. `brew install nocktechnologies/tap/nockguard`
-currently installs v0.5.0, whose `init` creates a `my-agent` policy with audit
-disabled.
+MCP client example using the generated `coder` policy with audit enabled.
 
 1. Run `nockguard init` to write `~/.nockguard/policy.yaml`. It keeps an
    existing file unless `--force` is given. Review the generated `coder` rules.
