@@ -21,10 +21,10 @@ after audit-write errors. `mcp-http` writes its observe decision before forwardi
 a write failure until repair and restart. A dispatch row proves permission to
 forward, not execution. If failure occurs after forwarding, inspect upstream
 state before retrying. Source: `internal/proxy/stdio.go`,
-`internal/proxy/httplisten.go:246`, `internal/proxy/required_audit.go`,
+[internal/proxy/httplisten.go](../../internal/proxy/httplisten.go), `internal/proxy/required_audit.go`,
 [gateway contract](../design/hosted-gateway.md).
 
 `evidence --framework soc2` maps verified rows into a local pack; other
-framework names are stubs (`cmd/nockguard/main.go:1003`). Optional NockCC
+framework names are stubs ([cmd/nockguard/main.go](../../cmd/nockguard/main.go)). Optional NockCC
 ops-log forwarding is a second output, not the local proof source
 (`internal/forward/forward.go`).

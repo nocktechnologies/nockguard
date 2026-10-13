@@ -1,10 +1,9 @@
 # Local Live Wall
 
-On main after #111, install both binaries:
+Follow [Install](../../README.md#install) for Homebrew or a release archive;
+both provide `nockguard` and `nockguard-wall`. Then run:
 
 ```bash
-go install github.com/nocktechnologies/nockguard/cmd/nockguard@main
-go install github.com/nocktechnologies/nockguard/cmd/nockguard-wall@main
 nockguard wall --agent coder
 ```
 
@@ -15,10 +14,6 @@ log to the display. The PROOF export covers Guard rows only. Source:
 `cmd/nockguard-wall/main.go`, `cmd/nockguard-wall/lock.go`,
 [README Wall guide](../../README.md#live-wall),
 [offline proof limits](../verifying-the-trail.md).
-
-The current release-asset build packages both binaries for the next release.
-Published v0.5.0 archives and the Homebrew formula predate #111; the formula
-needs an update with the next release.
 
 Session badges are local snapshots with refresh, row-count, key and external
 anchor limits. `UNVERIFIABLE` is never a green verdict. A missing key or

@@ -5,6 +5,7 @@ All notable changes to NockGuard are documented here.
 ## [Unreleased]
 
 ### Documentation
+- Correct Wall installation guidance and replace source line references with file links.
 - Document Homebrew and Linux archive installation, including the Live Wall.
 - Linux install verifies the release archive against SHA256SUMS before installing.
 

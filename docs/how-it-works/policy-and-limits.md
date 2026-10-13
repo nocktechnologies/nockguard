@@ -15,5 +15,5 @@ cap. Source: `internal/validate/validate.go`,
 `internal/ratelimit/ratelimit.go`; see [trust scoring](../TRUST.md).
 
 Use `policy propose` and `policy shadow-report` during an observe window
-before switching to `mode: deny` (`cmd/nockguard/main.go:313`). No policy
+before switching to `mode: deny` ([cmd/nockguard/main.go](../../cmd/nockguard/main.go)). No policy
 governs calls that bypass the configured proxy.

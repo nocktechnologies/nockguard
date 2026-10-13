@@ -25,6 +25,6 @@
    [the proof limits](../verifying-the-trail.md). Restore the prior endpoint and
    auth setup if a deployed gateway must be rolled back.
 
-Source: `cmd/nockguard/main.go:820`, `internal/proxy/required_audit.go`,
+Source: [cmd/nockguard/main.go](../../cmd/nockguard/main.go), `internal/proxy/required_audit.go`,
 `internal/proxy/stdio.go`, [gateway failure contract](../design/hosted-gateway.md),
 [N8761 rollback plan](../design/n8761-phase0-http-listener-forward-proxy.md).

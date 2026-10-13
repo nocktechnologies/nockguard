@@ -1,7 +1,7 @@
 # CLI, policy and exit-code contract
 
-This records the current source surface. `cmd/nockguard/main.go:81` dispatches
-commands; `printUsage` at `cmd/nockguard/main.go:1398` lists their flags.
+This records the current source surface. [cmd/nockguard/main.go](../../cmd/nockguard/main.go)
+dispatches commands and lists their flags in `printUsage`.
 
 | Command | Purpose |
 | --- | --- |
@@ -10,7 +10,7 @@ commands; `printUsage` at `cmd/nockguard/main.go:1398` lists their flags.
 | `mcp-http --upstream URL --agent NAME [--policy PATH] [--auth-env ENV]` | Observe-only stdio-to-HTTP bridge. |
 | `mcp-listen --listen 127.0.0.1:PORT --upstream URL --agent NAME [--policy PATH] [--audit PATH]` | Local HTTP enforcement listener. |
 | `mcp-gateway --config PATH` | Single-agent OAuth resource gateway; see [gateway contract](../design/hosted-gateway.md). |
-| `wall [--agent NAME] [--audit PATH] [--demo]` | Launch the companion Live Wall binary; install both from main after #111. |
+| `wall [--agent NAME] [--audit PATH] [--demo]` | Launch the companion Live Wall binary; see [Install](../../README.md#install) for both binaries. |
 | `egress-proxy --listen ADDR --agent NAME --policy PATH [--audit PATH] [--enforce]` | Explicit HTTP/CONNECT proxy; policy observe-only without `--enforce`. |
 | `verify` / `audit verify` | Verify one trail via `--agent`, `--key-env`, or `--ed25519-pub-env`; `--all`, `--session` and `--export` select their own modes. |
 | `selftest [--policy PATH] [--json]` | Synthetic positive-control enforcement check. |
@@ -26,12 +26,12 @@ Default policy: `~/.nockguard/policy.yaml`; default audit root:
 public key from `NOCKGUARD_AGENT_<NAME>_ED25519_PUB` or the matching `.pub`
 file. Key file and environment precedence is in `internal/policy/agentkeys.go`.
 `--all` is not a substitute for `--session`: the latter checks a specified
-NockLock DB and Guard trail together (`cmd/nockguard/verify_session.go:41`).
+NockLock DB and Guard trail together ([cmd/nockguard/verify_session.go](../../cmd/nockguard/verify_session.go)).
 
 ## Policy YAML
 
 Top level `agents` maps agent names to policies; `agents.default` is the fallback.
-Top level `audit` is optional. Source: `internal/policy/policy.go:23`.
+Top level `audit` is optional. Source: [internal/policy/policy.go](../../internal/policy/policy.go).
 
 | Key | Current meaning |
 | --- | --- |
@@ -47,7 +47,7 @@ Top level `audit` is optional. Source: `internal/policy/policy.go:23`.
 | `audit` | `enabled`, optional `path`, `sign_key_env` (HMAC), `sign_ed25519_key_env` (Ed25519), optional `forward` with `enabled`, `url`, `api_key_env`. |
 
 The key names and nested shapes are Go YAML fields in
-`internal/policy/policy.go:23-137`; the detailed policy examples and validation
+[internal/policy/policy.go](../../internal/policy/policy.go); the detailed policy examples and validation
 rules are in the [README](../../README.md#policy-rules). Signing fields name
 environment variables; they never contain key values. Unknown agent names and
 invalid policy values must not silently grant access.
@@ -64,7 +64,7 @@ invalid policy values must not silently grant access.
 | Other commands | Success | Usage or runtime failure | Command-specific; do not assume `2` means tampering |
 
 Parse `--json` for scripts where offered. Text output is for humans. Sources:
-`cmd/nockguard/main.go:715`, `cmd/nockguard/main.go:820`,
-`cmd/nockguard/main.go:1003`, `cmd/nockguard/verify_export.go:14`,
-`cmd/nockguard/verify_session.go:119`,
-`cmd/nockguard/selftest.go:64`.
+[cmd/nockguard/main.go](../../cmd/nockguard/main.go),
+[cmd/nockguard/verify_export.go](../../cmd/nockguard/verify_export.go),
+[cmd/nockguard/verify_session.go](../../cmd/nockguard/verify_session.go),
+[cmd/nockguard/selftest.go](../../cmd/nockguard/selftest.go).
