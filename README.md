@@ -19,38 +19,33 @@ MCP server (filesystem, GitHub, your own)
 ```bash
 brew install nocktechnologies/tap/nockguard      # or: go install github.com/nocktechnologies/nockguard/cmd/nockguard@latest
 
-nockguard init                                   # writes ~/.nockguard/policy.yaml (default-deny starter; never clobbers an existing one)
+QS=$(mktemp -d)                                  # private fixture directory (not a predictable /tmp path)
+printf 'NockGuard read succeeded\n' > "$QS/hello.txt"
+echo "$QS"                                        # substitute this path for <QS> below
+nockguard init                                   # writes ~/.nockguard/policy.yaml (coder policy, audit enabled; never clobbers an existing one)
+nockguard keygen --agent coder                   # writes ~/.nockguard/keys/coder.ed25519 and coder.pub
 ```
 
-The starter policy ships with auditing commented out. Open `~/.nockguard/policy.yaml` and uncomment the `audit:` block (`enabled: true` is the one line that matters here), then generate a per-agent signing key:
-
-```bash
-nockguard keygen --agent coder                   # writes ~/.nockguard/keys/coder.ed25519 (private seed, 0600) and coder.pub (public key); prints only the paths and the public key
-nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project" --agent coder
-```
-
-Point your agent at `nockguard` instead of the server:
+The generated policy allows `coder` to call the filesystem server's `read_file` and `read_text_file` tools and denies `write_file`. Auditing is enabled, and the key generated above signs `coder`'s trail. Point your MCP client at NockGuard:
 
 ```json
 {
   "mcpServers": {
     "files": {
       "command": "nockguard",
-      "args": ["proxy", "--upstream", "npx -y @modelcontextprotocol/server-filesystem /path/to/project", "--agent", "coder"]
+      "args": ["proxy", "--upstream", "npx -y @modelcontextprotocol/server-filesystem <QS>", "--agent", "coder"]
     }
   }
 }
 ```
 
-From here every `tools/call` flows through the policy engine and lands in a signed audit trail. Then:
+Ask your MCP client to call `read_file` with `{"path":"<QS>/hello.txt"}`: it should return `NockGuard read succeeded`. After the call, run:
 
 ```bash
-nockguard verify --agent coder        # reads ~/.nockguard/keys/coder.pub; prove the trail is intact and authentic (exit 0), or tampered (exit 2)
-nockguard policy propose --agent coder # turn what the agent actually used into a starter allowlist
-nockguard selftest                     # prove the firewall really BLOCKS — a denied tool and a leaked secret, through the live gate
+nockguard verify --agent coder        # exit 0 and PROTECTED for the signed trail
 ```
 
-`selftest` is the one to run first if you only run one: it is proof-of-block, not a config check. A firewall that proves nothing does not pass.
+To exercise the blocked canary as well, run `python3 scripts/quickstart-acceptance.py` from a source checkout. This Linux CI test runs the commands above in an empty home with a local MCP stub using the filesystem server's tool names. It confirms both reads succeed, a direct `write_file` call is denied without creating a file, `verify` exits 0 with `PROTECTED`, and the signed trail records both allow and deny decisions. Denied tools are hidden from normal MCP tool discovery, so the test sends the canary call directly.
 
 ### Observe first, then enforce
 
