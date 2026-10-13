@@ -626,6 +626,7 @@
         chainnote.hidden = true;
       }
     } catch (e) {
+      if (demoMode) return;
       document.getElementById('verification-status').textContent = 'unavailable';
       document.getElementById('verification-time').textContent = '—';
     }

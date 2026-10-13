@@ -131,6 +131,13 @@ func TestRateLimitRejectedAndUnknownDecisionRetained(t *testing.T) {
 	}
 }
 
+func TestUnreadableRowsAreNotPulseThreats(t *testing.T) {
+	got := computePulse([]event{{Decision: decisionUnparseable}}, "", "", "", nil, nil)
+	if got.Total != 1 || got.Blocked != 0 || got.Other != 0 || got.High != 0 || got.Threats != 0 {
+		t.Fatalf("pulse = %+v, want unreadable row counted in total only", got)
+	}
+}
+
 func TestRoutineDecisionBucketsReachStreamAndPulse(t *testing.T) {
 	var evs []event
 	for _, decision := range []string{"allow", "would-deny", "observe", "dispatch", "state-write", "approval-granted", ""} {

@@ -408,7 +408,11 @@ func computePulse(evs []event, q, decision, severity string, since, until *time.
 				p.Other++
 			}
 		}
-		switch forward.Severity(ev.Decision, ev.Reason) {
+		sev := forward.Severity(ev.Decision, ev.Reason)
+		if ev.Decision == decisionUnparseable {
+			sev = forward.ThreatNone // unreadable evidence is unknown, not a threat
+		}
+		switch sev {
 		case forward.ThreatCritical:
 			p.Critical++
 			p.Threats++
