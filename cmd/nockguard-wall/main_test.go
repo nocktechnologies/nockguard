@@ -126,6 +126,9 @@ func TestRateLimitRejectedAndUnknownDecisionRetained(t *testing.T) {
 	if got.Total != 5 || got.Approved != 1 || got.Blocked != 2 || got.RateLimited != 1 || got.Other != 2 || got.Pending != 0 {
 		t.Fatalf("pulse = %+v, want one allow, two rejections, and two other decisions", got)
 	}
+	if got.High != 2 || got.Threats != 3 {
+		t.Fatalf("pulse = %+v, want unknown decision high without counting it as rejected", got)
+	}
 }
 
 func TestDemoReplayAndPulseUseSameWindow(t *testing.T) {

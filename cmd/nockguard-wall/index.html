@@ -142,7 +142,8 @@
                 box-shadow:inset 0 0 0 1px rgba(255,77,77,.22); }
   .allow      { border-left-color:var(--allow); }
   .allow      .badge{ background:rgba(63,185,80,.15); color:var(--allow); }
-  .deny       { border-left-color:var(--deny); }  .deny .badge{ background:rgba(240,136,62,.15); color:var(--deny); }
+  .deny, .approval-denied { border-left-color:var(--deny); }
+  .deny .badge, .approval-denied .badge { background:rgba(240,136,62,.15); color:var(--deny); }
   .ratelimit  { border-left-color:var(--ratelimit); } .ratelimit .badge{ background:rgba(210,153,34,.15); color:var(--ratelimit); }
   .hide       { border-left-color:var(--hide); } .hide .badge{ background:rgba(110,118,129,.18); color:var(--dim); }
   .unknown    { border-left-color:var(--accent); } .unknown .badge{ background:rgba(88,166,255,.12); color:var(--text); text-transform:none; }
@@ -243,6 +244,7 @@
         <option value="block">block</option>
         <option value="ratelimit">ratelimit</option>
         <option value="hide">hide</option>
+        <option value="approval-denied">approval-denied</option>
       </select>
       <select id="f-severity" class="finput" title="filter by threat severity">
         <option value="">all severities</option>
@@ -297,7 +299,7 @@
   const flash = document.getElementById('flash');
   let empty = document.getElementById('empty');
   let MAX_ROWS = 500;
-  const KNOWN = { allow:1, deny:1, block:1, ratelimit:1, hide:1 };
+  const KNOWN = { allow:1, deny:1, block:1, ratelimit:1, hide:1, 'approval-denied':1 };
   let demoMode = false;
   let recentSession = '';
 
@@ -555,7 +557,7 @@
     feed.prepend(row);
     while (feed.childElementCount > MAX_ROWS) feed.lastElementChild.remove();
     const selectedDecision = fDecision.value;
-    while (fDecision.options.length > 6) fDecision.remove(6);
+    while (fDecision.options.length > 7) fDecision.remove(7);
     const unknown = new Set();
     for (const kept of feed.children) {
       const decision = kept.dataset.decision;

@@ -175,11 +175,11 @@ func TestSeverityThreatTiers(t *testing.T) {
 		{"hide", "tool hidden from this agent", ThreatLow},
 		{"approval-denied", "denied by approver", ThreatHigh},
 
-		// An unfamiliar decision does not establish that a call was refused.
-		{"quarantine", "some novel verdict", ThreatNone},
-		{"approval-granted", "approved", ThreatNone},
-		{"state-write", "recorded", ThreatNone},
-		{"dispatch", "forwarded", ThreatNone},
+		// Unknown decisions stay visible as high-severity signals.
+		{"quarantine", "some novel verdict", ThreatHigh},
+		{"approval-granted", "approved", ThreatHigh},
+		{"state-write", "recorded", ThreatHigh},
+		{"dispatch", "forwarded", ThreatHigh},
 	}
 	for _, c := range cases {
 		if got := Severity(c.decision, c.reason); got != c.want {

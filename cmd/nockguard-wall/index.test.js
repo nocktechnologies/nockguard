@@ -52,7 +52,7 @@ function wall(contextPayload) {
   empty.remove = empty.removeSelf;
   feed.children.push(empty);
   const decisions = document.getElementById('f-decision');
-  decisions.options = ['', 'allow', 'deny', 'block', 'ratelimit', 'hide'].map(value => ({ value }));
+  decisions.options = ['', 'allow', 'deny', 'block', 'ratelimit', 'hide', 'approval-denied'].map(value => ({ value }));
   Object.defineProperty(decisions, 'value', {
     get() { return this.selectedValue ?? ''; },
     set(value) {
@@ -108,7 +108,20 @@ test('audit and unfamiliar decisions do not become rejections or change the catc
   assert.equal(w.elements.get('c-rate').textContent, 0);
   assert.equal(w.elements.get('c-caught').textContent, '50%');
   assert.equal(w.elements.get('feed').children[0].dataset.decision, 'future-review');
+  assert.equal(w.elements.get('feed').children[0].className, 'row unknown');
   assert.match(w.elements.get('feed').children[0].innerHTML, /future-review/);
+});
+
+test('approval-denied uses rejection styling and a fixed decision filter option', () => {
+  const w = wall();
+  vm.runInContext("render({decision:'approval-denied', severity:'high'})", w.context);
+  assert.equal(w.elements.get('feed').children[0].className, 'row approval-denied');
+  assert.equal(w.elements.get('p-blocked').textContent, 1);
+  assert.equal(w.decisions.options.filter(o => o.value === 'approval-denied').length, 1);
+  const page = fs.readFileSync(new URL('./index.html', `file://${__filename}`), 'utf8');
+  assert.match(page, /<option value="approval-denied">approval-denied<\/option>/);
+  assert.match(page, /\.approval-denied\s*\{[^}]*border-left-color:var\(--deny\)/);
+  assert.match(page, /\.approval-denied \.badge\s*\{[^}]*color:var\(--deny\)/);
 });
 
 test('unknown decision options stay within the retained window', () => {
@@ -120,11 +133,11 @@ test('unknown decision options stay within the retained window', () => {
   vm.runInContext("render({decision:'third'})", w.context);
   assert.equal(w.decisions.value, 'second');
   assert.deepEqual(w.decisions.options.map(o => o.value),
-    ['', 'allow', 'deny', 'block', 'ratelimit', 'hide', 'third', 'second']);
+    ['', 'allow', 'deny', 'block', 'ratelimit', 'hide', 'approval-denied', 'third', 'second']);
   vm.runInContext("render({decision:'fourth'})", w.context);
   assert.equal(w.decisions.value, '');
   assert.equal(w.decisions.selectedIndex, 0);
   assert.equal(w.elements.get('f-count').textContent, '');
   assert.deepEqual(w.decisions.options.map(o => o.value),
-    ['', 'allow', 'deny', 'block', 'ratelimit', 'hide', 'fourth', 'third']);
+    ['', 'allow', 'deny', 'block', 'ratelimit', 'hide', 'approval-denied', 'fourth', 'third']);
 });

@@ -193,7 +193,7 @@ func severityFor(decision string) string {
 // a routine allowlist deny, instead of every non-allow reading flat as blocked.
 const (
 	ThreatCritical = "critical" // a block/deny whose reason smells of secret-exfil or destruction
-	ThreatHigh     = "high"     // other explicit rejections of consequence
+	ThreatHigh     = "high"     // other rejections of consequence and unknown decisions
 	ThreatLow      = "low"      // routine allowlist denies, rate-limit holds, hidden tools
 	ThreatNone     = "none"     // allows, dry-run shadow would-denies, observe-mode audits — not a live catch
 )
@@ -218,7 +218,8 @@ func IsRejection(decision string) bool {
 // — the built-in validate rule names (internal/validate) and the policy deny
 // reasons (internal/policy) — plus the wall's own demo phrasing.
 func Severity(decision, reason string) string {
-	if !IsRejection(decision) {
+	switch decision {
+	case "allow", "would-deny", "observe", "":
 		return ThreatNone
 	}
 	r := strings.ToLower(reason)
@@ -231,7 +232,7 @@ func Severity(decision, reason string) string {
 	if decision == "ratelimit" || decision == "hide" {
 		return ThreatLow
 	}
-	// Other explicit rejections of consequence.
+	// Other rejections and unknown decisions stay loud without changing counts.
 	return ThreatHigh
 }
 
