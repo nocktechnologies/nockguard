@@ -21,11 +21,17 @@ If the file does not exist, stop: "No policy file found at $POLICY. Run `nockgua
 Verify NockGuard can parse it:
 
 ```bash
-# Proxy exits non-zero if the policy fails to load
-nockguard proxy --upstream "echo" --agent lint-probe --policy "$POLICY" 2>&1 | head -5
+# Proxy exits non-zero if the policy fails to load. Capture the proxy's own
+# status; piping to head would report head's status instead.
+OUT=$(mktemp)
+nockguard proxy --upstream "echo" --agent lint-probe --policy "$POLICY" >"$OUT" 2>&1 </dev/null
+STATUS=$?
+head -5 "$OUT"
+rm -f "$OUT"
+echo "proxy exit status: $STATUS"
 ```
 
-If this exits with a parse error, report it as **ERROR** and stop — the remaining checks require a valid file. The loader decodes with `KnownFields(true)` (`loadFrom` in `internal/policy/policy.go`), so an unknown key anywhere, a malformed tool glob, an unknown `validate_input` category or a bad `rate_limit.window` is a load failure, not a silent no-op. The checks below name the likely cause and cover what the loader does not reject.
+If the status is non-zero and the output shows a load error, report it as **ERROR** and stop — the remaining checks require a valid file. The loader decodes with `KnownFields(true)` (`loadFrom` in `internal/policy/policy.go`), so an unknown key anywhere, a malformed tool glob, an unknown `validate_input` category or a bad `rate_limit.window` is a load failure, not a silent no-op. The checks below name the likely cause and cover what the loader does not reject.
 
 ## Step 2 — Schema checks
 

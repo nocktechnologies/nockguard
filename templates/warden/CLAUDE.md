@@ -78,7 +78,9 @@ jq 'select(.decision != "allow" and .decision != "dispatch")' "$TRAIL"
 # Block events only — high severity
 jq 'select(.decision == "block")' "$TRAIL"
 
-# Deny rate by agent and tool (all per-agent trails)
+# Deny rate by agent and tool (all per-agent trails). This glob covers only the
+# default directory; if the policy sets audit.path, read that value from
+# `audit.path` in the policy file and use its directory and <agent>.<basename>.
 cat ~/.nockguard/logs/*.audit.jsonl | \
   jq -r 'select(.decision == "deny") | "\(.agent) \(.tool)"' | \
   sort | uniq -c | sort -rn
@@ -102,9 +104,15 @@ nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY --audit "$TRAIL"
 ```
 
 If verification fails (exit 2), the trail could not be read or its chain is
-broken — someone edited, deleted, or reordered entries. Exit 1 means it could
-not be verified at all (missing key, no trails). Treat exit 2 as a security
-event and flag it immediately.
+broken — someone edited, deleted, or reordered entries. A deleted or unopenable
+trail file exits 2 (`audit.VerifyEd25519` returns the open error, then
+`runAudit` in `cmd/nockguard/main.go` reports it as tampering). A missing public
+key or unset key variable exits 1 (`requirePubHex`), and `verify --all` exits 1
+when it finds no trails or cannot verify a key. Exit 1 reads as a setup issue
+only when auditing was never configured. When the policy has auditing enabled,
+a missing trail or missing public key is HIGH, possible deletion: report it and
+find out who removed the file. Treat exit 2 as a security event and flag it
+immediately.
 
 ### Watching the Live Wall
 

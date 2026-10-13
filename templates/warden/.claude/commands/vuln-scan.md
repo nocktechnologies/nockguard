@@ -165,7 +165,7 @@ nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB --audit "$T
 nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY --audit "$TRAIL"
 ```
 
-Exit 1 = setup, key or unverifiable trail (report it, then fix the setup). Exit 2 = trail read or integrity failure after key selection; assume tampering. **Exit 2 is a CRITICAL security event.** Do not proceed — escalate immediately and treat the chain as forensic evidence.
+Exit codes (`runAudit`, `verifyAllAgents` in `cmd/nockguard/main.go`): a trail file that was deleted or cannot be opened exits 2 (`audit.VerifyEd25519` returns the open error, `main.go:988`, reported as TAMPER at `main.go:1004`), and a broken chain exits 2. A missing public key or unset key env var exits 1 (`requirePubHex`, `main.go:977-981`), and `verify --all` exits 1 for an unverifiable key or when it finds no trails (`NO_TRAILS`). Exit 1 reads as a setup issue only when auditing was never configured (no `audit.enabled: true`, no `keygen` keys, no earlier trail). When the policy has auditing enabled, a missing trail or missing public key is **HIGH: possible deletion**, not a setup issue; report it and look for who removed the file. Exit 2 is trail read or integrity failure after key selection; assume tampering. **Exit 2 is a CRITICAL security event.** Do not proceed — escalate immediately and treat the chain as forensic evidence.
 
 ## Step 5 — Report
 

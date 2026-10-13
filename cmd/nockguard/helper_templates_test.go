@@ -70,7 +70,7 @@ func TestPolicyLintListsEveryAgentKey(t *testing.T) {
 	if valid == nil {
 		t.Fatal("policy-lint.md has no E002 `valid = {` set")
 	}
-	for _, key := range yamlKeys(reflect.TypeOf(policy.AgentPolicy{})) {
+	for _, key := range yamlKeys(t, reflect.TypeOf(policy.AgentPolicy{})) {
 		if !bytes.Contains(valid, []byte("'"+key+"'")) {
 			t.Errorf("policy-lint.md E002 valid-key set omits agent key %q", key)
 		}
@@ -79,7 +79,14 @@ func TestPolicyLintListsEveryAgentKey(t *testing.T) {
 
 // yamlKeys lists the keys yaml.v3 accepts for a struct: the tag name, else the
 // lowercased field name; inline structs contribute their own keys.
-func yamlKeys(rt reflect.Type) []string {
+func yamlKeys(t *testing.T, rt reflect.Type) []string {
+	t.Helper()
+	for rt.Kind() == reflect.Ptr {
+		rt = rt.Elem()
+	}
+	if rt.Kind() != reflect.Struct {
+		t.Fatalf("yamlKeys: inline field of kind %s is not a struct; teach the test how the loader reads it", rt.Kind())
+	}
 	var keys []string
 	for i := 0; i < rt.NumField(); i++ {
 		f := rt.Field(i)
@@ -96,7 +103,7 @@ func yamlKeys(rt reflect.Type) []string {
 			inline = inline || o == "inline"
 		}
 		if inline {
-			keys = append(keys, yamlKeys(f.Type)...)
+			keys = append(keys, yamlKeys(t, f.Type)...)
 			continue
 		}
 		if parts[0] == "" {
