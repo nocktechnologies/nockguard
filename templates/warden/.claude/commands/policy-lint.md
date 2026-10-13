@@ -19,41 +19,21 @@ cat "$POLICY"
 
 Run each snippet in this command as its own bash invocation; they `exit` non-zero on failure. Shells do not share variables, so every later snippet resolves `POLICY` itself (default `~/.nockguard/policy.yaml`); when the user gave a path, export `POLICY` to it before running each one.
 
-Verify NockGuard can parse it. The probe runs a copy of the policy with the `audit` block neutralised (`enabled: false`; `path` and both signing env names removed; `forward` kept but set to `enabled: false`, so it makes no request and its field names are still checked) under a throwaway `HOME`, so it cannot create a trail, forward records or fail on a missing signing env. Unknown keys elsewhere, including inside `audit`, still fail the load. It has a timeout, and it captures the proxy's own status (piping to `head` would report `head`'s status instead):
+Verify NockGuard can parse it. `nockguard policy check` runs the loader the proxy uses and nothing else: it starts no proxy, creates no trail, forwards nothing and reads no signing env, so its exit status means exactly "the policy loaded". It prints the load error on failure.
 
 ```bash
 POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
-PROBE_DIR=$(mktemp -d)   # left for the OS temp cleaner; the probe never deletes anything
-python3 - "$POLICY" "$PROBE_DIR/policy.yaml" <<'PY' || { echo "ERROR: could not prepare the probe copy of $POLICY (invalid YAML, or PyYAML missing)" >&2; exit 1; }
-import sys, yaml
-with open(sys.argv[1]) as f:
-    doc = yaml.safe_load(f) or {}
-audit = doc.get("audit")
-if isinstance(audit, dict):
-    audit["enabled"] = False
-    audit.pop("path", None)
-    audit.pop("sign_key_env", None)
-    audit.pop("sign_ed25519_key_env", None)
-    if isinstance(audit.get("forward"), dict):
-        audit["forward"]["enabled"] = False
-with open(sys.argv[2], "w") as f:
-    yaml.safe_dump(doc, f)
-PY
-TIMEOUT=$(command -v timeout || command -v gtimeout) || { echo "ERROR: neither timeout nor gtimeout is installed (macOS: brew install coreutils); cannot run the parse probe" >&2; exit 1; }
-command -v nockguard >/dev/null || { echo "ERROR: nockguard is not on PATH; cannot run the parse probe" >&2; exit 1; }
+command -v nockguard >/dev/null || { echo "ERROR: nockguard is not on PATH; cannot run the parse check" >&2; exit 1; }
 STATUS=0
-HOME="$PROBE_DIR" "$TIMEOUT" 10 nockguard proxy --upstream echo --agent lint-probe --policy "$PROBE_DIR/policy.yaml" >"$PROBE_DIR/out" 2>&1 </dev/null || STATUS=$?
-head -5 "$PROBE_DIR/out"
-echo "proxy exit status: $STATUS"
+nockguard policy check --policy "$POLICY" || STATUS=$?
 case "$STATUS" in
   0) ;;
-  126|127) echo "ERROR: the parse probe could not be launched (exit $STATUS); this says nothing about the policy" >&2; exit 1 ;;
-  124) echo "ERROR: the parse probe timed out after 10s; the policy was not confirmed loadable" >&2; exit 1 ;;
+  126|127) echo "ERROR: the parse check could not be launched (exit $STATUS); this says nothing about the policy" >&2; exit 1 ;;
   *) echo "ERROR: nockguard could not load $POLICY (exit $STATUS)" >&2; exit 1 ;;
 esac
 ```
 
-A non-zero status is an **ERROR**; stop, because the remaining checks require a valid file. The loader decodes with `KnownFields(true)` (`loadFrom` in `internal/policy/policy.go`), so an unknown key anywhere, a malformed tool glob, an unknown `validate_input` category or a bad `rate_limit.window` is a load failure, not a silent no-op. The probe does not exercise the audit settings; E005 and E006 cover them. It reads the policy through PyYAML, so it also cannot see a duplicate key (the real loader rejects one; PyYAML keeps the last), so check for repeated keys by eye. The checks below name the likely cause and cover what the loader does not reject.
+A non-zero status is an **ERROR**; stop, because the remaining checks require a valid file. The loader decodes with `KnownFields(true)` (`loadFrom` in `internal/policy/policy.go`), so an unknown key anywhere, a malformed tool glob, an unknown `validate_input` category or a bad `rate_limit.window` is a load failure, not a silent no-op. The check does not exercise the audit settings' environment (signing keys, forwarding); E005 and E006 cover them. The checks below name the likely cause and cover what the loader does not reject.
 
 ## Step 2 — Schema checks
 

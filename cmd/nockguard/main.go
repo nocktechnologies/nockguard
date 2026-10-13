@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -327,10 +328,12 @@ func runCLI(args []string) int {
 
 func runPolicy(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: nockguard policy (propose | shadow-report) --agent <name> [--audit-dir <dir> | --audit <path>]")
+		fmt.Fprintln(os.Stderr, "usage: nockguard policy (check --policy <file> | propose | shadow-report --agent <name> [--audit-dir <dir> | --audit <path>])")
 		return 1
 	}
 	switch args[0] {
+	case "check":
+		return runPolicyCheck(args[1:])
 	case "propose":
 		return runPolicyPropose(args[1:])
 	case "shadow-report":
@@ -339,6 +342,23 @@ func runPolicy(args []string) int {
 		fmt.Fprintf(os.Stderr, "unknown policy command: %s\n", args[0])
 		return 1
 	}
+}
+
+// runPolicyCheck loads a policy with the loader the proxy uses and does
+// nothing else: exit 0 means it loaded, 1 means it did not (or bad arguments).
+func runPolicyCheck(args []string) int {
+	fs := flag.NewFlagSet("policy check", flag.ContinueOnError)
+	path := fs.String("policy", "", "policy file to load")
+	if err := fs.Parse(args); err != nil || *path == "" || fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: nockguard policy check --policy <file>")
+		return 1
+	}
+	if _, err := policy.Load(*path); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	fmt.Printf("policy loaded: %s\n", *path)
+	return 0
 }
 
 func runPolicyPropose(args []string) int {
