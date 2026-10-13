@@ -17,10 +17,10 @@ MCP server (filesystem, GitHub, your own)
 ## See it in 30 seconds
 
 ```bash
-brew install nocktechnologies/tap/nockguard
-# Or install both binaries with Go; nockguard-wall is required by `nockguard wall`.
-go install github.com/nocktechnologies/nockguard/cmd/nockguard@latest
-go install github.com/nocktechnologies/nockguard/cmd/nockguard-wall@latest
+# This quickstart needs main at d56e697 or later; v0.5.0's init uses
+# my-agent and leaves audit disabled.
+go install github.com/nocktechnologies/nockguard/cmd/nockguard@main
+go install github.com/nocktechnologies/nockguard/cmd/nockguard-wall@main
 
 QS=$(mktemp -d)                                  # private fixture directory (not a predictable /tmp path)
 printf 'NockGuard read succeeded\n' > "$QS/hello.txt"
@@ -45,11 +45,13 @@ The generated policy allows `coder` to call the filesystem server's `read_file` 
 Ask your MCP client to call `read_file` with `{"path":"<QS>/hello.txt"}`: it should return `NockGuard read succeeded`. Each `tools/call` routed through this proxy is policy-checked; with auditing enabled and the per-agent key available, its decision is recorded in a signed audit trail. After the call, run:
 
 ```bash
-nockguard verify --agent coder        # reads ~/.nockguard/keys/coder.pub; exit 0 and PROTECTED for the signed trail, exit 2 on tampering
+nockguard verify --agent coder        # reads ~/.nockguard/keys/coder.pub; exit 0 and PROTECTED for the signed trail
 nockguard wall --agent coder          # open the Live Wall for coder's signed trail
 ```
 
-Until the Homebrew tap formula is updated to install both binaries at release time, Homebrew users who want `nockguard wall` should also run `go install github.com/nocktechnologies/nockguard/cmd/nockguard-wall@latest`.
+The tap currently installs v0.5.0, which predates this quickstart and the
+`nockguard wall` command. The source on main now builds both binaries into
+release archives; a Homebrew formula update is due with the next release.
 
 To exercise the blocked canary as well, run `python3 scripts/quickstart-acceptance.py` from a source checkout. This Linux CI test runs the commands above in an empty home with a local MCP stub using the filesystem server's tool names. It confirms both reads succeed, a direct `write_file` call is denied without creating a file, `verify` exits 0 with `PROTECTED`, and the signed trail records both allow and deny decisions. Denied tools are hidden from normal MCP tool discovery, so the test sends the canary call directly.
 
@@ -60,15 +62,11 @@ You do not have to write a policy up front. Run in `mode: allow` with the audit 
 ## Install
 
 ```bash
-brew install nocktechnologies/tap/nockguard
+brew install nocktechnologies/tap/nockguard # currently v0.5.0: CLI only
 ```
 
-Or build from source:
-
-```bash
-go install github.com/nocktechnologies/nockguard/cmd/nockguard@latest
-go install github.com/nocktechnologies/nockguard/cmd/nockguard-wall@latest # companion binary used by `nockguard wall`
-```
+For the `coder` quickstart and `nockguard wall`, install both binaries from
+main as shown in [See it in 30 seconds](#see-it-in-30-seconds).
 
 ## Writing a policy
 
@@ -116,7 +114,9 @@ nockguard proxy \
   `shadow` records `would-deny` in the audit trail but is not blocked.
 - **ask**: Tool patterns that return the `Ask` verdict. NockGuard holds the call for a human approval decision before forwarding it. Denial or timeout drops the call.
 - **fail_mode**: `deny` (default) rejects malformed or ambiguous `tools/call` messages that NockGuard cannot safely interpret; `ask` parks those failures behind approval instead.
-- **mode**: `allow` (default) permits unlisted tools, `deny` blocks them.
+- **mode**: Explicit `allow` permits unlisted tools when there is no allow list;
+  `deny` blocks them. With no allow list or explicit mode, the policy denies
+  by default. With an allow list, unmatched tools are denied.
 - **default**: Fallback policy for agents not listed by name.
 - **validate_input** (Phase 2): built-in input-validation categories applied to tool-call arguments — `sqli`, `path_traversal`, `secrets`. Opt-in per agent.
 - **block_params** (Phase 2): custom regex patterns; a tool call is blocked if any argument matches.
@@ -153,7 +153,7 @@ Rate limiting and spend caps are opt-in and independent — set one, both, or ne
 An Ed25519-signed audit trail can be checked for signature and hash-chain integrity **offline** with only the public key:
 
 ```bash
-nockguard verify --agent coder    # one agent's trail (exit 0 = signatures and retained chain check out, 2 = tampered)
+nockguard verify --agent coder    # one agent's trail (exit 0 = verified, 2 = read or integrity failure)
 nockguard verify --all          # check every per-agent trail found in the audit directory
 ```
 
