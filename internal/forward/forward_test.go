@@ -2,9 +2,16 @@ package forward
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -177,14 +184,122 @@ func TestSeverityThreatTiers(t *testing.T) {
 
 		// Unknown decisions stay visible as high-severity signals.
 		{"quarantine", "some novel verdict", ThreatHigh},
-		{"approval-granted", "approved", ThreatHigh},
-		{"state-write", "recorded", ThreatHigh},
-		{"dispatch", "forwarded", ThreatHigh},
+		{"approval-granted", "approved", ThreatNone},
+		{"state-write", "recorded", ThreatNone},
+		{"dispatch", "forwarded", ThreatNone},
 	}
 	for _, c := range cases {
 		if got := Severity(c.decision, c.reason); got != c.want {
 			t.Errorf("Severity(%q, %q) = %q, want %q", c.decision, c.reason, got, c.want)
 		}
+	}
+}
+
+// Keep this census aligned with the literal decision emit sites in non-test Go.
+// Adding an emitted value here without classifying it in decisionBuckets fails.
+func TestEmittedDecisionCensus(t *testing.T) {
+	emitted := []struct{ decision, site, bucket string }{
+		{"", "audit.Event zero value", "approved"},
+		{"allow", "policy.go:verdictName; stdio.go:appendAudit; forwardhttp.go", "approved"},
+		{"would-deny", "stdio.go:appendAudit", "approved"},
+		{"observe", "mcphttp.go:Record", "approved"},
+		{"dispatch", "httplisten.go:audit", "approved"},
+		{"state-write", "policy.go:verdictName; stdio.go:appendAudit", "approved"},
+		{"approval-granted", "stdio.go:appendAudit", "approved"},
+		{"deny", "policy.go:verdictName; stdio.go:appendAudit; forwardhttp.go", "blocked"},
+		{"block", "stdio.go:appendAudit; inject.go:appendAudit; lock.go", "blocked"},
+		{"ratelimit", "stdio.go:appendAudit", "blocked"},
+		{"hide", "stdio.go:appendAudit", "blocked"},
+		{"approval-denied", "stdio.go:appendAudit", "blocked"},
+		{"inject", "inject.go:appendAudit", "other"},
+		{"budget-ask", "budget.go:enqueueBudgetEvent", "other"},
+		{"downgrade", "budget.go:enqueueBudgetEvent", "other"},
+	}
+	seen := map[string]bool{}
+	for _, c := range emitted {
+		seen[c.decision] = true
+		if got := DecisionBucket(c.decision); got != c.bucket {
+			t.Errorf("%s emits %q: bucket = %q, want %q", c.site, c.decision, got, c.bucket)
+		}
+		if _, ok := decisionBuckets[c.decision]; !ok {
+			t.Errorf("%s emits %q: missing from decision table", c.site, c.decision)
+		}
+		if got := IsRejection(c.decision); got != (c.bucket == "blocked") {
+			t.Errorf("%s emits %q: rejection = %v", c.site, c.decision, got)
+		}
+	}
+	// Scan literal emit sites so adding a new decision at a known audit or
+	// forwarding call fails until the census and Go table are updated together.
+	err := filepath.WalkDir("../..", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			return err
+		}
+		check := func(expr ast.Expr) {
+			lit, ok := expr.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return
+			}
+			decision, err := strconv.Unquote(lit.Value)
+			if err == nil && !seen[decision] {
+				t.Errorf("%s emits decision %q missing from census and decision table", path, decision)
+			}
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			switch n := node.(type) {
+			case *ast.CallExpr:
+				var name string
+				switch fn := n.Fun.(type) {
+				case *ast.Ident:
+					name = fn.Name
+				case *ast.SelectorExpr:
+					name = fn.Sel.Name
+				}
+				index := -1
+				switch name {
+				case "appendAudit", "enqueueBudgetEvent":
+					index = 2
+				case "audit":
+					index = 1
+				}
+				if index >= 0 && len(n.Args) > index {
+					check(n.Args[index])
+				}
+			case *ast.KeyValueExpr:
+				if key, ok := n.Key.(*ast.Ident); ok && key.Name == "Decision" {
+					check(n.Value)
+				}
+			case *ast.AssignStmt:
+				if len(n.Lhs) == 1 && len(n.Rhs) == 1 {
+					if name, ok := n.Lhs[0].(*ast.Ident); ok && name.Name == "decision" {
+						check(n.Rhs[0])
+					}
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DecisionBucket("unseen-verdict"); got != "other" {
+		t.Errorf("unseen verdict bucket = %q, want other", got)
+	}
+	if got := Severity("unseen-verdict", ""); got != ThreatHigh {
+		t.Errorf("unseen verdict severity = %q, want high", got)
 	}
 }
 

@@ -123,11 +123,30 @@ func TestComputePulse(t *testing.T) {
 
 func TestRateLimitRejectedAndUnknownDecisionRetained(t *testing.T) {
 	got := computePulse([]event{{Decision: "allow"}, {Decision: "ratelimit"}, {Decision: "approval-denied"}, {Decision: "would-deny"}, {Decision: "future-review"}}, "", "", "", nil, nil)
-	if got.Total != 5 || got.Approved != 1 || got.Blocked != 2 || got.RateLimited != 1 || got.Other != 2 || got.Pending != 0 {
-		t.Fatalf("pulse = %+v, want one allow, two rejections, and two other decisions", got)
+	if got.Total != 5 || got.Approved != 2 || got.Blocked != 2 || got.RateLimited != 1 || got.Other != 1 || got.Pending != 0 {
+		t.Fatalf("pulse = %+v, want two routine, two rejections, and one other decision", got)
 	}
 	if got.High != 2 || got.Threats != 3 {
 		t.Fatalf("pulse = %+v, want unknown decision high without counting it as rejected", got)
+	}
+}
+
+func TestRoutineDecisionBucketsReachStreamAndPulse(t *testing.T) {
+	var evs []event
+	for _, decision := range []string{"allow", "would-deny", "observe", "dispatch", "state-write", "approval-granted", ""} {
+		ev := classify(event{Decision: decision})
+		if ev.Bucket != "approved" || ev.Severity != "none" {
+			t.Errorf("%q classified as bucket=%q severity=%q", decision, ev.Bucket, ev.Severity)
+		}
+		blob, err := json.Marshal(ev)
+		if err != nil || !bytes.Contains(blob, []byte(`"bucket":"approved"`)) {
+			t.Errorf("%q stream JSON = %s, %v", decision, blob, err)
+		}
+		evs = append(evs, ev)
+	}
+	evs = append(evs, classify(event{Decision: "unseen-verdict"}))
+	if got := computePulse(evs, "", "", "", nil, nil); got.Approved != 7 || got.Other != 1 || got.Blocked != 0 || got.High != 1 {
+		t.Fatalf("pulse = %+v, want seven routine and one high other", got)
 	}
 }
 

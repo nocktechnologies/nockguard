@@ -86,9 +86,9 @@ test('context window stays a bounded positive integer', async () => {
 
 test('one unreadable row leaves the readable block count visible', () => {
   const w = wall();
-  vm.runInContext("render({decision:'block', severity:'high', agent:'a'})", w.context);
+  vm.runInContext("render({decision:'block', bucket:'blocked', severity:'high', agent:'a'})", w.context);
   assert.equal(w.elements.get('p-blocked').textContent, 1); // clean control
-  vm.runInContext("render({decision:'unparseable', agent:'a'})", w.context);
+  vm.runInContext("render({decision:'unparseable', bucket:'unreadable', agent:'a'})", w.context);
   assert.equal(w.elements.get('p-blocked').textContent, 1);
   assert.equal(w.elements.get('c-block').textContent, 1);
   assert.equal(w.elements.get('p-unreadable').textContent, 1);
@@ -96,25 +96,37 @@ test('one unreadable row leaves the readable block count visible', () => {
   assert.equal(w.elements.get('c-caught').textContent, '—');
 });
 
-test('audit and unfamiliar decisions do not become rejections or change the catch rate', () => {
+test('routine decisions count as approved and unfamiliar decisions stay other', () => {
   const w = wall();
-  vm.runInContext("render({decision:'allow'}); render({decision:'deny'})", w.context);
+  vm.runInContext("render({decision:'allow', bucket:'approved'}); render({decision:'deny', bucket:'blocked'})", w.context);
   assert.equal(w.elements.get('c-caught').textContent, '50%');
-  vm.runInContext("render({decision:'would-deny'}); render({decision:'future-review'})", w.context);
+  vm.runInContext("render({decision:'would-deny', bucket:'approved'}); render({decision:'future-review', bucket:'other', severity:'high'})", w.context);
   assert.equal(w.elements.get('p-blocked').textContent, 1);
-  assert.equal(w.elements.get('p-approved').textContent, 1);
-  assert.equal(w.elements.get('p-other').textContent, 2);
-  assert.equal(w.elements.get('c-other').textContent, 2);
+  assert.equal(w.elements.get('p-approved').textContent, 2);
+  assert.equal(w.elements.get('p-other').textContent, 1);
+  assert.equal(w.elements.get('c-other').textContent, 1);
   assert.equal(w.elements.get('c-rate').textContent, 0);
-  assert.equal(w.elements.get('c-caught').textContent, '50%');
+  assert.equal(w.elements.get('c-caught').textContent, '33%');
   assert.equal(w.elements.get('feed').children[0].dataset.decision, 'future-review');
   assert.equal(w.elements.get('feed').children[0].className, 'row unknown');
   assert.match(w.elements.get('feed').children[0].innerHTML, /future-review/);
 });
 
+test('pulse uses the server bucket for routine decisions', () => {
+  const w = wall();
+  vm.runInContext("render({decision:'dispatch', bucket:'approved', severity:'none'}); render({decision:'state-write', bucket:'approved', severity:'none'}); render({decision:'approval-granted', bucket:'approved', severity:'none'})", w.context);
+  assert.equal(w.elements.get('p-approved').textContent, 3);
+  assert.equal(w.elements.get('p-other').textContent, 0);
+  assert.equal(w.elements.get('p-threats').textContent, 0);
+  // Negative control: the browser must trust the bucket, not its own decision list.
+  vm.runInContext("render({decision:'allow', bucket:'other', severity:'high'})", w.context);
+  assert.equal(w.elements.get('p-approved').textContent, 3);
+  assert.equal(w.elements.get('p-other').textContent, 1);
+});
+
 test('approval-denied uses rejection styling and a fixed decision filter option', () => {
   const w = wall();
-  vm.runInContext("render({decision:'approval-denied', severity:'high'})", w.context);
+  vm.runInContext("render({decision:'approval-denied', bucket:'blocked', severity:'high'})", w.context);
   assert.equal(w.elements.get('feed').children[0].className, 'row approval-denied');
   assert.equal(w.elements.get('p-blocked').textContent, 1);
   assert.equal(w.decisions.options.filter(o => o.value === 'approval-denied').length, 1);

@@ -65,9 +65,10 @@ type event struct {
 	Ts       string `json:"ts"`
 	Agent    string `json:"agent"`
 	Tool     string `json:"tool"`
-	Decision string `json:"decision"` // allow | deny | block | ratelimit | hide
+	Decision string `json:"decision"`
 	Reason   string `json:"reason,omitempty"`
 	Severity string `json:"severity,omitempty"` // derived threat tier, not from audit
+	Bucket   string `json:"bucket,omitempty"`   // derived count bucket, not from audit
 	// VerifyState is the tamper-evidence badge for this entry: "ok" (its
 	// signature chained clean), "broken" (this is the first entry whose signature
 	// failed), or "unknown" (unverifiable — no signing key configured, a demo
@@ -92,6 +93,10 @@ type event struct {
 func classify(ev event) event {
 	ev.Source = sourceGuard // stamped here, never trusted from the audit line; Lock rows overwrite it
 	ev.Severity = forward.Severity(ev.Decision, ev.Reason)
+	ev.Bucket = forward.DecisionBucket(ev.Decision)
+	if ev.Decision == decisionUnparseable {
+		ev.Bucket = "unreadable"
+	}
 	return ev
 }
 
@@ -280,9 +285,9 @@ func (b *broker) replayHistory(w io.Writer) {
 // It mirrors what the Live Wall's pulse header shows so the same numbers are
 // available to scripts and headless monitors (GET /pulse), not just the browser.
 type pulse struct {
-	Approved    int `json:"approved"`    // allow
+	Approved    int `json:"approved"`    // routine decisions
 	Blocked     int `json:"blocked"`     // explicit rejections only
-	Other       int `json:"other"`       // readable audit-only or unfamiliar decisions
+	Other       int `json:"other"`       // unfamiliar decisions
 	Pending     int `json:"pending"`     // held calls (none of the current decisions)
 	RateLimited int `json:"rateLimited"` // rejected by rate or spend limit; subset of Blocked
 	Total       int `json:"total"`
@@ -393,13 +398,15 @@ func computePulse(evs []event, q, decision, severity string, since, until *time.
 		if ev.Decision == "ratelimit" {
 			p.RateLimited++
 		}
-		switch {
-		case ev.Decision == "allow":
+		switch forward.DecisionBucket(ev.Decision) {
+		case "approved":
 			p.Approved++
-		case forward.IsRejection(ev.Decision):
+		case "blocked":
 			p.Blocked++
-		case ev.Decision != decisionUnparseable:
-			p.Other++
+		default:
+			if ev.Decision != decisionUnparseable {
+				p.Other++
+			}
 		}
 		switch forward.Severity(ev.Decision, ev.Reason) {
 		case forward.ThreatCritical:

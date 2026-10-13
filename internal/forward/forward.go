@@ -198,15 +198,27 @@ const (
 	ThreatNone     = "none"     // allows, dry-run shadow would-denies, observe-mode audits — not a live catch
 )
 
-// IsRejection reports decisions that actually refused a call or hid a tool.
-// Audit-only and unfamiliar decisions do not establish that anything was refused.
-func IsRejection(decision string) bool {
-	switch decision {
-	case "deny", "block", "ratelimit", "hide", "approval-denied":
-		return true
-	}
-	return false
+// decisionBuckets is the decision vocabulary shared by threat tiers and Wall
+// counts. Unknown values remain visible as "other" and rate high.
+var decisionBuckets = map[string]string{
+	"": "approved", "allow": "approved", "would-deny": "approved",
+	"observe": "approved", "dispatch": "approved", "state-write": "approved",
+	"approval-granted": "approved",
+	"deny":             "blocked", "block": "blocked", "ratelimit": "blocked",
+	"hide": "blocked", "approval-denied": "blocked",
+	"inject": "other", "budget-ask": "other", "downgrade": "other",
 }
+
+// DecisionBucket gives the Wall's count bucket for a recorded decision.
+func DecisionBucket(decision string) string {
+	if bucket, ok := decisionBuckets[decision]; ok {
+		return bucket
+	}
+	return "other"
+}
+
+// IsRejection reports decisions that actually refused a call or hid a tool.
+func IsRejection(decision string) bool { return DecisionBucket(decision) == "blocked" }
 
 // Severity classifies a (decision, reason) pair into a threat tier. It is a PURE
 // function (no I/O, no state) so the forwarder and the Live Wall share one source
@@ -218,9 +230,11 @@ func IsRejection(decision string) bool {
 // — the built-in validate rule names (internal/validate) and the policy deny
 // reasons (internal/policy) — plus the wall's own demo phrasing.
 func Severity(decision, reason string) string {
-	switch decision {
-	case "allow", "would-deny", "observe", "":
+	switch DecisionBucket(decision) {
+	case "approved":
 		return ThreatNone
+	case "other":
+		return ThreatHigh
 	}
 	r := strings.ToLower(reason)
 	if (decision == "block" || decision == "deny") && (secretExfil(r) || destructive(r)) {

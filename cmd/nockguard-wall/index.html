@@ -299,7 +299,6 @@
   const flash = document.getElementById('flash');
   let empty = document.getElementById('empty');
   let MAX_ROWS = 500;
-  const KNOWN = { allow:1, deny:1, block:1, ratelimit:1, hide:1, 'approval-denied':1 };
   let demoMode = false;
   let recentSession = '';
 
@@ -340,6 +339,8 @@
   // --- filters: substring match on agent/tool + exact decision + time range ---
   const fText = document.getElementById('f-text');
   const fDecision = document.getElementById('f-decision');
+  const fixedDecisions = new Set([...fDecision.options].map(option => option.value));
+  const fixedDecisionCount = fDecision.options.length;
   const fSeverity = document.getElementById('f-severity');
   const fTimerange = document.getElementById('f-timerange');
   const fClear = document.getElementById('f-clear');
@@ -439,13 +440,6 @@
   const pCritical = document.getElementById('p-critical');
   const pHigh = document.getElementById('p-high');
   const pAgents = document.getElementById('p-agents');
-  function pulseBucket(decision) {
-    if (decision === 'allow') return 'approved';
-    if (decision === 'unparseable') return 'unreadable';
-    if (decision === 'deny' || decision === 'block' || decision === 'ratelimit' ||
-        decision === 'hide' || decision === 'approval-denied') return 'blocked';
-    return 'other';
-  }
   function renderPulse() {
     let approved = 0, blocked = 0, other = 0, limited = 0, threats = 0, critical = 0, high = 0;
     let totalRows = 0, unreadable = 0, hasEvidence = false;
@@ -455,7 +449,7 @@
       hasEvidence = true;
       if (!rowMatches(row)) continue;
       totalRows++;
-      const b = pulseBucket(row.dataset.decision || '');
+      const b = row.dataset.bucket;
       if (b === 'approved') approved++;
       else if (b === 'blocked') blocked++;
       else if (b === 'unreadable') unreadable++;
@@ -525,7 +519,7 @@
       recentSession = ev.session_id;
       document.getElementById('context-session').textContent = recentSession;
     }
-    const dec = Object.hasOwn(KNOWN, ev.decision) ? ev.decision : 'unknown';
+    const dec = fixedDecisions.has(ev.decision) ? ev.decision : 'unknown';
     const sev = SEV[ev.severity] ? ev.severity : 'none';
     const row = document.createElement('div');
     row.className = 'row ' + dec;
@@ -534,6 +528,7 @@
     row.dataset.agentName = ev.agent || '';
     row.dataset.tool = (ev.tool || '').toLowerCase();
     row.dataset.decision = ev.decision || '';
+    row.dataset.bucket = ev.bucket || 'other';
     row.dataset.severity = sev;
     row.dataset.source = ev.source || '';
     // Verification badge is derived server-side (verify.go) and arrives on the
@@ -557,11 +552,11 @@
     feed.prepend(row);
     while (feed.childElementCount > MAX_ROWS) feed.lastElementChild.remove();
     const selectedDecision = fDecision.value;
-    while (fDecision.options.length > 7) fDecision.remove(7);
+    while (fDecision.options.length > fixedDecisionCount) fDecision.remove(fixedDecisionCount);
     const unknown = new Set();
     for (const kept of feed.children) {
       const decision = kept.dataset.decision;
-      if (decision && !Object.hasOwn(KNOWN, decision) && !unknown.has(decision)) {
+      if (decision && !fixedDecisions.has(decision) && !unknown.has(decision)) {
         unknown.add(decision);
         fDecision.add(new Option(decision, decision));
       }
