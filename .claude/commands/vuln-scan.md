@@ -12,29 +12,30 @@ Always report CRITICAL and HIGH first. Do not soften findings.
 ## Step 1 — Locate and read the policy
 
 ```bash
-# Default location
+# Default location (`nockguard init` writes it)
 cat ~/.nockguard/policy.yaml
 
 # Or ask the user for the path if non-standard
 ```
 
-If no policy file exists: **CRITICAL — NockGuard has no policy. All tool calls are denied (fail-closed), but there is nothing to review. Run `nockguard init` to scaffold one.**
+If no policy file exists: **CRITICAL — NockGuard has no policy. `nockguard proxy` without a policy starts observe mode: every tool is allowed and nothing is denied (calls are only recorded in a signed audit trail; `cmd/nockguard/observe.go`). Run `nockguard init` to scaffold a default-deny policy, then pass it with `--policy`.**
 
 ## Step 2 — Policy structure checks
 
 Read the YAML and flag each of the following:
 
-### 2a. Implicit allow-all agents (CRITICAL)
+### 2a. Allow-all agents (CRITICAL)
 
-An agent with no `allow` list AND no `mode: deny` allows EVERY tool:
+An agent with no `allow` list and `mode: allow` allows EVERY tool that is not denied (`internal/policy/policy.go`, `Evaluate`). An agent with no `allow` list and `mode` omitted or `deny` is denied every tool, so `my-agent: {}` is not an exposure:
 
 ```yaml
-# BAD — implicit allow-all
+# BAD — allow-all
 agents:
-  my-agent: {}
+  my-agent:
+    mode: allow
 ```
 
-Fix: add an explicit allow list or set `mode: deny`.
+Fix: replace it with an explicit allow list, or set `mode: deny`.
 
 ### 2b. Missing default agent (HIGH)
 
@@ -112,25 +113,26 @@ Flag LOW if `audit.enabled: true` but no signing is configured. For compliance c
 
 ## Step 3 — Audit trail analysis
 
-If the audit trail exists, read it for high-signal events:
+If the audit trail exists, read it for high-signal events. An agent signed with a per-agent `keygen --agent` key writes `~/.nockguard/logs/<agent>.audit.jsonl` (`policy.AgentAuditPath`); otherwise the trail is the policy-wide `audit.path` (default `~/.nockguard/logs/audit.jsonl`), and `--audit` overrides both. Set `TRAIL` to the one under review; `ls ~/.nockguard/logs/` lists them:
 
 ```bash
+TRAIL=~/.nockguard/logs/coder.audit.jsonl
+
 # Tail recent events
-tail -n 100 ~/.nockguard/logs/audit.jsonl 2>/dev/null || echo "No audit log found at default path"
+tail -n 100 "$TRAIL" 2>/dev/null || echo "No audit log found at $TRAIL"
 
 # Block events — always HIGH-signal (injection / secret-exfil attempts)
-cat ~/.nockguard/logs/audit.jsonl 2>/dev/null | jq 'select(.decision == "block")' 2>/dev/null
+jq 'select(.decision == "block")' "$TRAIL" 2>/dev/null
 
 # Deny volume by agent and tool
-cat ~/.nockguard/logs/audit.jsonl 2>/dev/null | \
-  jq -r 'select(.decision == "deny") | "\(.agent) \(.tool)"' 2>/dev/null | \
+jq -r 'select(.decision == "deny") | "\(.agent) \(.tool)"' "$TRAIL" 2>/dev/null | \
   sort | uniq -c | sort -rn | head -20
 
 # Ratelimit events — potential runaway indicator
-cat ~/.nockguard/logs/audit.jsonl 2>/dev/null | jq 'select(.decision == "ratelimit")' 2>/dev/null
+jq 'select(.decision == "ratelimit")' "$TRAIL" 2>/dev/null
 
-# Spend-cap hits
-cat ~/.nockguard/logs/audit.jsonl 2>/dev/null | jq 'select(.reason | test("spend cap"))' 2>/dev/null
+# Spend-cap hits (recorded as decision ratelimit, reason spend-cap)
+jq 'select(.decision == "ratelimit" and .reason == "spend-cap")' "$TRAIL" 2>/dev/null
 ```
 
 Interpret what you find:
@@ -138,6 +140,7 @@ Interpret what you find:
 | Pattern | Severity | Meaning |
 |---------|----------|---------|
 | Any `block` event | HIGH | Input validator caught something — injection attempt, secret exfil, or path traversal. Investigate the agent and the pattern that fired. |
+| `would-deny` events | LOW–MEDIUM | A `shadow` allowlist miss: the call was allowed but would be denied once `shadow` becomes `allow`. Review before enforcing. |
 | Dense `deny` on destructive tools | Low | Policy working correctly — informational. |
 | Dense `deny` on read tools the agent clearly needs | MEDIUM | Policy too tight — agent is being blocked on legitimate calls. May drive the agent to find workarounds. |
 | `ratelimit` cluster in a short window | MEDIUM | Agent running hot or looping. |
@@ -148,14 +151,18 @@ Interpret what you find:
 If signing is configured, verify chain integrity:
 
 ```bash
-# Ed25519
-nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB
+# Per-agent key written by `nockguard keygen --agent <name>` (reads ~/.nockguard/keys/<name>.pub)
+nockguard verify --agent coder
 
-# HMAC
-nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY
+# Every per-agent trail in the audit directory
+nockguard verify --all
+
+# Ed25519 with an explicit public key, or HMAC
+nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB --audit "$TRAIL"
+nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY --audit "$TRAIL"
 ```
 
-Exit 2 = tampering detected. **This is a CRITICAL security event.** Do not proceed — escalate immediately and treat the chain as forensic evidence.
+Exit 1 = setup, key or unverifiable trail (report it, then fix the setup). Exit 2 = trail read or integrity failure after key selection; assume tampering. **Exit 2 is a CRITICAL security event.** Do not proceed — escalate immediately and treat the chain as forensic evidence.
 
 ## Step 5 — Report
 
