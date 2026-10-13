@@ -310,11 +310,111 @@ func TestProxyAllowsUpstreamToFinishAfterClosingStdout(t *testing.T) {
 	}
 }
 
-func TestProxySignalKillsGrandchild(t *testing.T) {
+func TestProxyClosedClientStdoutKillsUpstreamGroup(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "grandchild.pid")
+	grandchildGone := false
+	t.Cleanup(func() {
+		if grandchildGone {
+			return
+		}
+		raw, err := os.ReadFile(pidFile)
+		if err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	script := filepath.Join(dir, "write-after-eof.sh")
+	body := "#!/bin/bash\nsleep 30 >/dev/null 2>&1 &\necho $! > " + pidFile + "\nIFS= read -r line || true\necho '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'\nsleep 30\n"
+	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(buildBinary(t), "proxy", "--upstream", "bash "+script,
+		"--agent", "kit", "--policy", writePolicyFile(t))
+	stderr := &lockedBuffer{}
+	cmd.Stderr = stderr
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	_ = out.Close()
+	_ = in.Close()
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	waitNonzeroExit(t, exited)
+	if !strings.Contains(stderr.String(), "upstream->agent") {
+		t.Fatalf("want client output error, stderr: %s", stderr.String())
+	}
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitGrandchildGone(t, pid)
+	grandchildGone = true
+}
+
+func TestProxySignalKillsGrandchild(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT} {
+		t.Run(sig.String(), func(t *testing.T) {
+			dir := t.TempDir()
+			pidFile := filepath.Join(dir, "grandchild.pid")
+			script := filepath.Join(dir, "wait.sh")
+			body := "#!/bin/bash\nsleep 30 &\necho $! > " + pidFile + "\nwait\n"
+			if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(buildBinary(t), "proxy", "--upstream", "bash "+script,
+				"--agent", "kit", "--policy", writePolicyFile(t))
+			in, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd.Stdout = io.Discard
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = cmd.Process.Kill() })
+			defer in.Close()
+			var pid int
+			deadline := time.Now().Add(5 * time.Second)
+			for pid == 0 && time.Now().Before(deadline) {
+				if raw, err := os.ReadFile(pidFile); err == nil {
+					pid, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if pid == 0 {
+				t.Fatal("upstream grandchild did not start")
+			}
+			if err := cmd.Process.Signal(sig); err != nil {
+				t.Fatal(err)
+			}
+			exited := make(chan error, 1)
+			go func() { exited <- cmd.Wait() }()
+			waitNonzeroExit(t, exited)
+			waitGrandchildGone(t, pid)
+		})
+	}
+}
+
+func TestProxyDoesNotTreatStoppedUpstreamAsExited(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "leader.pid")
 	script := filepath.Join(dir, "wait.sh")
-	body := "#!/bin/bash\nsleep 30 &\necho $! > " + pidFile + "\nwait\n"
+	body := "#!/bin/bash\necho $$ > " + pidFile + "\nsleep 30\n"
 	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -328,6 +428,8 @@ func TestProxySignalKillsGrandchild(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
 	t.Cleanup(func() { _ = cmd.Process.Kill() })
 	defer in.Close()
 	var pid int
@@ -339,15 +441,23 @@ func TestProxySignalKillsGrandchild(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if pid == 0 {
-		t.Fatal("upstream grandchild did not start")
+		t.Fatal("upstream leader did not start")
 	}
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
 		t.Fatal(err)
 	}
-	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
+	t.Cleanup(func() {
+		_ = syscall.Kill(pid, syscall.SIGCONT)
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	})
+	select {
+	case err := <-exited:
+		t.Fatalf("proxy exited while upstream was only stopped: %v", err)
+	case <-time.After(upstreamShutdownBound + 200*time.Millisecond):
+	}
+	_ = syscall.Kill(pid, syscall.SIGCONT)
+	_ = syscall.Kill(pid, syscall.SIGKILL)
 	waitNonzeroExit(t, exited)
-	waitGrandchildGone(t, pid)
 }
 
 // Output the upstream wrote before exiting must reach a client that is still

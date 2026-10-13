@@ -3,6 +3,7 @@ package proxy
 import (
 	"os/exec"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -19,6 +20,16 @@ func observeLeaderExit(cmd *exec.Cmd) <-chan error {
 				uintptr(unsafe.Pointer(&info[0])), syscall.WEXITED|syscall.WNOWAIT, 0, 0)
 			if errno == syscall.EINTR {
 				continue
+			}
+			if errno == 0 {
+				// macOS has reported stopped children for WEXITED in past
+				// releases. si_code is the low 32 bits of info[1]; only the
+				// three CLD exit codes mean the leader is actually gone.
+				code := uint32(info[1])
+				if code < 1 || code > 3 { // CLD_EXITED, CLD_KILLED, CLD_DUMPED
+					time.Sleep(10 * time.Millisecond)
+					continue
+				}
 			}
 			if errno != 0 {
 				ch <- errno

@@ -519,8 +519,14 @@ func (p *StdioProxy) Run() error {
 	}
 	defer upstreamOut.Close()
 	cmd.Stdout = upstreamOutW
+	// A closed client stdout must surface as EPIPE so Run can clean up the
+	// upstream group instead of exiting immediately on SIGPIPE. Notify installs
+	// a caught handler, which exec resets in the upstream child.
+	brokenPipeSignals := make(chan os.Signal, 1)
+	signal.Notify(brokenPipeSignals, syscall.SIGPIPE)
+	defer signal.Stop(brokenPipeSignals)
 	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(signals)
 
 	err = cmd.Start()
@@ -531,8 +537,10 @@ func (p *StdioProxy) Run() error {
 	defer upstreamIn.Close()
 	waitCh := observeLeaderExit(cmd)
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 1)
 	var agentEOF atomic.Bool
+	var outputFailed atomic.Bool
+	outputErrCh := make(chan error, 1)
 	upstreamDone := make(chan struct{})
 
 	pendingCalls := &sync.Map{}
@@ -549,7 +557,8 @@ func (p *StdioProxy) Run() error {
 	go func() {
 		defer close(upstreamDone)
 		if err := p.upstreamToAgent(upstreamOut, os.Stdout, pendingCalls); err != nil {
-			errCh <- fmt.Errorf("upstream->agent: %w", err)
+			outputFailed.Store(true)
+			outputErrCh <- fmt.Errorf("upstream->agent: %w", err)
 		}
 	}()
 
@@ -559,7 +568,7 @@ func (p *StdioProxy) Run() error {
 		// The output loop can end while the leader is still alive (for example,
 		// on a client write error). If client input finished cleanly, let the
 		// upstream finish its own shutdown before stopping any descendants.
-		if !agentEOF.Load() {
+		if outputFailed.Load() || !agentEOF.Load() {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
 		select {
@@ -626,6 +635,11 @@ func (p *StdioProxy) Run() error {
 	// the group before waiting for the leader.
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	waitErr := reapLeader(cmd, observed)
+	select {
+	case e := <-outputErrCh:
+		return e
+	default:
+	}
 	if waitErr != nil {
 		return fmt.Errorf("upstream exit: %w", waitErr)
 	}
