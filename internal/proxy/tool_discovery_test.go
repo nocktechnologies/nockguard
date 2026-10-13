@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -46,6 +47,44 @@ func TestToolDiscoveryPreservesMetadata(t *testing.T) {
 	}
 }
 
+func TestToolDiscoveryListsAskAndHidesDeny(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	auditor, err := audit.New(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer auditor.Close()
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    ask: [ask_tool]\n    deny: [denied_tool]\n", nil, auditor)
+	response := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"ask_tool"},{"name":"denied_tool"},{"name":"normal_tool"}]}}`)
+	filtered := gate.filterToolListResponse(response, 0)
+	gate.resolveAudit(0)
+
+	var result struct {
+		Result struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(filtered, &result); err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]bool{}
+	for _, tool := range result.Result.Tools {
+		listed[tool.Name] = true
+	}
+	if !listed["ask_tool"] || !listed["normal_tool"] || listed["denied_tool"] {
+		t.Fatalf("listed tools = %v, want ask_tool and normal_tool but not denied_tool", listed)
+	}
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events := readAuditEvents(t, auditPath)
+	if len(events) != 1 || events[0].Decision != "hide" || events[0].Tool != "denied_tool" {
+		t.Fatalf("discovery audit = %+v, want one hide row for denied_tool and none for ask_tool", events)
+	}
+}
+
 func TestHTTPToolDiscoveryJSONAndSSE(t *testing.T) {
 	for _, sse := range []bool{false, true} {
 		t.Run(fmt.Sprint(sse), func(t *testing.T) {
@@ -72,7 +111,7 @@ func TestHTTPToolDiscoveryJSONAndSSE(t *testing.T) {
 				}
 			}))
 			defer upstream.Close()
-			gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
+			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    ask: [safe_tool]\n    deny: [blocked]\n", nil, nil)
 			listener := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
 			defer listener.Close()
 			resp, err := http.Post(listener.URL, "application/json", strings.NewReader(discoveryRequest))
