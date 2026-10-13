@@ -202,6 +202,9 @@
     .brand { flex-wrap:wrap; }
     .evidence { grid-template-columns:minmax(0,1fr); }
     .stats { margin-left:0; }
+    .filters, .ptop-list, .row .verdict { min-width:0; }
+    .filters .finput, .ptop-list, .pagent { max-width:100%; }
+    .pagent, .row .badge { overflow-wrap:anywhere; }
     .pill, .ptile { min-width:0; flex:1 1 72px; }
     .hero { border-right:0; padding-right:0; flex-basis:100%; }
     .ptop { flex-wrap:wrap; }
@@ -332,12 +335,15 @@
   let MAX_ROWS = 500;
   let demoMode = false;
   let recentSession = '';
-  // scope notes stay open on wide screens; collapsed behind a toggle on narrow ones
   // open on wide screens, collapsed on narrow; follows resizes across the breakpoint
   const wideMQ = typeof window.matchMedia === 'function' ? window.matchMedia('(min-width:601px)') : null;
   const evDetails = document.getElementById('evidence-details');
   evDetails.open = wideMQ ? wideMQ.matches : true;
-  if (wideMQ) wideMQ.addEventListener('change', e => { evDetails.open = e.matches; });
+  if (wideMQ) {
+    const syncEvidence = e => { evDetails.open = e.matches; };
+    if (typeof wideMQ.addEventListener === 'function') wideMQ.addEventListener('change', syncEvidence);
+    else if (typeof wideMQ.addListener === 'function') wideMQ.addListener(syncEvidence);
+  }
 
   fetch('/context', { cache:'no-store' }).then(r => r.json()).then(c => {
     MAX_ROWS = Number.isSafeInteger(c.window) && c.window > 0 ? Math.min(c.window, 500) : 500;
