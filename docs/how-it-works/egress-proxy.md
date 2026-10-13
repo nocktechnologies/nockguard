@@ -4,7 +4,7 @@
 observes HTTP requests and HTTPS CONNECT destinations when a client is
 configured to use it. Add `--enforce` to return 403 for a denied host;
 otherwise policy denials are logged but allowed. An SSRF guard rejects
-private/unsafe destinations in both modes. Source: `cmd/nockguard/main.go:437`,
+private/unsafe destinations in both modes. Source: [cmd/nockguard/main.go](../../cmd/nockguard/main.go),
 `internal/proxy/forwardhttp/forwardhttp.go`.
 
 This path is an explicit forward proxy, not transparent interception. Clients

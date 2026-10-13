@@ -4,6 +4,10 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Build CI and release archives with Go 1.26.9 and gate source and release binaries with `govulncheck`.
+- `verify --agent` now verifies an explicitly supplied `--audit` file instead of silently checking the agent's default trail.
+
 ### Changed
 - `tools/list` now keeps tools with an `Ask` verdict visible while holding their calls for local or Telegram approval; denied tools stay hidden. Approved calls record their final `allow` audit row before dispatch.
 
@@ -11,6 +15,7 @@ All notable changes to NockGuard are documented here.
 - The stdio proxy registers response correlation before writing a request upstream, and clears pending state and resolves its audit sequence when the write fails.
 
 ### Documentation
+- Correct Wall installation guidance and replace source line references with file links.
 - Document Homebrew and Linux archive installation, including the Live Wall.
 - Linux install verifies the release archive against SHA256SUMS before installing.
 

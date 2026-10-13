@@ -34,4 +34,4 @@ Go tests live beside each package as `*_test.go` unless noted otherwise.
 | `README.md`, `CHANGELOG.md` | Product manual and release history; reviewed against source. |
 | `go.mod`, `go.sum`, `LICENSE` | Module, dependencies and MIT license; validated by Go build/test. |
 
-CLI dispatch: `cmd/nockguard/main.go:81`. CI gate: `.github/workflows/ci.yml:1`.
+CLI dispatch: [cmd/nockguard/main.go](../cmd/nockguard/main.go). CI gate: [.github/workflows/ci.yml](../.github/workflows/ci.yml).

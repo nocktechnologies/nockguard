@@ -872,6 +872,10 @@ func runAudit(args []string) int {
 			}
 			i++
 			auditPath = args[i]
+			if auditPath == "" {
+				fmt.Fprintln(os.Stderr, "error: --audit requires a non-empty path")
+				return 1
+			}
 		case "--audit-dir":
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "error: --audit-dir requires a value")
@@ -928,24 +932,26 @@ func runAudit(args []string) int {
 		return 1
 	}
 
-	// Per-agent mode: derive path and pub-key env from agent name.
+	// Per-agent mode: derive the public key from the agent and the trail path only when absent.
 	if agentName != "" {
 		if !policy.ValidAgentName(agentName) {
 			fmt.Fprintf(os.Stderr, "error: invalid agent name %q: only alphanumerics, hyphens, and dots are allowed\n", agentName)
 			return 1
 		}
-		baseDir := auditDir
-		if baseDir == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
-				return 1
+		if auditPath == "" {
+			baseDir := auditDir
+			if baseDir == "" {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+					return 1
+				}
+				baseDir = filepath.Join(home, filepath.Dir(policy.DefaultAuditPath))
 			}
-			baseDir = filepath.Join(home, filepath.Dir(policy.DefaultAuditPath))
+			baseName := filepath.Base(policy.DefaultAuditPath)
+			basePath := filepath.Join(baseDir, baseName)
+			auditPath = policy.AgentAuditPath(basePath, agentName)
 		}
-		baseName := filepath.Base(policy.DefaultAuditPath)
-		basePath := filepath.Join(baseDir, baseName)
-		auditPath = policy.AgentAuditPath(basePath, agentName)
 		pubEnv = policy.AgentPubKeyEnvName(agentName)
 	}
 
