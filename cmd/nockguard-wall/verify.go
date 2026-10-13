@@ -101,6 +101,7 @@ func newVerifier(pubEnv, keyEnv, agent string) (*verifier, error) {
 // entries_verified counts the entries that passed BEFORE the break, so on a
 // tamper break_at == entries_verified+1.
 type verifyReport struct {
+	AuditFailing    bool    `json:"audit_failing"`
 	ChainIntact     *bool   `json:"chain_intact"`
 	Verdict         string  `json:"verdict"`
 	PublicKeySource string  `json:"public_key_source,omitempty"`

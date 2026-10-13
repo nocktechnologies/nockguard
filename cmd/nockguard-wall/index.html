@@ -180,6 +180,10 @@
 </head>
 <body data-lock="0">
   <div id="flash"></div>
+  <div id="auditfail" class="tamper" role="alert" aria-live="assertive" hidden>
+    <span class="tamper-icon">⚠</span>
+    <span class="tamper-text">audit failing: calls refused</span>
+  </div>
   <div id="tamper" class="tamper" role="alert" aria-live="assertive" hidden>
     <span class="tamper-icon">⚠</span>
     <span class="tamper-text">AUDIT CHAIN TAMPERED — the signed audit trail failed verification. Live events keep streaming, but the record can no longer be trusted.</span>
@@ -518,6 +522,7 @@
   // — a true incremental tip-check would need an audit-package API to resume from
   // the last-verified signature (deferred; see the PR).
   const tamper = document.getElementById('tamper');
+  const auditfail = document.getElementById('auditfail');
   const tamperDetail = document.getElementById('tamper-detail');
   const chainnote = document.getElementById('chainnote');
   const chainnoteText = document.getElementById('chainnote-text');
@@ -527,6 +532,7 @@
       const r = await fetch('/verify', { cache: 'no-store' });
       if (!r.ok) return;
       const v = await r.json();
+      auditfail.hidden = !v.audit_failing;
       // ONLY an explicit chain_intact:false is a tamper. status "unavailable"
       // (a read/scan error, chain_intact null) surfaces as the quiet chainnote,
       // never the red banner — a benign read glitch must not cry wolf (N9870).

@@ -266,6 +266,13 @@ func (a *Auditor) RecordRequired(ev Event) error {
 	return a.record(ev, true)
 }
 
+// FailureStatus reports the last required-audit write failure for a trail.
+// A successful required write clears the signal after recovery.
+func FailureStatus(path string) bool {
+	_, err := os.Stat(path + ".audit-failing")
+	return err == nil
+}
+
 // RequiredError reports known writer failures. A nil result means the writer is
 // open and has not latched a failure, not that the next write will succeed.
 // RecordRequired must persist the event before its caller forwards a tool call.
@@ -296,6 +303,23 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if required {
+		defer func() {
+			// The trail cannot report its own failed write. Keep an operator
+			// signal beside it for status and the Wall. Enforcement relies on
+			// requiredErr, never on this best-effort marker.
+			if err != nil {
+				if a.requiredErr == nil {
+					a.requiredErr = err
+				}
+				if a.path != "" {
+					_ = os.Mkdir(a.path+".audit-failing", 0o700)
+				}
+			} else if a.path != "" {
+				_ = os.Remove(a.path + ".audit-failing")
+			}
+		}()
+	}
 	if a.requiredErr != nil && required {
 		return fmt.Errorf("required audit writer failed; close and reopen it: %w", a.requiredErr)
 	}
@@ -311,11 +335,6 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 		}
 		return nil
 	}
-	defer func() {
-		if required && err != nil {
-			a.requiredErr = err
-		}
-	}()
 	if required {
 		if err = a.checkPathIdentity(); err != nil {
 			return err

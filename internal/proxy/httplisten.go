@@ -79,6 +79,13 @@ func (l *HTTPListener) WithRequiredAudit() *HTTPListener {
 	return l
 }
 
+// WithBestEffortAudit explicitly disables the local durable forwarding gate.
+func (l *HTTPListener) WithBestEffortAudit() *HTTPListener {
+	l.requiredAudit = false
+	l.gate.WithBestEffortAudit()
+	return l
+}
+
 // WithUpstreamAgentToken selects the gateway's separate upstream identity.
 // Caller Authorization is never forwarded in this mode. Redirects are disabled
 // so neither credentials nor canonical tool arguments can move to another URL.
@@ -106,6 +113,7 @@ func NewHTTPListener(listen, upstream string, gate *StdioProxy, logger *log.Logg
 	transport.ResponseHeaderTimeout = 60 * time.Second
 	return &HTTPListener{
 		gate:                  gate,
+		requiredAudit:         gate.requiredAudit,
 		listen:                listen,
 		upstream:              upstream,
 		logger:                logger,

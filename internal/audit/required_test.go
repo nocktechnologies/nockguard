@@ -90,6 +90,9 @@ func TestRecordRequiredLatchesCheckpointFailure(t *testing.T) {
 	if latched == nil {
 		t.Fatal("checkpoint failure was not latched")
 	}
+	if !FailureStatus(path) {
+		t.Fatal("checkpoint failure was not visible to status readers")
+	}
 	if err := os.Remove(tmpPath); err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +115,9 @@ func TestRecordRequiredLatchesCheckpointFailure(t *testing.T) {
 	defer reopened.Close()
 	if err := reopened.RecordRequired(Event{Agent: "worker", Tool: "after-reopen", Decision: "allow"}); err != nil {
 		t.Fatal(err)
+	}
+	if FailureStatus(path) {
+		t.Fatal("successful required write did not clear failure status")
 	}
 }
 

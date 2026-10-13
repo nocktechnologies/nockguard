@@ -150,6 +150,7 @@ agents:
 	}
 	var logs bytes.Buffer
 	proxy := NewStdioProxy(nil, "mira", engine, validator, nil, auditor, nil, log.New(&logs, "", 0))
+	proxy.WithBestEffortAudit() // this case isolates deferred queue ordering
 	proxy.WithResolver(&mockResolver{
 		values: map[string]string{
 			"env:ECHO_TOKEN": "audit-secret-0001",

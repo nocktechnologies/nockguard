@@ -35,7 +35,7 @@ func TestHTTPListener_InitializeFollowedByToolsCall(t *testing.T) {
 
 	auditor, auditPath, pub := newEd25519Auditor(t)
 	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
-	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 
 	// POST initialize (non-gated, no audit emitted for this)
@@ -97,7 +97,7 @@ func TestHTTPListener_AuditQueueDoesNotStallAfter500(t *testing.T) {
 
 	auditor, auditPath, pub := newEd25519Auditor(t)
 	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
-	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 
 	// First tools/call (upstream returns 500)
@@ -151,7 +151,7 @@ func TestHTTPListener_CardAfterSeqPruningKeepsBoundary(t *testing.T) {
 
 	auditor, _, _ := newEd25519Auditor(t)
 	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
-	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 
 	// Make several tool calls to accumulate card state entries
@@ -190,7 +190,7 @@ func TestHTTPListener_MalformedSuccessDoesNotCommitCard(t *testing.T) {
 
 	auditor, _, _ := newEd25519Auditor(t)
 	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    allow:\n      - nockcc_nock_claim\n", nil, auditor)
-	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 
 	// A claim carrying a real nock_id whose upstream response is malformed must
@@ -229,7 +229,7 @@ func TestHTTPListener_OversizedJSONResponseFailsWithoutCommittingCard(t *testing
 
 	auditor, auditPath, pub := newEd25519Auditor(t)
 	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
-	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 
 	status, body, _ := post(t, lsrv.URL, `{"jsonrpc":"2.0","id":12345,"method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":12345}}}`)
@@ -288,7 +288,7 @@ func TestHTTPListener_JSONReadTimeoutFailsWithoutCommittingCard(t *testing.T) {
 
 	auditor, auditPath, pub := newEd25519Auditor(t)
 	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
-	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 	// Registered last so it runs FIRST on teardown (defers are LIFO): the
 	// stalled upstream handler must be released before lsrv.Close() /
@@ -364,7 +364,7 @@ func TestHTTPListener_StructurallyInvalidSuccessDoesNotCommitCard(t *testing.T) 
 
 			auditor, _, _ := newEd25519Auditor(t)
 			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
-			lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+			lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 			defer lsrv.Close()
 
 			// Claim id=12345; the response above is either not a response or carries
@@ -402,7 +402,7 @@ func TestHTTPListener_LargeNumericIDDoesNotFalselyMatch(t *testing.T) {
 
 	auditor, _, _ := newEd25519Auditor(t)
 	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
-	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 
 	// Claim with request id 9007199254740992 (differs from the response id 993).

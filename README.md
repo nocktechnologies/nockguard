@@ -215,10 +215,16 @@ Each decision is one JSON object per line (JSON Lines):
 
 `decision` is one of `allow`, `deny`, `would-deny` (shadow dry-run miss), `block` (input validation), `ratelimit`, `approval-granted`, `approval-denied`, `state-write`, `hide` (filtered from `tools/list`), or `dispatch` (required-audit permission to forward).
 
-Auditing in the existing stdio proxy and local `mcp-listen` is opt-in and
-best-effort: a write error is logged without blocking the call. `mcp-gateway`
-requires auditing instead: it synchronizes a dispatch record before forwarding
-and deferred decisions before releasing the response. A failure blocks later
+When auditing is enabled, `proxy`, `mcp-http`, and `mcp-listen` persist a decision
+before forwarding a tool call. A write failure refuses the call and later calls
+until the writer is repaired and reopened. `proxy` and `mcp-listen` write a
+`dispatch` row before forwarding and deferred decisions before releasing the
+response. `mcp-http` writes its observe decision before forwarding. Use
+`--audit-best-effort` on one of these local commands only if you explicitly
+want the old behavior; startup prints a warning. `nockguard status --agent <name>`
+(or `doctor`) and the Live Wall show `audit failing: calls refused`
+when a required write fails. The status command accepts `--audit <path>` for
+custom trail paths. `mcp-gateway` requires auditing and also blocks later
 requests across its sessions until storage is repaired and the process restarted.
 If a failure happens after forwarding, the response warns that the tool may have
 executed and must not be retried automatically. A dispatch row is not proof of

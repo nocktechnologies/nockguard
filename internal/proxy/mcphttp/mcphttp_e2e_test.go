@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
@@ -265,6 +266,77 @@ func TestMCPHTTPProxy_SSELargePayload(t *testing.T) {
 	if !strings.Contains(got, bigText) {
 		// Report how much we got to diagnose truncation vs. complete drop.
 		t.Errorf("large SSE payload not forwarded intact: got %d bytes, want payload containing %d-char text field", len(got), payloadSize)
+	}
+}
+
+func TestMCPHTTPAuditCheckpointFailure(t *testing.T) {
+	for _, bestEffort := range []bool{false, true} {
+		t.Run(map[bool]string{false: "required", true: "best-effort"}[bestEffort], func(t *testing.T) {
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+			}))
+			defer srv.Close()
+			_, priv, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "audit.jsonl")
+			auditor, err := audit.New(path, audit.WithEd25519Key(priv))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer auditor.Close()
+			if err := os.Mkdir(path+".hwm.tmp", 0700); err != nil {
+				t.Fatal(err)
+			}
+			p := newTestProxy(t, srv.URL, auditor)
+			if bestEffort {
+				p.WithBestEffortAudit()
+			}
+			in := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tool_a"}}` + "\n" +
+				`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"tool_b"}}` + "\n")
+			var out bytes.Buffer
+			if err := p.run(context.Background(), in, &out); err != nil {
+				t.Fatal(err)
+			}
+			want := int32(0)
+			if bestEffort {
+				want = 2
+			}
+			if got := calls.Load(); got != want {
+				t.Fatalf("upstream calls=%d, want %d; response=%s", got, want, out.String())
+			}
+			if !bestEffort && strings.Count(out.String(), "audit unavailable; request was not forwarded") != 2 {
+				t.Fatalf("both calls should report audit failure: %s", out.String())
+			}
+		})
+	}
+}
+
+func TestMCPHTTPClosedRequiredWriterStillRefusesCalls(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+	}))
+	defer srv.Close()
+	auditor, err := audit.New(filepath.Join(t.TempDir(), "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newTestProxy(t, srv.URL, auditor)
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	call := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tool_a"}}`
+	if err := p.run(context.Background(), strings.NewReader(call+"\n"), &out); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 0 || !strings.Contains(out.String(), "audit unavailable; request was not forwarded") {
+		t.Fatalf("closed audit writer allowed forwarding or hid failure: calls=%d reply=%s", calls.Load(), out.String())
 	}
 }
 
