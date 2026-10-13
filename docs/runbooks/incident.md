@@ -4,7 +4,10 @@
    agent, trail path, time and upstream request IDs without copying secrets or
    tool arguments into the incident record.
 2. Run `nockguard verify --agent <agent> --json` or the explicit trail/key mode.
-   Exit 2 means a broken trail; exit 1 means verification was inconclusive.
+   Exit 2 means a trail read failure or failed integrity check, not necessarily
+   tampering. Inspect the JSON `error` (or stderr): file/permission errors
+   indicate a read failure; hash, signature or checkpoint errors indicate an
+   integrity failure. Exit 1 means verification was inconclusive.
    For a combined NockLock session, use `verify --session` with both explicit
    paths and public keys. Preserve the original logs and `.hwm` head together.
 3. For a required-audit `mcp-gateway` failure, inspect the upstream service

@@ -6,9 +6,10 @@
 2. Run the [CI checks](../../CLAUDE.md#build-and-test). The current CI job is
    Linux only (`.github/workflows/ci.yml:13`); the 1.0 bar requires macOS CI.
 3. Run `scripts/build-release-assets.sh vX.Y.Z dist` on Linux with GNU tar and
-   `sha256sum`. It builds four `nockguard` archives (Linux/macOS, amd64/arm64)
-   and `SHA256SUMS`; run `scripts/check-release-version.sh vX.Y.Z <binary>`.
-   The script rejects a version mismatch and a wrong tag syntax.
+   `sha256sum`. It builds four archives containing `nockguard` and
+   `nockguard-wall` (Linux/macOS, amd64/arm64) and `SHA256SUMS`; run
+   `scripts/check-release-version.sh vX.Y.Z <binary>`. The build script rejects
+   wrong tag syntax; the version checker rejects a version mismatch.
 4. Use `workflow_dispatch` on `release-assets` for a dry run; it uploads CI
    artifacts only. After review, publish the GitHub release. The published
    release workflow rechecks checksums and attaches archives and `SHA256SUMS`.

@@ -122,7 +122,7 @@ func TestOverCapGuardTrailShowsRowsUnverified(t *testing.T) {
 	if len(v.guardEvs) != 2 {
 		t.Fatalf("over-cap trail shows %d guard rows, want 2", len(v.guardEvs))
 	}
-	if v.rep.ChainIntact != nil || v.rep.Status != statusUnavailable {
+	if v.rep.ChainIntact != nil || v.rep.Status != statusUnavailable || v.rep.Verdict != "UNAVAILABLE" {
 		t.Fatalf("over-cap trail report = %+v, want unavailable", v.rep)
 	}
 	for _, ev := range v.guardEvs {

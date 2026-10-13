@@ -25,9 +25,10 @@ CI runs these in [.github/workflows/ci.yml](.github/workflows/ci.yml).
 - Signing secrets belong in environment variables or protected key files,
   never policy YAML. `keygen` writes private seeds at mode `0600`; the
   [gitleaks workflow](.github/workflows/gitleaks.yml) scans every branch.
-- The Wall binds loopback by default; `mcp-listen` and `mcp-gateway` require
-  explicit loopback addresses. A remote connector needs the separate
-  [gateway boundary](docs/design/hosted-gateway.md).
+- The Wall binds loopback by default. `mcp-listen` rejects non-loopback binds
+  in `internal/proxy/httplisten.go`; `mcp-gateway` rejects them in
+  `internal/gateway/config.go`. Call out any bind widening in the PR. A remote
+  connector needs the separate [gateway boundary](docs/design/hosted-gateway.md).
 - `nockguard-pool` is a scaffold; update its [contract](docs/POOL_ROUTER.md)
   with any behavior change.
 - Work on a branch, pass CI and merge by PR. Never commit the ignored

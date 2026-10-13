@@ -914,7 +914,11 @@ func main() {
 	b := newBroker()
 	b.auditPath = *auditPath
 
-	v, verr := newVerifier(*verifyPubEnv, *verifyKeyEnv)
+	keyAgent := ""
+	if agentSet && !pubEnvSet {
+		keyAgent = *agent
+	}
+	v, verr := newVerifier(*verifyPubEnv, *verifyKeyEnv, keyAgent)
 	if verr != nil {
 		log.Fatalf("audit verification config: %v", verr)
 	}
