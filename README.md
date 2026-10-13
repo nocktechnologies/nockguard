@@ -17,7 +17,10 @@ MCP server (filesystem, GitHub, your own)
 ## See it in 30 seconds
 
 ```bash
-brew install nocktechnologies/tap/nockguard      # or: go install github.com/nocktechnologies/nockguard/cmd/nockguard@latest
+brew install nocktechnologies/tap/nockguard
+# Or install both binaries with Go; nockguard-wall is required by `nockguard wall`.
+go install github.com/nocktechnologies/nockguard/cmd/nockguard@latest
+go install github.com/nocktechnologies/nockguard/cmd/nockguard-wall@latest
 
 QS=$(mktemp -d)                                  # private fixture directory (not a predictable /tmp path)
 printf 'NockGuard read succeeded\n' > "$QS/hello.txt"
@@ -43,7 +46,10 @@ Ask your MCP client to call `read_file` with `{"path":"<QS>/hello.txt"}`: it sho
 
 ```bash
 nockguard verify --agent coder        # exit 0 and PROTECTED for the signed trail
+nockguard wall --agent coder          # open the Live Wall for coder's signed trail
 ```
+
+Until the Homebrew tap formula is updated to install both binaries at release time, Homebrew users who want `nockguard wall` should also run `go install github.com/nocktechnologies/nockguard/cmd/nockguard-wall@latest`.
 
 To exercise the blocked canary as well, run `python3 scripts/quickstart-acceptance.py` from a source checkout. This Linux CI test runs the commands above in an empty home with a local MCP stub using the filesystem server's tool names. It confirms both reads succeed, a direct `write_file` call is denied without creating a file, `verify` exits 0 with `PROTECTED`, and the signed trail records both allow and deny decisions. Denied tools are hidden from normal MCP tool discovery, so the test sends the canary call directly.
 
@@ -61,6 +67,7 @@ Or build from source:
 
 ```bash
 go install github.com/nocktechnologies/nockguard/cmd/nockguard@latest
+go install github.com/nocktechnologies/nockguard/cmd/nockguard-wall@latest # companion binary used by `nockguard wall`
 ```
 
 ## Writing a policy
@@ -335,15 +342,17 @@ Extraction is conservative: only known tools and typed parameter patterns are re
 The audit trail is a file; the **Live Wall** makes it something you watch. `nockguard-wall` tails the audit JSONL and streams each policy decision to a local browser dashboard in real time, color-coded by outcome — every tool call an agent attempted and exactly what the firewall did about it. It is the visible layer over NockGuard's invisible enforcement: visceral proof of the accountability moat.
 
 ```bash
-go run ./cmd/nockguard-wall                 # serves http://127.0.0.1:8787 (loopback = private)
-go run ./cmd/nockguard-wall --agent local-agent # watch this agent's signed audit trail
-go run ./cmd/nockguard-wall --demo          # synthesize a sample stream when there's no live traffic
-go run ./cmd/nockguard-wall --audit <path>  # point at a specific audit JSONL
+nockguard wall                              # serves http://127.0.0.1:8787 (loopback = private)
+nockguard wall --agent coder               # watch this agent's signed audit trail
+nockguard wall --demo                      # synthesize a sample stream when there's no live traffic
+nockguard wall --audit <path>              # point at a specific audit JSONL
 ```
 
-It binds to loopback by default (private), embeds its own page (single binary, no assets to ship), and replays the existing audit record on open so the wall is populated immediately, then streams new decisions as they land. The wall reads only the recorded decision (agent, tool, outcome, reason) — never raw tool-call parameters, consistent with the audit trail's no-payload rule.
+`nockguard wall` starts the companion `nockguard-wall` binary and passes its flags through, including `--verify-ed25519-pub-env`, `--verify-key-env`, and the opt-in `--proof-signing-key-env`. The wall reports the public-key source from `/verify`; `PROTECTED` requires a non-empty trail whose signed checkpoint covers every entry. Empty trails report `NO_ROWS`, and signed entries beyond the checkpoint report `UNANCHORED`. Receipt signing still requires the separate private-key flag.
 
-With `--agent`, the wall reads `~/.nockguard/logs/<agent>.audit.jsonl` and verifies it using `NOCKGUARD_AGENT_<AGENT>_ED25519_PUB`. Explicit `--audit` and `--verify-ed25519-pub-env` values take precedence.
+The Wall binds to loopback by default (private), embeds its own page (no assets to ship), and replays the existing audit record on open so it is populated immediately, then streams new decisions as they land. It reads only the recorded decision (agent, tool, outcome, reason) — never raw tool-call parameters, consistent with the audit trail's no-payload rule.
+
+With `--agent`, the wall reads `~/.nockguard/logs/<agent>.audit.jsonl` and resolves the public key from `NOCKGUARD_AGENT_<AGENT>_ED25519_PUB`, then `~/.nockguard/keys/<agent>.pub`. Explicit `--audit` and `--verify-ed25519-pub-env` values take precedence.
 
 For an Ed25519-signed incident window, start the Wall with
 `--proof-signing-key-env <ENV>` pointing at the trail's private key, click
@@ -423,7 +432,7 @@ Same brand, same tap, independent products. Use one or both.
 
 ## What is free, and what is a service
 
-Everything in this repository is MIT and fully functional. There is no license key, no feature flag that phones home, and nothing in the binary that stops working after a date. The on-ramp — `proxy`, `verify` / `audit verify`, `policy propose` / `shadow-report`, `init`, `keygen`, `selftest`, and the Live Wall you run yourself with `go run ./cmd/nockguard-wall` — is the product, and it is yours.
+Everything in this repository is MIT and fully functional. There is no license key, no feature flag that phones home, and nothing in the binary that stops working after a date. The on-ramp — `proxy`, `verify` / `audit verify`, `policy propose` / `shadow-report`, `init`, `keygen`, `selftest`, and the Live Wall you run yourself with `nockguard wall` — is the product, and it is yours.
 
 What Nock Technologies sells is the part that only makes sense as a **service or at fleet scale**: a hosted Live Wall across many agents and machines, compliance evidence packs generated from your signed trails (`nockguard evidence` today; hosted generation and retention later), fleet-wide trust and egress enforcement, and support. If you never need those, you never need us — and your trail still verifies with the public key alone.
 

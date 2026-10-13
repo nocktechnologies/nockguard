@@ -83,6 +83,11 @@ func runCLI(args []string) int {
 		printUsage()
 		return 0
 	}
+	// The Wall is a companion binary shipped beside nockguard. Dispatch it
+	// before handling --help so Wall flags, including --help, pass through.
+	if args[0] == "wall" {
+		return runWall(args[1:])
+	}
 	for _, arg := range args {
 		if arg == "--help" || arg == "-h" {
 			printUsage()
@@ -1414,6 +1419,7 @@ Usage:
   nockguard trust show --agent <name>
   nockguard audit verify ...   # same as 'nockguard verify' (the audit-namespaced form)
   nockguard evidence --framework soc2 (--agent <name> | --ed25519-pub-env <ENV> | --key-env <ENV>) [--audit <path>] [--audit-dir <dir>] [--from <date>] [--to <date>] [--format html|json] [-o <file>]
+  nockguard wall [Wall flags...]  (starts the nockguard-wall companion)
   nockguard approvals (list | approve <id> | deny <id> | prune)  (decide calls held by NOCKGUARD_APPROVER=local; prune removes dead sockets)
   nockguard keygen [--agent <name>] [--force] [--print-env]
   nockguard version
