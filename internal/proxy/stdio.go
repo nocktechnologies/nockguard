@@ -671,13 +671,10 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 					continue
 				}
 			}
-			if _, writeErr := fmt.Fprintf(w, "%s\n", d.forward); writeErr != nil {
-				return writeErr
-			}
-			// Store pending data (state update + audits) to be processed after verifying the JSON-RPC response.
-			// Notifications (no id) have no response to correlate, so don't store them.
+			// Register response state before the write: an upstream may reply while
+			// Write is still returning, and the response reader must be able to
+			// correlate it immediately.
 			if d.forwardID != nil {
-				// Copy refs to avoid storing pointer to local variable in decideToolCall
 				var refsCopy extract.References
 				if d.refsForState != nil {
 					refsCopy = *d.refsForState
@@ -685,8 +682,24 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				pending.Store(string(d.forwardID), pendingCard{
 					tool:     d.toolForState,
 					refs:     refsCopy,
-					auditSeq: seq, // sequence number for audit ordering
+					auditSeq: seq,
 				})
+			}
+			if _, writeErr := fmt.Fprintf(w, "%s\n", d.forward); writeErr != nil {
+				id := d.forwardID
+				if id == nil {
+					id = d.toolsListID
+				}
+				resolveSeq := true
+				if id != nil {
+					_, resolveSeq = pending.LoadAndDelete(string(id))
+				}
+				// If the response path already took the entry, it owns resolving
+				// the sequence after committing any response-backed state.
+				if resolveSeq {
+					p.resolveAudit(seq)
+				}
+				return writeErr
 			}
 		}
 		// Only resolve immediately for rejected calls, non-forwarded calls, or forwarded notifications (no id).

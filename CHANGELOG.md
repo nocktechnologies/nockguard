@@ -7,6 +7,9 @@ All notable changes to NockGuard are documented here.
 ### Changed
 - `tools/list` now keeps tools with an `Ask` verdict visible while holding their calls for local or Telegram approval; denied tools stay hidden. Approved calls record their final `allow` audit row before dispatch.
 
+### Fixed
+- The stdio proxy registers response correlation before writing a request upstream, and clears pending state and resolves its audit sequence when the write fails.
+
 ### Documentation
 - Document Homebrew and Linux archive installation, including the Live Wall.
 - Linux install verifies the release archive against SHA256SUMS before installing.
