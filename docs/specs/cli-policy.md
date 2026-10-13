@@ -56,7 +56,7 @@ invalid policy values must not silently grant access.
 
 | Command | `0` | `1` | `2` |
 | --- | --- | --- | --- |
-| `verify --agent` / `--all` | Requested trails verified | Setup/key error, unverifiable trail or no trails | Trail read or integrity failure after key selection |
+| `verify --agent` / `--all` | Every requested trail is non-empty and fully checkpointed (`PROTECTED`) | Setup/key error, `NO_ROWS`, `UNANCHORED`, unverifiable trail or no trails | Trail read or integrity failure after key selection |
 | `verify --export` | Export proof verified (completeness stated separately) | Setup, key or file-read error | Invalid signed proof |
 | `verify --session` | `PROTECTED` | `UNVERIFIABLE`, `UNSIGNED`, `NO_ROWS`, `UNANCHORED` or setup error | `TAMPERED` |
 | `selftest` | At least one check passed, none failed | Inconclusive setup or all checks skipped | Enforcement gap |

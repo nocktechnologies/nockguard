@@ -285,8 +285,8 @@ func VerifyGuardSnapshot(trail, hwm []byte, pub ed25519.PublicKey, session strin
 
 func checkGuardWhole(trail, hwm []byte, pub ed25519.PublicKey) ChainResult {
 	c := ChainResult{KeyID: KeyFingerprint(pub)}
-	n, verr := audit.VerifyEd25519Bytes(trail, hwm, pub)
-	c.EntriesVerified = n
+	verification, verr := audit.VerifyEd25519BytesReport(trail, hwm, pub)
+	c.EntriesVerified = verification.EntriesVerified
 	if verr != nil {
 		c.Reason = verr.Error()
 		if errors.Is(verr, audit.ErrTamper) {
@@ -296,33 +296,22 @@ func checkGuardWhole(trail, hwm []byte, pub ed25519.PublicKey) ChainResult {
 		}
 		return c
 	}
-	// The verifier already checked the .hwm signature, rejected a checkpoint
-	// count above the entries present (truncation), and matched the entry at
-	// the checkpoint's count. The tail is verified ONLY when the checkpoint
-	// covers every entry in the snapshot: entries past it (a writer mid-append,
-	// or a crash before the .hwm update) are signed but unanchored, so rows
-	// removed from that suffix could not be detected.
-	switch {
-	case hwm == nil || n == 0:
-		c.TailReason = "no signed .hwm sidecar: rows removed from the tail cannot be detected"
-	default:
-		var mark struct {
-			Count int `json:"count"`
+	// The shared audit classifier distinguishes an empty trail from a verified
+	// prefix whose signed checkpoint does not cover the current tail.
+	switch audit.ClassifyTrail(verification) {
+	case audit.TrailProtected:
+		c.TailVerified = true
+	case audit.TrailNoRows:
+		c.TailReason = "audit trail is empty; there are no entries to verify"
+	case audit.TrailUnanchored:
+		if !verification.CheckpointPresent {
+			c.TailReason = "no signed .hwm sidecar: rows removed from the tail cannot be detected"
+		} else {
+			c.TailReason = fmt.Sprintf("%d entries beyond the signed checkpoint (count %d); re-run once the writer is idle", verification.EntriesVerified-verification.CheckpointCount, verification.CheckpointCount)
 		}
-		if err := json.Unmarshal(bytes.TrimSpace(hwm), &mark); err != nil {
-			c.Verdict, c.Reason = VerdictUnverifiable, fmt.Sprintf("guard .hwm: %v", err)
-			return c
-		}
-		switch {
-		case mark.Count == n:
-			c.TailVerified = true
-		case mark.Count < n:
-			c.TailReason = fmt.Sprintf("%d entries beyond the signed checkpoint (count %d); re-run once the writer is idle", n-mark.Count, mark.Count)
-		default:
-			// Unreachable: the verifier reports this as truncation. Never pass it.
-			c.Verdict, c.Reason = VerdictTampered, fmt.Sprintf("signed checkpoint count %d exceeds the %d entries in the trail", mark.Count, n)
-			return c
-		}
+	case audit.TrailTampered:
+		c.Verdict = VerdictTampered
+		c.Reason = fmt.Sprintf("signed checkpoint count %d exceeds the %d entries in the trail", verification.CheckpointCount, verification.EntriesVerified)
 	}
 	return c
 }

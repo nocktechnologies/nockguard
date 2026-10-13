@@ -1018,30 +1018,46 @@ var scanBufferCap = MaxTrailLineBytes
 // (errors.Is(err, ErrTamper)); a read/scan failure that stopped the walk early is
 // a *ScanError (errors.Is(err, ErrScan)). Messages are unchanged.
 func Verify(path string, key []byte) (int, error) {
+	result, err := VerifyReport(path, key)
+	return result.EntriesVerified, err
+}
+
+// VerifyReport is Verify plus the checkpoint metadata read for that same
+// verification. Verify retains its prefix-count contract for writer recovery.
+func VerifyReport(path string, key []byte) (VerificationResult, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return VerificationResult{}, err
 	}
 	defer f.Close()
 	hwm, herr := readHighWaterMark(path + hwmSuffix)
 	if herr != nil {
-		return 0, herr
+		return VerificationResult{}, herr
 	}
-	return verifyHMACStream(f, hwm, key)
+	n, err := verifyHMACStream(f, hwm, key)
+	return verificationResult(n, hwm), err
 }
 
 // VerifyBytes is Verify over an immutable in-memory snapshot. trail holds the
 // audit bytes and hwm the bytes of its .hwm sidecar (nil when absent).
 func VerifyBytes(trail, hwm, key []byte) (int, error) {
+	result, err := VerifyBytesReport(trail, hwm, key)
+	return result.EntriesVerified, err
+}
+
+// VerifyBytesReport is VerifyBytes plus the checkpoint metadata from the same
+// immutable in-memory snapshot.
+func VerifyBytesReport(trail, hwm, key []byte) (VerificationResult, error) {
 	var mark *highWaterMark
 	if hwm != nil {
 		m, err := parseHighWaterMark(hwm, "(snapshot)")
 		if err != nil {
-			return 0, err
+			return VerificationResult{}, err
 		}
 		mark = m
 	}
-	return verifyHMACStream(bytes.NewReader(trail), mark, key)
+	n, err := verifyHMACStream(bytes.NewReader(trail), mark, key)
+	return verificationResult(n, mark), err
 }
 
 func verifyHMACStream(r io.Reader, hwm *highWaterMark, key []byte) (int, error) {
@@ -1107,16 +1123,24 @@ func verifyHMACStream(r io.Reader, hwm *highWaterMark, key []byte) (int, error) 
 // public key cannot produce signatures, a passing verification is proof the
 // holder of the matching private key signed every entry: non-repudiation.
 func VerifyEd25519(path string, pub ed25519.PublicKey) (int, error) {
+	result, err := VerifyEd25519Report(path, pub)
+	return result.EntriesVerified, err
+}
+
+// VerifyEd25519Report is VerifyEd25519 plus the checkpoint metadata read for
+// that same verification. VerifyEd25519 retains its prefix-count contract.
+func VerifyEd25519Report(path string, pub ed25519.PublicKey) (VerificationResult, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return VerificationResult{}, err
 	}
 	defer f.Close()
 	hwm, herr := readHighWaterMark(path + hwmSuffix)
 	if herr != nil {
-		return 0, herr
+		return VerificationResult{}, herr
 	}
-	return verifyEd25519Stream(f, hwm, pub)
+	n, err := verifyEd25519Stream(f, hwm, pub)
+	return verificationResult(n, hwm), err
 }
 
 // VerifyEd25519Bytes is VerifyEd25519 over an in-memory snapshot: trail holds
@@ -1126,15 +1150,23 @@ func VerifyEd25519(path string, pub ed25519.PublicKey) (int, error) {
 // here, so nothing can be swapped between verification and use. Checks and
 // error classification are identical to VerifyEd25519.
 func VerifyEd25519Bytes(trail, hwm []byte, pub ed25519.PublicKey) (int, error) {
+	result, err := VerifyEd25519BytesReport(trail, hwm, pub)
+	return result.EntriesVerified, err
+}
+
+// VerifyEd25519BytesReport is VerifyEd25519Bytes plus the checkpoint metadata
+// from the same immutable in-memory snapshot.
+func VerifyEd25519BytesReport(trail, hwm []byte, pub ed25519.PublicKey) (VerificationResult, error) {
 	var mark *highWaterMark
 	if hwm != nil {
 		m, err := parseHighWaterMark(hwm, "(snapshot)")
 		if err != nil {
-			return 0, err
+			return VerificationResult{}, err
 		}
 		mark = m
 	}
-	return verifyEd25519Stream(bytes.NewReader(trail), mark, pub)
+	n, err := verifyEd25519Stream(bytes.NewReader(trail), mark, pub)
+	return verificationResult(n, mark), err
 }
 
 // verifyEd25519Stream is the shared Ed25519 chain walk plus high-water-mark

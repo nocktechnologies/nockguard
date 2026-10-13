@@ -695,13 +695,14 @@ func parseCommand(cmd string) []string {
 //     with an optional `--audit <path>` override. Backward-compatible with
 //     the pre-Phase-5 flow.
 //
-// Exit 0 = chain intact, 2 = tampering detected, 1 = usage/setup error.
+// Exit 0 = non-empty trail fully checkpointed, 2 = tampering/read failure,
+// 1 = setup error, empty trail, or an incomplete checkpoint.
 // verifyAllAgents verifies EVERY per-agent Ed25519 trail (<agent>.audit.jsonl)
 // in the audit dir — the "prove the whole fleet is accountable in one command"
 // path behind `nockguard verify --all`. Each trail is checked with that agent's
-// own public key (NOCKGUARD_AGENT_<NAME>_ED25519_PUB). Exit 0 = all intact,
-// 2 = any tampered, 1 = any trail it could not verify (missing/invalid key) or
-// no trails found at all (verdict NO_TRAILS: nothing to verify is not protected).
+// own public key (NOCKGUARD_AGENT_<NAME>_ED25519_PUB). Exit 0 = every trail is
+// non-empty and fully checkpointed, 2 = any tampered, 1 = any missing/invalid
+// key, empty trail, incomplete checkpoint, or no trails found.
 type verifyResult struct {
 	Verdict         string `json:"verdict"`
 	AuditPath       string `json:"audit_path,omitempty"`
@@ -717,6 +718,8 @@ type verifyAllResult struct {
 	Intact       int                 `json:"intact"`
 	Tampered     int                 `json:"tampered"`
 	Unverifiable int                 `json:"unverifiable"`
+	NoRows       int                 `json:"no_rows"`
+	Unanchored   int                 `json:"unanchored"`
 	Trails       []verifyTrailResult `json:"trails"`
 }
 
@@ -763,7 +766,7 @@ func verifyAllAgents(auditDir string, jsonOutput bool) int {
 		}
 		return 1
 	}
-	var intact, tampered, unverifiable int
+	var intact, tampered, unverifiable, noRows, unanchored int
 	results := make([]verifyTrailResult, 0, len(matches))
 	for _, path := range matches {
 		agent := strings.TrimSuffix(filepath.Base(path), suffix)
@@ -795,7 +798,8 @@ func verifyAllAgents(auditDir string, jsonOutput bool) int {
 			unverifiable++
 			continue
 		}
-		n, verr := audit.VerifyEd25519(path, pub)
+		verification, verr := audit.VerifyEd25519Report(path, pub)
+		n := verification.EntriesVerified
 		if verr != nil {
 			if !jsonOutput {
 				fmt.Printf("  [TAMPER] %-18s %v\n", agent, verr)
@@ -804,17 +808,47 @@ func verifyAllAgents(auditDir string, jsonOutput bool) int {
 			tampered++
 			continue
 		}
-		if !jsonOutput {
-			fmt.Printf("  [OK]     %-18s %d entries, chain intact (public key: %s)\n", agent, n, keySource)
+		status := audit.ClassifyTrail(verification)
+		result := verifyTrailResult{Agent: agent, Path: path, Status: string(status), PubKeySource: keySource, EntriesVerified: n}
+		switch status {
+		case audit.TrailProtected:
+			if !jsonOutput {
+				fmt.Printf("  [OK]     %-18s %d entries, fully checkpointed (public key: %s)\n", agent, n, keySource)
+			}
+			intact++
+		case audit.TrailNoRows:
+			msg := "audit trail is empty; there are no entries to verify"
+			if !jsonOutput {
+				fmt.Printf("  [NO ROWS] %-18s %s\n", agent, msg)
+			}
+			result.Error = msg
+			noRows++
+		case audit.TrailUnanchored:
+			msg := fmt.Sprintf("signed checkpoint covers %d of %d entries; retry once the writer is idle", verification.CheckpointCount, n)
+			if !jsonOutput {
+				fmt.Printf("  [UNANCHORED] %-18s %s\n", agent, msg)
+			}
+			result.Error = msg
+			unanchored++
+		case audit.TrailTampered:
+			msg := fmt.Sprintf("signed checkpoint count %d exceeds the %d verified entries", verification.CheckpointCount, n)
+			if !jsonOutput {
+				fmt.Printf("  [TAMPER] %-18s %s\n", agent, msg)
+			}
+			result.Error = msg
+			tampered++
 		}
-		results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: "PROTECTED", PubKeySource: keySource, EntriesVerified: n})
-		intact++
+		results = append(results, result)
 	}
 	verdict := "PROTECTED"
 	if tampered > 0 {
 		verdict = "TAMPERED"
 	} else if unverifiable > 0 {
 		verdict = "UNVERIFIABLE"
+	} else if noRows > 0 {
+		verdict = string(audit.TrailNoRows)
+	} else if unanchored > 0 {
+		verdict = string(audit.TrailUnanchored)
 	}
 	if jsonOutput {
 		writeJSON(verifyAllResult{
@@ -824,16 +858,18 @@ func verifyAllAgents(auditDir string, jsonOutput bool) int {
 			Intact:       intact,
 			Tampered:     tampered,
 			Unverifiable: unverifiable,
+			NoRows:       noRows,
+			Unanchored:   unanchored,
 			Trails:       results,
 		})
 	} else {
-		fmt.Printf("\n%d trails in %s — %d intact, %d tampered, %d unverifiable\n", len(matches), baseDir, intact, tampered, unverifiable)
+		fmt.Printf("\n%d trails in %s — %d protected, %d tampered, %d unverifiable, %d no rows, %d unanchored\n", len(matches), baseDir, intact, tampered, unverifiable, noRows, unanchored)
 		fmt.Printf("VERDICT: %s\n", verdict)
 	}
 	switch {
 	case tampered > 0:
 		return 2
-	case unverifiable > 0:
+	case unverifiable > 0 || noRows > 0 || unanchored > 0:
 		return 1
 	default:
 		return 0
@@ -969,9 +1005,9 @@ func runAudit(args []string) int {
 	}
 
 	var (
-		n         int
-		err       error
-		keySource string
+		verification audit.VerificationResult
+		err          error
+		keySource    string
 	)
 	if pubEnv != "" {
 		pubHex, src, kerr := requirePubHex(pubEnv, agentName)
@@ -985,15 +1021,16 @@ func runAudit(args []string) int {
 			fmt.Fprintf(os.Stderr, "error: %v\n", perr)
 			return 1
 		}
-		n, err = audit.VerifyEd25519(auditPath, pub)
+		verification, err = audit.VerifyEd25519Report(auditPath, pub)
 	} else {
 		key := os.Getenv(keyEnv)
 		if key == "" {
 			fmt.Fprintf(os.Stderr, "error: %s is not set in the environment\n", keyEnv)
 			return 1
 		}
-		n, err = audit.Verify(auditPath, []byte(key))
+		verification, err = audit.VerifyReport(auditPath, []byte(key))
 	}
+	n := verification.EntriesVerified
 
 	if err != nil {
 		if jsonOutput {
@@ -1003,14 +1040,34 @@ func runAudit(args []string) int {
 		}
 		return 2
 	}
+	verdict := audit.ClassifyTrail(verification)
+	if verdict != audit.TrailProtected {
+		msg := ""
+		exitCode := 1
+		switch verdict {
+		case audit.TrailNoRows:
+			msg = "audit trail is empty; there are no entries to verify"
+		case audit.TrailUnanchored:
+			msg = fmt.Sprintf("signed checkpoint covers %d of %d entries; retry once the writer is idle", verification.CheckpointCount, n)
+		case audit.TrailTampered:
+			msg = fmt.Sprintf("signed checkpoint count %d exceeds the %d verified entries", verification.CheckpointCount, n)
+			exitCode = 2
+		}
+		if jsonOutput {
+			writeJSON(verifyResult{Verdict: string(verdict), AuditPath: auditPath, PubKeySource: keySource, EntriesVerified: n, Error: msg})
+		} else {
+			fmt.Printf("VERDICT: %s — %s\n", verdict, msg)
+		}
+		return exitCode
+	}
 	if jsonOutput {
-		writeJSON(verifyResult{Verdict: "PROTECTED", AuditPath: auditPath, PubKeySource: keySource, EntriesVerified: n})
+		writeJSON(verifyResult{Verdict: string(audit.TrailProtected), AuditPath: auditPath, PubKeySource: keySource, EntriesVerified: n})
 	} else {
 		fmt.Printf("OK — %d entries verified, hash chain intact: %s\n", n, auditPath)
 		if keySource != "" {
 			fmt.Printf("public key: %s\n", keySource)
 		}
-		fmt.Println("VERDICT: PROTECTED")
+		fmt.Printf("VERDICT: %s\n", audit.TrailProtected)
 	}
 	return 0
 }

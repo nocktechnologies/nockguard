@@ -148,33 +148,31 @@ func (v *verifier) verifySnapshot(trail, hwm []byte, now string) verifyReport {
 		}
 	}
 	var (
-		n   int
-		err error
+		verification audit.VerificationResult
+		err          error
 	)
 	switch v.mode {
 	case modeEd25519:
-		n, err = audit.VerifyEd25519Bytes(trail, hwm, v.pub)
+		verification, err = audit.VerifyEd25519BytesReport(trail, hwm, v.pub)
 	default:
-		n, err = audit.VerifyBytes(trail, hwm, v.key)
+		verification, err = audit.VerifyBytesReport(trail, hwm, v.key)
 	}
+	n := verification.EntriesVerified
 	rep := classifyVerifyResult(n, err, now)
 	if err == nil {
-		switch {
-		case n == 0:
+		verdict := audit.ClassifyTrail(verification)
+		rep.Verdict = string(verdict)
+		switch verdict {
+		case audit.TrailNoRows:
 			rep.Status = statusNoRows
-			rep.Verdict = "NO_ROWS"
 			rep.Detail = strptr("audit trail is empty; there are no entries to verify")
-		default:
-			var mark struct {
-				Count int `json:"count"`
-			}
-			if len(hwm) == 0 || json.Unmarshal(hwm, &mark) != nil || mark.Count != n {
-				rep.Status = statusUnanchored
-				rep.Verdict = "UNANCHORED"
-				rep.Detail = strptr("signed checkpoint does not cover the full audit trail; retry once the writer is idle")
-			} else {
-				rep.Verdict = "PROTECTED"
-			}
+		case audit.TrailUnanchored:
+			rep.Status = statusUnanchored
+			rep.Detail = strptr(fmt.Sprintf("signed checkpoint covers %d of %d entries; retry once the writer is idle", verification.CheckpointCount, n))
+		case audit.TrailTampered:
+			rep.ChainIntact = boolptr(false)
+			rep.Status = statusTampered
+			rep.Detail = strptr(fmt.Sprintf("signed checkpoint count %d exceeds the %d entries in the trail", verification.CheckpointCount, n))
 		}
 	}
 	rep.PublicKeySource = v.pubSource

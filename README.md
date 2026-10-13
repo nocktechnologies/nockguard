@@ -159,11 +159,13 @@ Rate limiting and spend caps are opt-in and independent — set one, both, or ne
 An Ed25519-signed audit trail can be checked for signature and hash-chain integrity **offline** with only the public key:
 
 ```bash
-nockguard verify --agent coder    # one agent's trail (exit 0 = verified, 2 = read or integrity failure)
+nockguard verify --agent coder    # one agent's trail (exit 0 = PROTECTED; 1 = NO_ROWS/UNANCHORED/setup; 2 = tampered/read failure)
 nockguard verify --all          # check every per-agent trail found in the audit directory
 ```
 
-`--all` scans the audit dir for every `<agent>.audit.jsonl`, verifies each with that agent's own public key, and prints a per-agent summary (exit 0 = all intact, 2 = any tampered, 1 = any it could not verify). An audit dir with **zero** trails is not "protected": there is nothing to verify, so `--all` prints `VERDICT: NO_TRAILS` and exits 1. That command replays the hash chain and signatures, detecting edits, reordering, and truncation against the retained signed checkpoint. It cannot distinguish the original writer from another holder of the private key or detect rollback of both trail and checkpoint without an external anchor. `verify` is the first-class form of `audit verify` (below), which documents HMAC vs Ed25519 signing, per-agent keys, and the compliance evidence packs.
+`PROTECTED` requires a non-empty trail whose signed checkpoint covers every entry. An empty trail reports `NO_ROWS` and exits 1. A valid signed suffix beyond the checkpoint reports `UNANCHORED` and exits 1; retry after the writer is idle. The low-level verifier still accepts a cryptographically valid prefix so writer recovery can inspect it, but the CLI does not call that trail protected.
+
+`--all` scans the audit dir for every `<agent>.audit.jsonl`, verifies each with that agent's own public key, and prints a per-agent verdict (exit 0 = every trail is `PROTECTED`; exit 2 = any tampered; exit 1 = any missing/invalid key, `NO_ROWS`, `UNANCHORED`, or no trails found). An audit dir with **zero** trails prints `VERDICT: NO_TRAILS` and exits 1. Verification detects edits, reordering, and truncation against the retained signed checkpoint. It cannot distinguish the original writer from another holder of the private key or detect rollback of both trail and checkpoint without an external anchor. `verify` is the first-class form of `audit verify` (below), which documents HMAC vs Ed25519 signing, per-agent keys, and the compliance evidence packs.
 
 ### One verdict for a session across NockGuard and NockLock
 

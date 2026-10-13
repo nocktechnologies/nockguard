@@ -273,6 +273,98 @@ func TestVerifyAllAgentsExitCodes(t *testing.T) {
 	})
 }
 
+func TestVerifyCommandRequiresNonEmptyFullyCheckpointedTrail(t *testing.T) {
+	tests := []struct {
+		name           string
+		rows           int
+		checkpointRows int
+		wantVerdict    string
+		wantEntries    int
+	}{
+		{name: "empty", rows: 0, wantVerdict: "NO_ROWS"},
+		{name: "checkpoint behind tail", rows: 21, checkpointRows: 19, wantVerdict: "UNANCHORED", wantEntries: 21},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path, pubHex := writeEd25519TrailWithRows(t, dir, "kit", tt.rows, tt.checkpointRows)
+			t.Setenv(policy.AgentPubKeyEnvName("kit"), pubHex)
+
+			code, stdout, stderr := runCommandForTest(t, "verify", "--agent", "kit", "--audit-dir", dir, "--json")
+			if code != 1 {
+				t.Fatalf("exit code = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+			}
+			var got verifyResult
+			if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+				t.Fatalf("stdout is not verifyResult JSON: %v\n%s", err, stdout)
+			}
+			if got.Verdict != tt.wantVerdict {
+				t.Fatalf("verdict = %q, want %q: %+v", got.Verdict, tt.wantVerdict, got)
+			}
+			if got.EntriesVerified != tt.wantEntries {
+				t.Fatalf("entries_verified = %d, want %d", got.EntriesVerified, tt.wantEntries)
+			}
+			if got.Error == "" {
+				t.Fatalf("missing explanation for %s", got.Verdict)
+			}
+			if tt.wantVerdict == "UNANCHORED" && !strings.Contains(got.Error, "19 of 21 entries") {
+				t.Fatalf("unanchored error = %q, want checkpoint coverage 19 of 21", got.Error)
+			}
+			if got.AuditPath != path {
+				t.Fatalf("audit_path = %q, want %q", got.AuditPath, path)
+			}
+			if tt.checkpointRows > 0 {
+				pub, err := audit.PublicKeyFromHex(pubHex)
+				if err != nil {
+					t.Fatal(err)
+				}
+				n, err := audit.VerifyEd25519(path, pub)
+				if err != nil || n != tt.wantEntries {
+					t.Fatalf("low-level prefix verifier = (%d, %v), want (%d, nil)", n, err, tt.wantEntries)
+				}
+			}
+		})
+	}
+}
+
+func TestVerifyAllReportsEmptyAndUnanchoredPerTrail(t *testing.T) {
+	tests := []struct {
+		name        string
+		rows        int
+		checkpoint  int
+		wantStatus  string
+		wantVerdict string
+	}{
+		{name: "empty", rows: 0, wantStatus: "NO_ROWS", wantVerdict: "NO_ROWS"},
+		{name: "checkpoint behind tail", rows: 21, checkpoint: 19, wantStatus: "UNANCHORED", wantVerdict: "UNANCHORED"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			_, pubHex := writeEd25519TrailWithRows(t, dir, "kit", tt.rows, tt.checkpoint)
+			t.Setenv(policy.AgentPubKeyEnvName("kit"), pubHex)
+
+			code, stdout, stderr := runCommandForTest(t, "verify", "--all", "--audit-dir", dir, "--json")
+			if code != 1 {
+				t.Fatalf("exit code = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+			}
+			var got verifyAllResult
+			if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+				t.Fatalf("stdout is not verifyAllResult JSON: %v\n%s", err, stdout)
+			}
+			if got.Verdict != tt.wantVerdict || len(got.Trails) != 1 || got.Trails[0].Status != tt.wantStatus {
+				t.Fatalf("verify --all result = %+v, want verdict/status %s", got, tt.wantStatus)
+			}
+			if tt.wantStatus == "NO_ROWS" && got.NoRows != 1 {
+				t.Fatalf("no_rows = %d, want 1", got.NoRows)
+			}
+			if tt.wantStatus == "UNANCHORED" && got.Unanchored != 1 {
+				t.Fatalf("unanchored = %d, want 1", got.Unanchored)
+			}
+		})
+	}
+}
+
 // Zero audit trails means there is nothing to verify. That must never read as
 // PROTECTED: an empty (or wrong) audit dir is the absence of evidence, and a
 // verifier that reports it as clean is a silent success.
@@ -695,6 +787,41 @@ func writeEd25519Trail(t *testing.T, dir, agent string) (string, string) {
 	}
 	if err := a.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+	return path, hex.EncodeToString(pub)
+}
+
+func writeEd25519TrailWithRows(t *testing.T, dir, agent string, rows, checkpointRows int) (string, string) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	basePath := filepath.Join(dir, filepath.Base(policy.DefaultAuditPath))
+	path := policy.AgentAuditPath(basePath, agent)
+	a, err := audit.New(path, audit.WithEd25519Key(priv))
+	if err != nil {
+		t.Fatalf("audit.New: %v", err)
+	}
+	var olderCheckpoint []byte
+	for i := 0; i < rows; i++ {
+		if err := a.Record(audit.Event{Agent: agent, Tool: "Read", Decision: "allow"}); err != nil {
+			t.Fatalf("Record row %d: %v", i+1, err)
+		}
+		if i+1 == checkpointRows {
+			olderCheckpoint, err = os.ReadFile(path + ".hwm")
+			if err != nil {
+				t.Fatalf("read checkpoint at row %d: %v", i+1, err)
+			}
+		}
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if checkpointRows > 0 && checkpointRows < rows {
+		if err := os.WriteFile(path+".hwm", olderCheckpoint, 0o600); err != nil {
+			t.Fatalf("restore checkpoint at row %d: %v", checkpointRows, err)
+		}
 	}
 	return path, hex.EncodeToString(pub)
 }
