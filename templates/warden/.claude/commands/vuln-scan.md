@@ -151,9 +151,11 @@ Interpret what you find:
 If signing is configured, verify chain integrity:
 
 ```bash
-TRAIL=~/.nockguard/logs/coder.audit.jsonl  # the trail under review
+# In a fresh shell, set these to the same trail selected in Step 3 and its signing agent.
+: "${TRAIL:?Set TRAIL to the exact trail under review in Step 3}"
+: "${AGENT:?Set AGENT to that trail's signing agent}"
 # Per-agent key written by `nockguard keygen --agent <name>` (reads ~/.nockguard/keys/<name>.pub)
-nockguard verify --agent coder
+nockguard verify --agent "$AGENT" --audit "$TRAIL"
 
 # Every per-agent trail in the audit directory
 nockguard verify --all

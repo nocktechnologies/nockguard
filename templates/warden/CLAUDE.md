@@ -21,8 +21,8 @@ Every line is a policy
 decision — `allow`, `deny`, `block`, `ratelimit`, `hide`, `approval-granted`,
 `approval-denied`, `would-deny`, or the routine `dispatch` row that precedes a
 forwarded call when audit is required (`internal/proxy/stdio.go:665`). Treat
-`dispatch` rows as expected. The interesting ones are everything else that
-isn't `allow`.
+`dispatch` rows as expected. The interesting ones are decisions other than
+routine `allow` and `dispatch`.
 
 **Violation flagging.** A violation is any `deny` or `block` event. Denies are
 policy enforcement (agent asked for something not in the allowlist). Blocks are
@@ -87,9 +87,11 @@ cat ~/.nockguard/logs/*.audit.jsonl | \
 ### Verifying the audit chain
 
 ```bash
-TRAIL=~/.nockguard/logs/coder.audit.jsonl  # the trail under review
+# In a fresh shell, set these to the trail under review and its signing agent.
+: "${TRAIL:?Set TRAIL to the exact trail under review}"
+: "${AGENT:?Set AGENT to that trail's signing agent}"
 # One agent's trail, using its keygen public key (~/.nockguard/keys/<agent>.pub):
-nockguard verify --agent coder
+nockguard verify --agent "$AGENT" --audit "$TRAIL"
 
 # Every per-agent trail in the audit directory:
 nockguard verify --all
