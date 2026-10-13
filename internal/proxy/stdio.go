@@ -523,10 +523,16 @@ func (p *StdioProxy) Run() error {
 	// upstream group instead of exiting immediately on SIGPIPE. Notify installs
 	// a caught handler, which exec resets in the upstream child.
 	brokenPipeSignals := make(chan os.Signal, 1)
-	signal.Notify(brokenPipeSignals, syscall.SIGPIPE)
-	defer signal.Stop(brokenPipeSignals)
+	if !signal.Ignored(syscall.SIGPIPE) {
+		signal.Notify(brokenPipeSignals, syscall.SIGPIPE)
+		defer signal.Stop(brokenPipeSignals)
+	}
 	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	for _, sig := range []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT} {
+		if !signal.Ignored(sig) {
+			signal.Notify(signals, sig)
+		}
+	}
 	defer signal.Stop(signals)
 
 	err = cmd.Start()
@@ -635,10 +641,12 @@ func (p *StdioProxy) Run() error {
 	// the group before waiting for the leader.
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	waitErr := reapLeader(cmd, observed)
-	select {
-	case e := <-outputErrCh:
-		return e
-	default:
+	if !outputTimedOut {
+		select {
+		case e := <-outputErrCh:
+			return e
+		default:
+		}
 	}
 	if waitErr != nil {
 		return fmt.Errorf("upstream exit: %w", waitErr)

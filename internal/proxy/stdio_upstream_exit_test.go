@@ -410,6 +410,54 @@ func TestProxySignalKillsGrandchild(t *testing.T) {
 	}
 }
 
+func TestProxyPreservesIgnoredSIGHUP(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "grandchild.pid")
+	script := filepath.Join(dir, "wait.sh")
+	body := "#!/bin/bash\nsleep 30 &\necho $! > " + pidFile + "\nwait\n"
+	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "-c", `trap '' HUP; exec "$@"`, "bash", buildBinary(t),
+		"proxy", "--upstream", "bash "+script, "--agent", "kit", "--policy", writePolicyFile(t))
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = io.Discard
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	defer in.Close()
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	var pid int
+	deadline := time.Now().Add(5 * time.Second)
+	for pid == 0 && time.Now().Before(deadline) {
+		if raw, err := os.ReadFile(pidFile); err == nil {
+			pid, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pid == 0 {
+		t.Fatal("upstream grandchild did not start")
+	}
+	if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-exited:
+		t.Fatalf("proxy exited despite inherited ignored SIGHUP: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	waitNonzeroExit(t, exited)
+	waitGrandchildGone(t, pid)
+}
+
 func TestProxyDoesNotTreatStoppedUpstreamAsExited(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "leader.pid")
