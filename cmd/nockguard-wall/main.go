@@ -275,12 +275,14 @@ func (b *broker) replayHistory(w io.Writer) {
 }
 
 // pulse is a filter-aware, at-a-glance aggregate of the audit window: how many
-// tool calls the firewall approved, blocked, or held, plus the busiest agents.
+// decisions the firewall approved, rejected, held, or recorded as other, plus
+// the busiest agents.
 // It mirrors what the Live Wall's pulse header shows so the same numbers are
 // available to scripts and headless monitors (GET /pulse), not just the browser.
 type pulse struct {
 	Approved    int `json:"approved"`    // allow
-	Blocked     int `json:"blocked"`     // deny | block | hide | ratelimit | unknown
+	Blocked     int `json:"blocked"`     // explicit rejections only
+	Other       int `json:"other"`       // readable audit-only or unfamiliar decisions
 	Pending     int `json:"pending"`     // held calls (none of the current decisions)
 	RateLimited int `json:"rateLimited"` // rejected by rate or spend limit; subset of Blocked
 	Total       int `json:"total"`
@@ -391,10 +393,13 @@ func computePulse(evs []event, q, decision, severity string, since, until *time.
 		if ev.Decision == "ratelimit" {
 			p.RateLimited++
 		}
-		if ev.Decision == "allow" {
+		switch {
+		case ev.Decision == "allow":
 			p.Approved++
-		} else if ev.Decision != decisionUnparseable { // unreadable, not a known block
+		case forward.IsRejection(ev.Decision):
 			p.Blocked++
+		case ev.Decision != decisionUnparseable:
+			p.Other++
 		}
 		switch forward.Severity(ev.Decision, ev.Reason) {
 		case forward.ThreatCritical:

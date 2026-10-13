@@ -173,9 +173,13 @@ func TestSeverityThreatTiers(t *testing.T) {
 		{"ratelimit", "rate limit: 60/min exceeded", ThreatLow},
 		{"ratelimit", "session spend cap reached", ThreatLow},
 		{"hide", "tool hidden from this agent", ThreatLow},
+		{"approval-denied", "denied by approver", ThreatHigh},
 
-		// unknown enforcement outcomes surface as high, never silently none.
-		{"quarantine", "some novel verdict", ThreatHigh},
+		// An unfamiliar decision does not establish that a call was refused.
+		{"quarantine", "some novel verdict", ThreatNone},
+		{"approval-granted", "approved", ThreatNone},
+		{"state-write", "recorded", ThreatNone},
+		{"dispatch", "forwarded", ThreatNone},
 	}
 	for _, c := range cases {
 		if got := Severity(c.decision, c.reason); got != c.want {

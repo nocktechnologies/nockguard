@@ -37,6 +37,10 @@ function wall() {
     },
     createElement() {
       const el = element();
+      Object.defineProperty(el, 'innerHTML', {
+        get() { return this.html ?? this.textContent; },
+        set(value) { this.html = value; },
+      });
       el.classList.owner = el;
       el.remove = el.removeSelf;
       return el;
@@ -50,8 +54,11 @@ function wall() {
   const decisions = document.getElementById('f-decision');
   decisions.options = ['', 'allow', 'deny', 'block', 'ratelimit', 'hide'].map(value => ({ value }));
   Object.defineProperty(decisions, 'value', {
-    get() { return this.selectedValue || ''; },
-    set(value) { this.selectedValue = this.options.some(o => o.value === value) ? value : ''; },
+    get() { return this.selectedValue ?? ''; },
+    set(value) {
+      this.selectedIndex = this.options.findIndex(o => o.value === value);
+      this.selectedValue = this.selectedIndex < 0 ? null : value;
+    },
   });
   const context = vm.createContext({
     document, window: {}, Date, URLSearchParams,
@@ -75,6 +82,21 @@ test('one unreadable row leaves the readable block count visible', () => {
   assert.equal(w.elements.get('c-caught').textContent, '—');
 });
 
+test('audit and unfamiliar decisions do not become rejections or change the catch rate', () => {
+  const w = wall();
+  vm.runInContext("render({decision:'allow'}); render({decision:'deny'})", w.context);
+  assert.equal(w.elements.get('c-caught').textContent, '50%');
+  vm.runInContext("render({decision:'would-deny'}); render({decision:'future-review'})", w.context);
+  assert.equal(w.elements.get('p-blocked').textContent, 1);
+  assert.equal(w.elements.get('p-approved').textContent, 1);
+  assert.equal(w.elements.get('p-other').textContent, 2);
+  assert.equal(w.elements.get('c-other').textContent, 2);
+  assert.equal(w.elements.get('c-rate').textContent, 0);
+  assert.equal(w.elements.get('c-caught').textContent, '50%');
+  assert.equal(w.elements.get('feed').children[0].dataset.decision, 'future-review');
+  assert.match(w.elements.get('feed').children[0].innerHTML, /future-review/);
+});
+
 test('unknown decision options stay within the retained window', () => {
   const w = wall();
   vm.runInContext('MAX_ROWS = 2', w.context);
@@ -87,6 +109,8 @@ test('unknown decision options stay within the retained window', () => {
     ['', 'allow', 'deny', 'block', 'ratelimit', 'hide', 'third', 'second']);
   vm.runInContext("render({decision:'fourth'})", w.context);
   assert.equal(w.decisions.value, '');
+  assert.equal(w.decisions.selectedIndex, 0);
+  assert.equal(w.elements.get('f-count').textContent, '');
   assert.deepEqual(w.decisions.options.map(o => o.value),
     ['', 'allow', 'deny', 'block', 'ratelimit', 'hide', 'fourth', 'third']);
 });

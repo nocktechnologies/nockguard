@@ -119,9 +119,9 @@ func TestComputePulse(t *testing.T) {
 }
 
 func TestRateLimitRejectedAndUnknownDecisionRetained(t *testing.T) {
-	got := computePulse([]event{{Decision: "allow"}, {Decision: "ratelimit"}, {Decision: "approval-denied"}}, "", "", "", nil, nil)
-	if got.Total != 3 || got.Approved != 1 || got.Blocked != 2 || got.RateLimited != 1 || got.Pending != 0 {
-		t.Fatalf("pulse = %+v, want one allow and two rejections including the rate limit", got)
+	got := computePulse([]event{{Decision: "allow"}, {Decision: "ratelimit"}, {Decision: "approval-denied"}, {Decision: "would-deny"}, {Decision: "future-review"}}, "", "", "", nil, nil)
+	if got.Total != 5 || got.Approved != 1 || got.Blocked != 2 || got.RateLimited != 1 || got.Other != 2 || got.Pending != 0 {
+		t.Fatalf("pulse = %+v, want one allow, two rejections, and two other decisions", got)
 	}
 }
 

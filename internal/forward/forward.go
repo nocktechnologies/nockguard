@@ -193,10 +193,20 @@ func severityFor(decision string) string {
 // a routine allowlist deny, instead of every non-allow reading flat as blocked.
 const (
 	ThreatCritical = "critical" // a block/deny whose reason smells of secret-exfil or destruction
-	ThreatHigh     = "high"     // other blocks/denies of consequence, and unknown enforcement
+	ThreatHigh     = "high"     // other explicit rejections of consequence
 	ThreatLow      = "low"      // routine allowlist denies, rate-limit holds, hidden tools
 	ThreatNone     = "none"     // allows, dry-run shadow would-denies, observe-mode audits — not a live catch
 )
+
+// IsRejection reports decisions that actually refused a call or hid a tool.
+// Audit-only and unfamiliar decisions do not establish that anything was refused.
+func IsRejection(decision string) bool {
+	switch decision {
+	case "deny", "block", "ratelimit", "hide", "approval-denied":
+		return true
+	}
+	return false
+}
 
 // Severity classifies a (decision, reason) pair into a threat tier. It is a PURE
 // function (no I/O, no state) so the forwarder and the Live Wall share one source
@@ -208,11 +218,7 @@ const (
 // — the built-in validate rule names (internal/validate) and the policy deny
 // reasons (internal/policy) — plus the wall's own demo phrasing.
 func Severity(decision, reason string) string {
-	switch decision {
-	// "observe" is the mcp-http bridge's per-call audit decision (observe-mode
-	// dogfood): nothing was blocked, so it is NOT a live catch — without this it
-	// falls through to ThreatHigh and floods the wall with routine MCP traffic.
-	case "allow", "would-deny", "observe", "":
+	if !IsRejection(decision) {
 		return ThreatNone
 	}
 	r := strings.ToLower(reason)
@@ -225,8 +231,7 @@ func Severity(decision, reason string) string {
 	if decision == "ratelimit" || decision == "hide" {
 		return ThreatLow
 	}
-	// Other blocks/denies of consequence — and any unknown enforcement outcome,
-	// which we surface as high rather than swallow (cf. the wall's bucket()).
+	// Other explicit rejections of consequence.
 	return ThreatHigh
 }
 
