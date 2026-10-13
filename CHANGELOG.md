@@ -9,7 +9,7 @@ All notable changes to NockGuard are documented here.
 - `verify --agent` now verifies an explicitly supplied `--audit` file instead of silently checking the agent's default trail.
 
 ### Changed
-- The Wall no longer scrolls horizontally on narrow screens (390 px): filters and tiles wrap, feed rows stack, and the evidence scope notes sit behind an "Evidence details" toggle at every width.
+- The Wall no longer scrolls horizontally on narrow screens (390 px): filters and tiles wrap, feed rows stack, and the evidence scope notes sit behind an "Evidence details" toggle on narrow screens (open by default on wide ones).
 - `tools/list` now keeps tools with an `Ask` verdict visible while holding their calls for local or Telegram approval; denied tools stay hidden. Approved calls record their final `allow` audit row before dispatch.
 - The Wall counts audit records, not calls, and says so: the header reads "records in view" and "threat records". `tools/list` hides now show as a separate "tools hidden" count and no longer count as rejected records, threats or toward the rejected share, so one rejected call no longer reads as 13 threats caught.
 

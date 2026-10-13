@@ -207,10 +207,11 @@
     .ptop { flex-wrap:wrap; }
     #feed { flex:none; min-height:50vh; overflow:visible; padding:10px 12px; }
     .row { grid-template-columns:auto minmax(0,1fr); gap:6px 10px; }
-    .row .tool, .row .verdict { grid-column:1 / -1; }
+    .row .tool, .row .reason, .row .verdict { grid-column:1 / -1; }
     .row .tool { white-space:normal; overflow-wrap:anywhere; }
     .row .verdict { justify-self:start; flex-wrap:wrap; }
-    .tamper .tamper-detail { display:none; }
+    .tamper { flex-wrap:wrap; }
+    .tamper .tamper-detail { margin-left:0; max-width:none; white-space:normal; flex-basis:100%; }
     .chainnote .chainnote-detail { margin-left:0; }
   }
 </style>
@@ -247,7 +248,7 @@
       <div><span class="label">Lock DB:</span> <span class="value" id="source-lock">loading…</span></div>
       <div><span class="label">Agent:</span> <span class="value" id="context-agent">loading…</span> · <span class="label">Session:</span> <span class="value" id="context-session">none observed</span></div>
       <div><span class="label">Verification:</span> <span class="value" id="verification-status">checking…</span> · <span class="label">last check:</span> <span class="value" id="verification-time">—</span></div>
-      <details class="scope"><summary>Evidence details</summary>
+      <details class="scope" id="evidence-details"><summary>Evidence details</summary>
       <div class="scope" id="export-scope">PROOF: signed Guard rows only when enabled; never Lock rows. CSV/JSON: Guard rows plus available Lock snapshot; Lock rows are marked verified only for protected sessions.</div>
       <div class="scope">Counts and pulse cover the same filtered view of the newest <span id="window-size">500</span> decisions. A blank source or unverified trail is not a zero-violation finding.</div>
       </details>
@@ -330,6 +331,8 @@
   let MAX_ROWS = 500;
   let demoMode = false;
   let recentSession = '';
+  // scope notes stay open on wide screens; collapsed behind a toggle on narrow ones
+  document.getElementById('evidence-details').open = matchMedia('(min-width:601px)').matches;
 
   fetch('/context', { cache:'no-store' }).then(r => r.json()).then(c => {
     MAX_ROWS = Number.isSafeInteger(c.window) && c.window > 0 ? Math.min(c.window, 500) : 500;
