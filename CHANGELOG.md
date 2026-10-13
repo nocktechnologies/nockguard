@@ -4,24 +4,36 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
-### Security
-- Local `proxy`, `mcp-http`, and `mcp-listen` tool calls now require a durable audit decision before forwarding when auditing is enabled. A failed write refuses the call and latches the writer failure. `status`/`doctor` and the Live Wall expose `audit failing: calls refused`.
+## [0.6.0] - 2026-10-13
 
 ### Breaking
-- Audit-enabled local proxy calls now fail closed on audit-write errors. Pass `--audit-best-effort` to explicitly retain best-effort forwarding; startup warns when it is set. Successful stdio and listener tool calls add a pre-forward `dispatch` audit row.
+- Local `nockguard proxy` and `mcp-listen` (and `mcp-http`) now refuse tool calls when a required audit write fails, whenever auditing is enabled. The failure latches: every later call is refused until the trail is fixed and reopened with a verified signing key. Pass `--audit-best-effort` to get the old forwarding back; startup prints a warning. `status`, `doctor` and the Wall show `audit failing: calls refused` while a failure is outstanding.
+- Successful stdio and listener tool calls now write a `dispatch` audit row before forwarding, so a trail has one more row per call than it did in 0.5.0. Anything that counts rows or matches decisions should expect `dispatch`.
+- `nockguard init` writes a different starter policy. The agent is `coder` (was `my-agent`), it allows `read_file` and `read_text_file` and denies `write_file`, `default` stays `mode: deny`, and `audit.enabled: true` is on (it was commented out). The old `ask` rules and wildcard allows are gone. Run `keygen --agent coder` before the first proxy run so the audit trail is signed. Existing policy files are not touched, and `init` still refuses to overwrite one without `--force`.
+- The Wall now reads the agent's public key with the same resolver as `nockguard verify --agent`: the `NOCKGUARD_AGENT_<NAME>_ED25519_PUB` variable first, then `~/.nockguard/keys/<name>.pub`. A Wall that relied on a key being absent will now verify against the file. `/verify` reports PROTECTED only for a non-empty trail that its signed checkpoint fully covers; empty, unconfigured, unavailable and unanchored trails are shown as such.
+- The Wall ships in the release archives and is started with `nockguard wall`, which launches `nockguard-wall` from beside the CLI or from `PATH` and forwards flags and signals. A standalone `nockguard-wall` install keeps working.
 
 ### Added
-- Local approver for `ask` verdicts, with no network: set `NOCKGUARD_APPROVER=local` and decide held calls with `nockguard approvals list|approve|deny` (`prune` removes dead sockets left by crashed proxies). Held calls wait on a `0600` unix socket in a `0700` `~/.nockguard/approvals/` (one `<pid>-<random>.sock` per proxy, removed on exit) and are audited as `approval-granted` / `approval-denied` with the approver `local:<uid>`. The listing shows id, agent, tool, reason and age, never arguments. The approver does not start (and `ask` fails closed) if the directory or socket permissions, ownership or type are wrong. A same-uid agent can still approve its own calls; see the README trust boundary.
-- Live Wall shows NockLock and NockGuard in one stream. `nockguard-wall --lock-db <events.db>` reads a NockLock log read-only (file, network and secret fence events, blocked and passed), labeled `LOCK` / `GUARD` and colored by outcome, decision only. `--lock-pub-env` names the NockLock public key (default `NOCKLOCK_AUDIT_ED25519_PUB`).
-- Per-session signed-proof badge on the wall (`GET /sessions`): the same verdict as `nockguard verify --session` (PROTECTED / TAMPERED / UNSIGNED / UNVERIFIABLE / NO_ROWS / UNANCHORED) with both key fingerprints. Every view (badges, stream replay, `/pulse`, signed or unsigned `/export`) is built from one snapshot per refresh: the Guard trail read and verified once, the Lock DB copied once and both its rows and its chain walk taken from that copy. A refresh runs when a log's head moved (at most every 4 s) or every 60 s, never above 100,000 Lock events (then UNVERIFIABLE, too large). An unreadable Lock row shows as UNPARSEABLE and makes its session UNVERIFIABLE without hiding the rest of the batch. Export keeps a per-source row cap and an `X-NockGuard-Lock-Verification` header. A missing key is UNVERIFIABLE, never green.
-- `--demo` cannot be combined with `--lock-db`; it mixes in synthetic Lock rows and an UNSIGNED demo session.
+- Local approver for `ask` verdicts, with no network: set `NOCKGUARD_APPROVER=local` and decide held calls with `nockguard approvals list|approve|deny` (`prune` removes dead sockets left by crashed proxies). Held calls wait on a `0600` unix socket in a `0700` approvals directory, one `<pid>-<random>.sock` per proxy, removed on exit, and are audited as `approval-granted` / `approval-denied` with the approver `local:<uid>`. The listing shows id, agent, tool, reason and age, never arguments. The approver does not start, and `ask` fails closed, if the directory or socket permissions, ownership or type are wrong. A same-uid agent can still approve its own calls; see the README trust boundary.
+- Live Wall shows NockLock and NockGuard in one stream. `nockguard-wall --lock-db <events.db>` reads a NockLock log read-only (file, network and secret fence events, blocked and passed), labeled `LOCK` / `GUARD` and colored by outcome, decision only. `--lock-pub-env` names the NockLock public key (default `NOCKLOCK_AUDIT_ED25519_PUB`). `--demo` cannot be combined with `--lock-db`.
+- Per-session signed-proof badge on the Wall (`GET /sessions`): the same verdict as `nockguard verify --session` (PROTECTED / TAMPERED / UNSIGNED / UNVERIFIABLE / NO_ROWS / UNANCHORED) with both key fingerprints. A missing key is UNVERIFIABLE, never green. A Lock log over 100,000 events is UNVERIFIABLE, too large.
+- `nockguard wall` subcommand, and `nockguard-wall` in the Linux and macOS release archives.
+- `nockguard status --agent <name>` and `doctor` report a required audit write failure; `status` accepts `--audit <path>` for custom trail paths.
+- A Linux CI check runs the README quickstart end to end (init, keygen, proxy, verify) against a local MCP stub, with a successful read, a blocked write and signed allow and deny rows.
 
 ### Changed
-- `/export` CSV and JSON gain a trailing `source` column / field (`GUARD` or `LOCK`). The PROOF export remains NockGuard rows only; the README says so.
-- The `verify --session` core moved to `internal/sessionverify` so the CLI and the wall share one verifier.
+- `/export` CSV and JSON gain a trailing `source` column / field (`GUARD` or `LOCK`). The PROOF export remains NockGuard rows only.
+- The README quickstart uses the `coder` agent and a concrete demo path, matching `nockguard init`.
+- Documentation claims are aligned with shipped behavior, and a repository map and the 1.0 contract are added under `docs/`.
 
 ### Fixed
+- macOS: the local approver socket path now fits the 104 byte `sun_path` limit. When `~/.nockguard/approvals` would be too long, it falls back to a private per-user directory under `/tmp`.
 - macOS 26.5: two nockguard processes starting at once on a fresh machine no longer fail with "opening key lock ... no such file or directory".
+
+### Known limits
+- With stdio, a response that arrives ahead of an earlier pending call can be released before its deferred decision row is written. The `dispatch` row is durable first. If that later write fails, the latch refuses every later call and status reports the failure.
+- The failure marker is per trail, not per process or per agent. Every proxy writing the same trail sees it.
+- An unsigned trail has no verified reopen, so nothing clears its failure marker short of choosing `--audit-best-effort`. Sign the trail to get the repair path.
 
 ## [0.5.0] - 2026-10-10
 
