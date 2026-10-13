@@ -477,10 +477,13 @@ func (p *StdioProxy) drainAudits() {
 	p.flushAuditsLocked()
 }
 
-// Once the upstream leader exits, Run has at most this long to deliver its
-// remaining output and in-flight errors. Bytes still in the pipe are dropped
-// at the deadline, including when the client stops reading stdout.
+// The leader wait, output drain, and client replies share this shutdown bound.
+// Audit draining gets another 500ms after the group is killed and reaped, so
+// the total shutdown bound is 1.5s plus kill/reap scheduling. Forced kills
+// intentionally return a nonzero upstream exit. Unread output is dropped at
+// the first deadline, including when the client stops reading stdout.
 const upstreamShutdownBound = time.Second
+const auditDrainBound = 500 * time.Millisecond
 
 func (p *StdioProxy) Run() error {
 
@@ -569,40 +572,49 @@ func (p *StdioProxy) Run() error {
 	}()
 
 	var observed error
+	outputComplete := false
 	select {
 	case <-upstreamDone:
-		// The output loop can end while the leader is still alive (for example,
-		// on a client write error). If client input finished cleanly, let the
-		// upstream finish its own shutdown before stopping any descendants.
-		if outputFailed.Load() || !agentEOF.Load() {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		select {
-		case observed = <-waitCh:
-		case sig := <-signals:
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			return fmt.Errorf("proxy received %s", sig)
-		}
+		outputComplete = true
 	case observed = <-waitCh:
 	case sig := <-signals:
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return fmt.Errorf("proxy received %s", sig)
 	}
-	// One absolute deadline covers output draining, client writes, error replies,
-	// and audit cleanup. A blocked client write is abandoned when it expires.
+	// One absolute deadline starts at the first shutdown event and covers the
+	// leader wait, output drain, and client replies.
 	shutdown, cancel := context.WithTimeout(context.Background(), upstreamShutdownBound)
 	defer cancel()
 	outputTimedOut, shutdownTimedOut := false, false
-	select {
-	case <-upstreamDone:
-	case <-shutdown.Done():
-		outputTimedOut, shutdownTimedOut = true, true
-		p.logger.Print("upstream exited: output drain deadline reached; dropping remaining output")
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		_ = upstreamOut.Close()
-	case sig := <-signals:
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		return fmt.Errorf("proxy received %s", sig)
+	if outputComplete {
+		// A clean client EOF may let the leader finish on its own, but that
+		// grace must end at the same deadline as every later shutdown wait.
+		if outputFailed.Load() || !agentEOF.Load() {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		select {
+		case observed = <-waitCh:
+		case <-shutdown.Done():
+			shutdownTimedOut = true
+			p.logger.Print("upstream exited: leader wait deadline reached")
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			observed = <-waitCh
+		case sig := <-signals:
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return fmt.Errorf("proxy received %s", sig)
+		}
+	} else {
+		select {
+		case <-upstreamDone:
+		case <-shutdown.Done():
+			outputTimedOut, shutdownTimedOut = true, true
+			p.logger.Print("upstream exited: output drain deadline reached; dropping remaining output")
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = upstreamOut.Close()
+		case sig := <-signals:
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return fmt.Errorf("proxy received %s", sig)
+		}
 	}
 	if !agentEOF.Load() && !outputTimedOut {
 		replied := make(chan struct{})
@@ -625,22 +637,25 @@ func (p *StdioProxy) Run() error {
 			return fmt.Errorf("proxy received %s", sig)
 		}
 	}
-	audited := make(chan struct{})
-	go func() { p.drainAudits(); close(audited) }()
-	select {
-	case <-audited:
-	case <-shutdown.Done():
-		shutdownTimedOut = true
-		p.logger.Print("upstream exited: audit drain deadline reached")
-	case sig := <-signals:
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		return fmt.Errorf("proxy received %s", sig)
-	}
 	// Linux and macOS waitid leave the leader unreaped until this kill, so
 	// the PGID cannot have been reused. Output errors and signals also kill
 	// the group before waiting for the leader.
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	waitErr := reapLeader(cmd, observed)
+	// A leader that used the whole shutdown bound must not consume the time
+	// reserved for deferred audits from unanswered forwarded calls.
+	auditShutdown, cancelAudit := context.WithTimeout(context.Background(), auditDrainBound)
+	defer cancelAudit()
+	audited := make(chan struct{})
+	go func() { p.drainAudits(); close(audited) }()
+	select {
+	case <-audited:
+	case <-auditShutdown.Done():
+		shutdownTimedOut = true
+		p.logger.Print("upstream exited: audit drain deadline reached")
+	case sig := <-signals:
+		return fmt.Errorf("proxy received %s", sig)
+	}
 	if !outputTimedOut {
 		select {
 		case e := <-outputErrCh:

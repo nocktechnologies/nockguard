@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -24,10 +25,16 @@ func runWithOpenStdin(t *testing.T, upstream string) (io.WriteCloser, *bufio.Sca
 	return in, out, exited
 }
 
-func runWithOpenStdinStderr(t *testing.T, upstream string) (io.WriteCloser, *bufio.Scanner, <-chan error, *lockedBuffer) {
+func runWithOpenStdinStderr(t *testing.T, upstream string, policyPath ...string) (io.WriteCloser, *bufio.Scanner, <-chan error, *lockedBuffer) {
 	t.Helper()
+	var policy string
+	if len(policyPath) > 0 {
+		policy = policyPath[0]
+	} else {
+		policy = writePolicyFile(t)
+	}
 	cmd := exec.Command(buildBinary(t), "proxy",
-		"--upstream", upstream, "--agent", "kit", "--policy", writePolicyFile(t))
+		"--upstream", upstream, "--agent", "kit", "--policy", policy)
 	stderr := &lockedBuffer{}
 	cmd.Stderr = stderr
 	in, err := cmd.StdinPipe()
@@ -307,6 +314,112 @@ func TestProxyAllowsUpstreamToFinishAfterClosingStdout(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("proxy did not exit after upstream finished")
+	}
+}
+
+func TestProxyBoundsLeaderWaitAfterCleanEOF(t *testing.T) {
+	dir := t.TempDir()
+	auditPath := filepath.Join(dir, "audit.jsonl")
+	policyPath := filepath.Join(dir, "policy.yaml")
+	policy := "agents:\n  kit:\n    allow:\n      - nockcc_nock_*\naudit:\n  enabled: true\n  path: " + auditPath + "\n"
+	if err := os.WriteFile(policyPath, []byte(policy), 0644); err != nil {
+		t.Fatal(err)
+	}
+	leaderFile := filepath.Join(dir, "leader.pid")
+	childFile := filepath.Join(dir, "child.pid")
+	closedFile := filepath.Join(dir, "closed")
+	script := filepath.Join(dir, "close-stdout-and-wait.sh")
+	body := "#!/bin/bash\necho $$ > " + leaderFile + "\nsleep 30 >/dev/null 2>&1 &\necho $! > " + childFile + "\nwhile IFS= read -r line; do :; done\necho DONE\nexec 1>&-\necho closed > " + closedFile + "\nwait\n"
+	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+		t.Fatal(err)
+	}
+	in, out, exited, stderr := runWithOpenStdinStderr(t, "bash "+script, policyPath)
+	readPID := func(path string) int {
+		t.Helper()
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pid
+	}
+	if _, err := io.WriteString(in, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"nockcc_nock_list"}}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Scan() || out.Text() != "DONE" {
+		t.Fatalf("want final output before clean EOF; last line %q, error %v", out.Text(), out.Err())
+	}
+	stdoutEOF := make(chan error, 1)
+	go func() {
+		if out.Scan() {
+			stdoutEOF <- errors.New("unexpected output after DONE")
+		} else {
+			stdoutEOF <- out.Err()
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(closedFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("upstream did not close stdout")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	leaderPID, childPID := readPID(leaderFile), readPID(childFile)
+	groupGone := false
+	t.Cleanup(func() {
+		if !groupGone {
+			_ = syscall.Kill(-leaderPID, syscall.SIGKILL)
+		}
+	})
+	started := time.Now()
+	shutdownDeadline := time.NewTimer(upstreamShutdownBound + 500*time.Millisecond)
+	defer shutdownDeadline.Stop()
+	select {
+	case err := <-stdoutEOF:
+		if err != nil {
+			t.Fatalf("client did not read stdout to EOF: %v", err)
+		}
+	case <-shutdownDeadline.C:
+		t.Fatal("client did not receive stdout EOF after the upstream closed it")
+	}
+	select {
+	case err := <-exited:
+		if err == nil {
+			t.Fatal("proxy exited successfully while the upstream needed a forced shutdown")
+		}
+	case <-shutdownDeadline.C:
+		t.Fatal("proxy waited without a deadline after clean output EOF")
+	}
+	if elapsed := time.Since(started); elapsed > upstreamShutdownBound+500*time.Millisecond {
+		t.Fatalf("proxy exit took %s after output EOF", elapsed)
+	}
+	if !strings.Contains(stderr.String(), "leader wait deadline reached") {
+		t.Fatalf("shutdown missed the clean-EOF leader wait path; stderr:\n%s", stderr.String())
+	}
+	if err := syscall.Kill(leaderPID, 0); err != syscall.ESRCH {
+		t.Fatalf("upstream leader still alive after proxy exit: %v", err)
+	}
+	waitGrandchildGone(t, childPID)
+	groupGone = true
+	var sawDispatch, sawAllow bool
+	for _, event := range readAuditFile(t, auditPath) {
+		if event["tool"] != "nockcc_nock_list" {
+			continue
+		}
+		sawDispatch = sawDispatch || event["decision"] == "dispatch"
+		sawAllow = sawAllow || event["decision"] == "allow"
+	}
+	if !sawDispatch || !sawAllow {
+		t.Fatalf("unanswered forwarded call lost audit rows: dispatch=%t allow=%t", sawDispatch, sawAllow)
 	}
 }
 
