@@ -2,8 +2,8 @@
 
 The five release gates approved for 1.0 are tracked here against the source on
 this branch. A gate marked implemented has code and verification in place;
-other statuses describe remaining work. Version remains `v0.5.0` in
-`cmd/nockguard/main.go:94`.
+other statuses describe remaining work. Version is `v0.6.0` in
+`cmd/nockguard/main.go`.
 
 | Gate | Current evidence and remaining work |
 | --- | --- |

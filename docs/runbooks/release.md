@@ -1,7 +1,7 @@
 # Release
 
 1. Choose the release tag and update the hardcoded version in
-   `cmd/nockguard/main.go:94`. Update `CHANGELOG.md` and verify customer docs
+   `cmd/nockguard/main.go`. Update `CHANGELOG.md` and verify customer docs
    against the code that will ship.
 2. Run the [CI checks](../../CLAUDE.md#build-and-test). The current CI job is
    Linux only (`.github/workflows/ci.yml:13`); the 1.0 bar requires macOS CI.
