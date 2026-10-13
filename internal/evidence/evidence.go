@@ -1,8 +1,7 @@
 // Package evidence builds compliance-evidence packs from NockGuard's signed,
 // tamper-evident audit trail. It does NOT re-implement signature verification —
-// it calls internal/audit's Verify (HMAC) / VerifyEd25519 (Ed25519), the exact
-// same code the `nockguard audit verify` command runs — so the attestation in a
-// pack is the same cryptographic guarantee, not a re-derivation.
+// it calls internal/audit's HMAC or Ed25519 verifier, then applies the shared
+// sessionverify GuardVerdict checkpoint-coverage rule used by `nockguard verify`.
 //
 // The whole value of the pack is that its Integrity Attestation FAILS LOUD when
 // the chain is broken: a tampered, truncated, reordered, or wrong-key trail
@@ -23,6 +22,7 @@ import (
 	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
+	"github.com/nocktechnologies/nockguard/internal/sessionverify"
 )
 
 // VerifyMode names the cryptographic mode used to verify a trail.
@@ -228,17 +228,27 @@ func resolveMode(opts PackOptions) (VerifyMode, ed25519.PublicKey, error) {
 // the pack.
 func verifyFile(path string, mode VerifyMode, key []byte, pub ed25519.PublicKey) FileVerification {
 	var (
-		n   int
-		err error
+		n               int
+		checkpointCount int
+		err             error
 	)
 	if mode == ModeEd25519 {
-		n, err = audit.VerifyEd25519(path, pub)
+		n, checkpointCount, err = audit.VerifyEd25519WithCheckpoint(path, pub)
 	} else {
-		n, err = audit.Verify(path, key)
+		n, checkpointCount, err = audit.VerifyWithCheckpoint(path, key)
 	}
-	fv := FileVerification{Path: path, EntriesVerified: n, Intact: err == nil}
+	fv := FileVerification{Path: path, EntriesVerified: n}
 	if err != nil {
 		fv.Error = err.Error()
+		return fv
+	}
+	switch sessionverify.GuardVerdict(n, checkpointCount == n) {
+	case sessionverify.VerdictNoRows:
+		fv.Error = "NO_ROWS: audit trail is empty"
+	case sessionverify.VerdictUnanchored:
+		fv.Error = fmt.Sprintf("UNANCHORED: signed checkpoint covers %d of %d verified entries", checkpointCount, n)
+	default:
+		fv.Intact = true
 	}
 	return fv
 }
