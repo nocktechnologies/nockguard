@@ -79,7 +79,7 @@ Ask: "Are there any tools in the allow list that you want a human to approve eac
 
 Good candidates: any `spend_*`, `kill_switch_*`, `archive_*`, `push_*` to production branches, `exec` tools.
 
-Requires the approval bot: set `NOCKGUARD_APPROVAL_BOT_TOKEN` and `NOCKGUARD_APPROVAL_CHAT_ID`.
+Telegram approver: set `NOCKGUARD_APPROVAL_BOT_TOKEN` and `NOCKGUARD_APPROVAL_CHAT_ID`. Local approver: set `NOCKGUARD_APPROVER=local`.
 
 ## Step 7 — Decide on auditing
 

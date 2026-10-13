@@ -187,7 +187,7 @@ for agent, pol in (doc.get('agents') or {}).items():
 
 ### W006 — Agent that denies every tool (INFO)
 
-A named agent with no `allow` list, `mode` omitted or `deny`, and no `ask` rules is denied every tool (`default-deny (no allow list)` / `mode "deny", no allow list`). That is the right shape for `default`, but on a working agent it usually means a forgotten `allow` list.
+A named agent with no `allow` list, `mode` omitted or `deny`, and no `ask` (or legacy `require_approval`) rules is denied every tool (`default-deny (no allow list)` / `mode "deny", no allow list`). That is the right shape for `default`, but on a working agent it usually means a forgotten `allow` list.
 
 ```bash
 python3 -c "
@@ -196,7 +196,7 @@ with open('$POLICY') as f:
     doc = yaml.safe_load(f)
 for agent, pol in (doc.get('agents') or {}).items():
     pol = pol or {}
-    if agent != 'default' and not pol.get('allow') and not pol.get('ask') and pol.get('mode') != 'allow':
+    if agent != 'default' and not pol.get('allow') and not pol.get('ask') and not pol.get('require_approval') and pol.get('mode') != 'allow':
         print(f'Agent {agent!r}: no allow list and mode is not allow — every tool is denied')
 " 2>/dev/null
 ```
