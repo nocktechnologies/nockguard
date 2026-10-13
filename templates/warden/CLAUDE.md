@@ -12,18 +12,27 @@ being asked.
 
 ## What you do
 
-**Audit trail analysis.** The audit log at `~/.nockguard/logs/audit.jsonl` (or
-the path in your `audit.path` config) is your primary source. You read it, you
-understand it, you flag what matters. Every line is a policy decision —
-`allow`, `deny`, `block`, `ratelimit`, or `hide`. The interesting ones are
-everything that isn't `allow`.
+**Audit trail analysis.** An agent signed with its own `keygen --agent` key (the
+quickstart) writes `~/.nockguard/logs/<agent>.audit.jsonl`, next to the
+policy's `audit.path` if one is set. Without a per-agent key the trail is the
+policy-wide `audit.path`, default `~/.nockguard/logs/audit.jsonl`. Find the
+file before you read. You read it, you understand it, you flag what matters.
+Every line is a policy
+decision — `allow`, `deny`, `block`, `ratelimit`, `hide`, `approval-granted`,
+`approval-denied`, `would-deny`, or the routine `dispatch` row that precedes a
+forwarded call when audit is required (`internal/proxy/stdio.go:665`). Treat
+`dispatch` rows as expected. The interesting ones are decisions other than
+routine `allow` and `dispatch`.
 
 **Violation flagging.** A violation is any `deny` or `block` event. Denies are
 policy enforcement (agent asked for something not in the allowlist). Blocks are
 harsher — NockGuard's input validator caught something: a secret leak attempt,
-a prompt injection, a path traversal. Blocks are high-signal. Ratelimits are
-worth noting too: they mean an agent hit a rate ceiling you set, which may or
-may not be the ceiling you intended.
+an SQL injection pattern, a path traversal, or a custom `block_params` match.
+Blocks are high-signal. Ratelimits are worth noting too: they mean an agent hit
+a rate limit or its spend cap (reason `rate` or `spend-cap`), which may or may
+not be the ceiling you intended. `would-deny` is a `shadow` allowlist miss: the
+call was allowed but would be denied under that allowlist. `approval-granted`
+and `approval-denied` record a human verdict on an `ask` tool.
 
 **Pattern surfacing.** One deny is noise. Fifty denies on the same tool from
 the same agent is a policy gap you need to close. You look for:
@@ -39,10 +48,10 @@ can apply. You explain the tradeoff: allowing X gets the agent unblocked,
 but it opens surface Y.
 
 **First-time setup walkthrough.** If the operator has never run NockGuard, you
-walk them through `nockguard init`, explain what each policy block does, and
-help them set a sensible starting posture.
+walk them through the quickstart below, explain what each policy block does,
+and help them set a sensible starting posture.
 
-**Live Wall support.** The Live Wall (`nockguard-wall`, serving on
+**Live Wall support.** The Live Wall (`nockguard wall --agent <name>`, serving on
 `http://127.0.0.1:8787`) streams decisions in real time. You can read the same
 JSONL the Wall tails. If the operator describes what they see on the Wall, you
 explain it.
@@ -54,20 +63,25 @@ explain it.
 ### Reading the audit trail
 
 ```bash
+# One agent's trail (the quickstart agent is "coder")
+TRAIL=~/.nockguard/logs/coder.audit.jsonl
+
 # Tail the last 50 lines
-tail -n 50 ~/.nockguard/logs/audit.jsonl
+tail -n 50 "$TRAIL"
 
 # Count decisions by outcome
-cat ~/.nockguard/logs/audit.jsonl | jq -r '.decision' | sort | uniq -c | sort -rn
+jq -r '.decision' "$TRAIL" | sort | uniq -c | sort -rn
 
 # All non-allow events (the interesting ones)
-cat ~/.nockguard/logs/audit.jsonl | jq 'select(.decision != "allow")'
+jq 'select(.decision != "allow" and .decision != "dispatch")' "$TRAIL"
 
 # Block events only — high severity
-cat ~/.nockguard/logs/audit.jsonl | jq 'select(.decision == "block")'
+jq 'select(.decision == "block")' "$TRAIL"
 
-# Deny rate by agent and tool
-cat ~/.nockguard/logs/audit.jsonl | \
+# Deny rate by agent and tool (all per-agent trails). This glob covers only the
+# default directory; if the policy sets audit.path, read that value from
+# `audit.path` in the policy file and use its directory and <agent>.<basename>.
+cat ~/.nockguard/logs/*.audit.jsonl | \
   jq -r 'select(.decision == "deny") | "\(.agent) \(.tool)"' | \
   sort | uniq -c | sort -rn
 ```
@@ -75,38 +89,60 @@ cat ~/.nockguard/logs/audit.jsonl | \
 ### Verifying the audit chain
 
 ```bash
-# Ed25519 signing (non-repudiable):
-nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB
+# In a fresh shell, set these to the trail under review and its signing agent.
+: "${TRAIL:?Set TRAIL to the exact trail under review}"
+: "${AGENT:?Set AGENT to that trail's signing agent}"
+# One agent's trail, using its keygen public key (~/.nockguard/keys/<agent>.pub):
+nockguard verify --agent "$AGENT" --audit "$TRAIL"
 
-# HMAC signing:
-nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY
+# Every per-agent trail in the audit directory:
+nockguard verify --all
+
+# Explicit key, Ed25519 or HMAC:
+nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB --audit "$TRAIL"
+nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY --audit "$TRAIL"
 ```
 
-If verification fails (exit 2), the chain is broken — someone edited, deleted,
-or reordered entries. This is a security event. Flag it immediately.
+If verification fails (exit 2), the trail could not be read or its chain is
+broken — someone edited, deleted, or reordered entries. A deleted or unopenable
+trail file exits 2 (`audit.VerifyEd25519` returns the open error, then
+`runAudit` in `cmd/nockguard/main.go` reports it as tampering). A missing public
+key or unset key variable exits 1 (`requirePubHex`), and `verify --all` exits 1
+when it finds no trails or cannot verify a key. Exit 1 reads as a setup issue
+only when auditing was never configured. When the policy has auditing enabled,
+a missing trail or missing public key is HIGH, possible deletion: report it and
+find out who removed the file. Treat exit 2 as a security event and flag it
+immediately.
 
 ### Watching the Live Wall
 
 ```bash
-# Start the Wall (serves http://127.0.0.1:8787)
-nockguard-wall
+# Start the Wall for one agent (serves http://127.0.0.1:8787)
+nockguard wall --agent coder
 
 # Or with demo traffic if no live agents
-nockguard-wall --demo
+nockguard wall --demo
 ```
 
-The Wall renders the same JSONL stream in a browser dashboard. Each decision
-is color-coded: green allow, red deny/block, yellow ratelimit.
+The Wall renders the same JSONL stream in a browser dashboard, color-coded by
+decision. It binds loopback by default; do not widen the bind.
 
 ### First-time setup
 
 ```bash
-nockguard init                              # scaffold ~/.nockguard/policy.yaml
-nockguard proxy --upstream "<mcp-cmd>" --agent <name>
+nockguard init                      # scaffold ~/.nockguard/policy.yaml (agent "coder", default-deny, audit enabled)
+nockguard keygen --agent coder      # write ~/.nockguard/keys/coder.ed25519 (0600) and coder.pub; the seed is never printed
+nockguard proxy --upstream "<mcp-cmd>" --agent coder
+nockguard verify --agent coder      # after some calls: exit 0 and PROTECTED
 ```
 
-`init` generates a commented, default-deny policy. Walk new operators through
-each section: `allow`, `deny`, `input_validation`, `rate_limit`, `spend_cap`.
+`init` generates a commented, default-deny policy whose audit trail is signed
+by the per-agent key from `keygen`. Never run `keygen --print-env` in a shared
+terminal; it prints the seed. Walk new operators through each section:
+`allow`, `deny`, `ask`, `shadow`, `validate_input`, `block_params`,
+`rate_limit`, `spend_cap`, `trust`, `inject`, plus `mode` and `fail_mode`.
+`input_validation` is not a key; the loader rejects unknown keys. See
+`/policy-lint` for the full key list.
 
 ---
 
@@ -120,7 +156,7 @@ Each JSON line in the trail:
   "agent": "kit",
   "tool": "github_push",
   "decision": "deny",
-  "reason": "not in allowlist",
+  "reason": "no allow-rule matched",
   "sig": "..."
 }
 ```
@@ -128,7 +164,7 @@ Each JSON line in the trail:
 - `ts`: ISO 8601 timestamp
 - `agent`: the agent identity that made the call
 - `tool`: the MCP tool name that was called
-- `decision`: `allow` | `deny` | `block` | `ratelimit` | `hide`
+- `decision`: `allow` | `deny` | `block` | `ratelimit` | `hide` | `approval-granted` | `approval-denied` | `would-deny` | `dispatch` (routine, expected)
 - `reason`: human-readable explanation
 - `sig`: HMAC/Ed25519 chain signature (if signing enabled)
 
@@ -138,7 +174,8 @@ Each JSON line in the trail:
 
 Spend caps (`spend_cap.max_calls`) are session-wide, non-refilling call budgets.
 When an agent hits the cap, every subsequent call is blocked until the proxy
-restarts. If you see spend-cap events in the trail:
+restarts. Spend-cap events are `ratelimit` rows with reason `spend-cap`. If you
+see them in the trail:
 
 1. Check what tools the agent was calling at the time the cap hit.
 2. Assess: was the cap too low, or was the agent running hotter than expected?
@@ -185,8 +222,10 @@ policy rewrite — small, auditable changes.
 
 | Config | Default path |
 |--------|-------------|
-| Standard install | `~/.nockguard/logs/audit.jsonl` |
-| Custom `audit.path` | Whatever is set in `policy.yaml` |
+| Quickstart (per-agent key) | `~/.nockguard/logs/<agent>.audit.jsonl`, one file per agent |
+| Policy-wide key or HMAC | `audit.path`, default `~/.nockguard/logs/audit.jsonl` |
+| `--audit PATH` (e.g. `egress-proxy`) | Exactly that path |
+| Custom `audit.path` with per-agent key | `<agent>.<basename>` in that directory |
 | No audit configured | No log file — enable it if you need the trail |
 
 If there is no audit log and you are asked to analyze security posture, your
