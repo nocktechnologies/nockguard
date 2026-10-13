@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
+	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
@@ -472,6 +475,14 @@ func (p *StdioProxy) drainAudits() {
 	p.flushAuditsLocked()
 }
 
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(b []byte) (int, error) { return f(b) }
+
+// upstreamDrainGrace is how long upstream stdout may stay idle, after the
+// child itself has exited, before Run cuts the output loop off.
+const upstreamDrainGrace = 500 * time.Millisecond
+
 func (p *StdioProxy) Run() error {
 
 	cmd := exec.Command(p.upstream[0], p.upstream[1:]...)
@@ -494,54 +505,139 @@ func (p *StdioProxy) Run() error {
 	strip = append(strip, p.engine.InjectEnvNames()...)
 	strip = append(strip, "NOCKCC_BASE_URL", "NOCKGUARD_VAULT_AGENT_TOKEN")
 	cmd.Env = sanitizedEnv(strip)
+	// Own process group, so a cutoff can kill grandchildren that inherited stdout.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	upstreamIn, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("stdin pipe: %w", err)
 	}
-	upstreamOut, err := cmd.StdoutPipe()
+	// An *os.File stdout (not StdoutPipe) so cmd.Wait neither closes the read
+	// end nor waits on a grandchild that inherited it.
+	upstreamOut, upstreamOutW, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
+	defer upstreamOut.Close()
+	cmd.Stdout = upstreamOutW
 
-	if err := cmd.Start(); err != nil {
+	var outBytes atomic.Int64
+	upstreamReader := readerFunc(func(b []byte) (int, error) {
+		n, err := upstreamOut.Read(b)
+		outBytes.Add(int64(n))
+		return n, err
+	})
+
+	err = cmd.Start()
+	upstreamOutW.Close()
+	if err != nil {
 		return fmt.Errorf("start upstream: %w", err)
 	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
 
-	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
+	agentDone := make(chan struct{})
+	upstreamDone := make(chan struct{})
 
 	pendingCalls := &sync.Map{}
 
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
 		if err := p.agentToUpstream(os.Stdin, upstreamIn, pendingCalls); err != nil {
 			errCh <- fmt.Errorf("agent->upstream: %w", err)
 		}
+		// Mark done before closing the child's stdin so a clean child exit
+		// that follows is never mistaken for an upstream death.
+		close(agentDone)
 		upstreamIn.Close()
 	}()
 
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
-		if err := p.upstreamToAgent(upstreamOut, os.Stdout, pendingCalls); err != nil {
+		defer close(upstreamDone)
+		if err := p.upstreamToAgent(upstreamReader, os.Stdout, pendingCalls); err != nil {
 			errCh <- fmt.Errorf("upstream->agent: %w", err)
 		}
 	}()
 
-	wg.Wait()
-	close(errCh)
+	// The upstream output loop ends when the child closes stdout. On a graceful
+	// shutdown the agent loop has already finished and closed the child's stdin.
+	// If it has not, the upstream died while the client still holds stdin open:
+	// the agent loop may be blocked reading stdin and never returns, so do not
+	// wait for it.
+	var waitErr error
+	exited := false
+	outputStuck := false
+	select {
+	case <-upstreamDone:
+	case waitErr = <-waitCh:
+		// The child is gone but a grandchild may still hold stdout open.
+		// Keep draining while output flows; cut off once it goes idle.
+		exited = true
+		drained, seen := false, int64(-1)
+		for !drained && seen != outBytes.Load() {
+			seen = outBytes.Load()
+			select {
+			case <-upstreamDone:
+				drained = true
+			case <-time.After(upstreamDrainGrace):
+			}
+		}
+		if !drained {
+			// Kill anything still holding stdout, then give the loop a bounded
+			// time to stop. It can also be stuck writing to a client that has
+			// stopped reading, which closing the read end cannot interrupt.
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			upstreamOut.Close()
+			select {
+			case <-upstreamDone:
+			case <-time.After(upstreamDrainGrace):
+				outputStuck = true
+				p.logger.Printf("upstream exited: output loop stuck writing to the client; abandoning it")
+			}
+		}
+	}
+	upstreamDied := false
+	select {
+	case <-agentDone:
+	default:
+		upstreamDied = true
+		// The loop can also end with the child still alive (oversized line,
+		// broken client pipe); make sure Wait cannot block on it.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		// A stuck output loop holds the client write lock; replies cannot be delivered.
+		if !outputStuck {
+			pendingCalls.Range(func(key, _ any) bool {
+				if err := p.rejectToAgent(json.RawMessage(key.(string)), -32603, "upstream exited"); err != nil {
+					p.logger.Printf("upstream exited: reply for in-flight request failed: %v", err)
+				}
+				return true
+			})
+		}
+	}
 
 	// Drain any unresolved audits before checking upstream exit
 	p.drainAudits()
 
-	if waitErr := cmd.Wait(); waitErr != nil {
+	if !exited {
+		waitErr = <-waitCh
+	}
+	if waitErr != nil {
 		return fmt.Errorf("upstream exit: %w", waitErr)
 	}
+	if upstreamDied {
+		select {
+		case e := <-errCh:
+			return e
+		default:
+		}
+		return errors.New("upstream exited before the client closed stdin")
+	}
 
-	for e := range errCh {
+	<-agentDone
+	select {
+	case e := <-errCh:
 		return e
+	default:
 	}
 	return nil
 }
