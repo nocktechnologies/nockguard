@@ -742,6 +742,13 @@ func TestPolicyCheckLoadOnly(t *testing.T) {
 			}
 		})
 	}
+	dup := "agents:\n  test:\n    mode: allow\n    inject:\n" +
+		"      - tools: [\"github_create_issue\", \"github_list_issues\"]\n        ref: \"env:T1\"\n        arg: \"headers.a\"\n" +
+		"      - tools: [\"github_create_issue\"]\n        ref: \"env:T2\"\n        arg: \"headers.b\"\n"
+	code, _, stderr := runCommandForTest(t, "policy", "check", "--policy", write("dup-inject.yaml", dup))
+	if code != 0 || !strings.Contains(stderr, "warning policy:") || !strings.Contains(stderr, "github_create_issue") {
+		t.Fatalf("duplicate inject tool: exit = %d, want 0 with a warning, stderr:\n%s", code, stderr)
+	}
 	if code, _, _ := runCommandForTest(t, "policy", "check", "--policy", filepath.Join(dir, "missing.yaml")); code != 1 {
 		t.Fatalf("missing file exit = %d, want 1", code)
 	}

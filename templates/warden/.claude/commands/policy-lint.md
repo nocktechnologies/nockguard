@@ -19,11 +19,13 @@ cat "$POLICY"
 
 Run each snippet in this command as its own bash invocation; they `exit` non-zero on failure. Shells do not share variables, so every later snippet resolves `POLICY` itself (default `~/.nockguard/policy.yaml`); when the user gave a path, export `POLICY` to it before running each one.
 
-Verify NockGuard can parse it. `nockguard policy check` runs the loader the proxy uses and nothing else: it starts no proxy, creates no trail, forwards nothing and reads no signing env, so its exit status means exactly "the policy loaded". It prints the load error on failure.
+Verify NockGuard can parse it. `nockguard policy check` runs the loader the proxy uses and nothing else: it starts no proxy, creates no trail, forwards nothing and reads no signing env, so its exit status means exactly "the policy loaded". It prints the load error on failure and, on success, the loader's `warning policy:` lines (for example a tool in more than one inject rule); report those as INFO.
 
 ```bash
 POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 command -v nockguard >/dev/null || { echo "ERROR: nockguard is not on PATH; cannot run the parse check" >&2; exit 1; }
+# An older binary has no `policy check`; say so instead of calling the policy invalid.
+nockguard policy 2>&1 | grep -q 'check --policy' || { echo "ERROR: this nockguard is too old for \`policy check\`; upgrade it. This says nothing about the policy" >&2; exit 1; }
 STATUS=0
 nockguard policy check --policy "$POLICY" || STATUS=$?
 case "$STATUS" in

@@ -346,6 +346,7 @@ func runPolicy(args []string) int {
 
 // runPolicyCheck loads a policy with the loader the proxy uses and does
 // nothing else: exit 0 means it loaded, 1 means it did not (or bad arguments).
+// Load-time warnings print to stderr as the proxy prints them; they keep exit 0.
 func runPolicyCheck(args []string) int {
 	fs := flag.NewFlagSet("policy check", flag.ContinueOnError)
 	path := fs.String("policy", "", "policy file to load")
@@ -353,9 +354,13 @@ func runPolicyCheck(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: nockguard policy check --policy <file>")
 		return 1
 	}
-	if _, err := policy.Load(*path); err != nil {
+	engine, err := policy.Load(*path)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
+	}
+	for _, warn := range engine.Warnings() {
+		fmt.Fprintf(os.Stderr, "warning policy: %s\n", warn)
 	}
 	fmt.Printf("policy loaded: %s\n", *path)
 	return 0
