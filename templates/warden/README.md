@@ -15,12 +15,12 @@ claude
 
 ## What it does
 
-- Reads `~/.nockguard/logs/audit.jsonl` and surfaces violations
+- Reads your audit trail (`~/.nockguard/logs/<agent>.audit.jsonl` for a per-agent key) and surfaces violations
 - Flags block events (injection/secret-exfil attempts) immediately
 - Spots deny and ratelimit patterns that point to policy gaps
 - Suggests minimal, concrete YAML policy changes
-- Walks first-time setup (`nockguard init`)
-- Explains what you see on the Live Wall (`nockguard-wall`)
+- Walks first-time setup (`nockguard init`, `nockguard keygen --agent coder`, `nockguard proxy ... --agent coder`)
+- Explains what you see on the Live Wall (`nockguard wall --agent <name>`)
 - Verifies audit chain integrity
 
 ## Security skills (slash commands)

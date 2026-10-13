@@ -21,17 +21,23 @@ If the file does not exist, stop: "No policy file found at $POLICY. Run `nockgua
 Verify NockGuard can parse it:
 
 ```bash
-# Proxy exits non-zero if the policy fails to load
-nockguard proxy --upstream "echo" --agent lint-probe --policy "$POLICY" 2>&1 | head -5
+# Proxy exits non-zero if the policy fails to load. Capture the proxy's own
+# status; piping to head would report head's status instead.
+OUT=$(mktemp)
+nockguard proxy --upstream "echo" --agent lint-probe --policy "$POLICY" >"$OUT" 2>&1 </dev/null
+STATUS=$?
+head -5 "$OUT"
+rm -f "$OUT"
+echo "proxy exit status: $STATUS"
 ```
 
-If this exits with a parse error, report it as **ERROR** and stop — the remaining checks require a valid file.
+If the status is non-zero and the output shows a load error, report it as **ERROR** and stop — the remaining checks require a valid file. The loader decodes with `KnownFields(true)` (`loadFrom` in `internal/policy/policy.go`), so an unknown key anywhere, a malformed tool glob, an unknown `validate_input` category or a bad `rate_limit.window` is a load failure, not a silent no-op. The checks below name the likely cause and cover what the loader does not reject.
 
 ## Step 2 — Schema checks
 
 ### E001 — Unknown top-level keys (ERROR)
 
-The only valid top-level keys are `agents` and `audit`. Any other key is a silent no-op (NockGuard's YAML unmarshaler ignores unknown fields) and likely a typo.
+The only valid top-level keys are `agents` and `audit`. Any other key makes the policy fail to load (strict YAML decoding, `KnownFields(true)`) and is likely a typo.
 
 ```bash
 python3 -c "
@@ -47,14 +53,14 @@ if extra:
 
 ### E002 — Unknown agent-policy keys (ERROR)
 
-Valid keys under each agent: `allow`, `deny`, `mode`, `validate_input`, `block_params`, `rate_limit`, `spend_cap`, `require_approval`. Anything else is silently ignored.
+Valid keys under each agent: `allow`, `deny`, `ask`, `shadow`, `mode`, `fail_mode`, `validate_input`, `block_params`, `rate_limit`, `spend_cap`, `trust`, `require_approval` (legacy; prefer `ask`), `inject`. Anything else makes the policy fail to load. Source: `AgentPolicy` in `internal/policy/policy.go`.
 
 ```bash
 python3 -c "
 import yaml, sys
 with open('$POLICY') as f:
     doc = yaml.safe_load(f)
-valid = {'allow','deny','mode','validate_input','block_params','rate_limit','spend_cap','require_approval'}
+valid = {'allow','deny','ask','shadow','mode','fail_mode','validate_input','block_params','rate_limit','spend_cap','trust','require_approval','inject'}
 for agent, pol in (doc.get('agents') or {}).items():
     if not isinstance(pol, dict): continue
     extra = set(pol) - valid
@@ -63,9 +69,9 @@ for agent, pol in (doc.get('agents') or {}).items():
 " 2>/dev/null
 ```
 
-### E003 — Invalid mode value (ERROR)
+### E003 — Invalid mode or fail_mode value (ERROR)
 
-`mode` must be `"allow"` or `"deny"`. Any other value falls through to `"allow"` (the default), which may not be what the operator intended.
+`mode` must be `"allow"` or `"deny"`; `fail_mode` must be `"deny"` (default) or `"ask"`. The loader does not validate these values. An unrecognised `mode` behaves like an omitted one: with no `allow` list the agent is denied every tool (`default-deny (no allow list)`); with an `allow` list `mode` is not consulted. Any `fail_mode` other than `"ask"` behaves as `"deny"`. Either way the operator's intent is lost, so flag it.
 
 ```bash
 python3 -c "
@@ -73,15 +79,19 @@ import yaml
 with open('$POLICY') as f:
     doc = yaml.safe_load(f)
 for agent, pol in (doc.get('agents') or {}).items():
-    m = (pol or {}).get('mode')
+    pol = pol or {}
+    m = pol.get('mode')
     if m is not None and m not in ('allow', 'deny'):
         print(f'Agent {agent!r}: invalid mode {m!r} (must be allow or deny)')
+    fm = pol.get('fail_mode')
+    if fm is not None and fm not in ('deny', 'ask'):
+        print(f'Agent {agent!r}: invalid fail_mode {fm!r} (must be deny or ask)')
 " 2>/dev/null
 ```
 
 ### E004 — rate_limit missing window (ERROR)
 
-A `rate_limit` block without a `window` will fail at startup.
+A `rate_limit` block without a positive Go-duration `window` (`30s`, `1m`, `1h`) is rejected when the policy loads (`rateLimitWindow` in `internal/policy/policy.go`).
 
 ```bash
 python3 -c "
@@ -131,9 +141,9 @@ if fwd.get('enabled'):
 
 ## Step 3 — Logic checks
 
-### W001 — Implicit allow-all agent (WARNING)
+### W001 — Allow-all agent (WARNING)
 
-An agent with no `allow` list and `mode` not set to `deny` permits every tool. This is almost never intended.
+An agent with no `allow` list and `mode: allow` permits every tool that is not denied. This is almost never intended. (An agent with no `allow` list and `mode` omitted or `deny` is the opposite: every tool is denied, see W006.)
 
 ```bash
 python3 -c "
@@ -142,8 +152,8 @@ with open('$POLICY') as f:
     doc = yaml.safe_load(f)
 for agent, pol in (doc.get('agents') or {}).items():
     pol = pol or {}
-    if not pol.get('allow') and pol.get('mode') != 'deny':
-        print(f'Agent {agent!r}: no allow list and mode is not deny — implicit allow-all')
+    if not pol.get('allow') and pol.get('mode') == 'allow':
+        print(f'Agent {agent!r}: no allow list and mode is allow — allow-all')
 " 2>/dev/null
 ```
 
@@ -181,6 +191,22 @@ for agent, pol in (doc.get('agents') or {}).items():
 " 2>/dev/null
 ```
 
+### W006 — Agent that denies every tool (INFO)
+
+A named agent with no `allow` list, `mode` omitted or `deny`, and no `ask` (or legacy `require_approval`) rules is denied every tool (`default-deny (no allow list)` / `mode "deny", no allow list`). That is the right shape for `default`, but on a working agent it usually means a forgotten `allow` list.
+
+```bash
+python3 -c "
+import yaml
+with open('$POLICY') as f:
+    doc = yaml.safe_load(f)
+for agent, pol in (doc.get('agents') or {}).items():
+    pol = pol or {}
+    if agent != 'default' and not pol.get('allow') and not pol.get('ask') and not pol.get('require_approval') and pol.get('mode') != 'allow':
+        print(f'Agent {agent!r}: no allow list and mode is not allow — every tool is denied')
+" 2>/dev/null
+```
+
 ### W004 — No default agent (INFO)
 
 Without a `default` entry, any unrecognized `--agent` value fails-closed (all tools denied). This is safe but can be surprising. Add `default: { mode: deny }` as an explicit backstop.
@@ -195,9 +221,9 @@ if 'default' not in (doc.get('agents') or {}):
 " 2>/dev/null
 ```
 
-### W005 — require_approval with no approval bot configured (WARNING)
+### W005 — ask / require_approval with no approver configured (WARNING)
 
-`require_approval` rules are silently un-enforced if neither `NOCKGUARD_APPROVAL_BOT_TOKEN` nor `NOCKGUARD_APPROVAL_CHAT_ID` is set. The proxy logs this at startup but the policy file gives no indication.
+`ask` (and legacy `require_approval`) rules need an approver: the Telegram bot (`NOCKGUARD_APPROVAL_BOT_TOKEN` and `NOCKGUARD_APPROVAL_CHAT_ID`) or the local approver (`NOCKGUARD_APPROVER=local`). With neither, every such call is denied, so the tool is effectively unusable. The policy file gives no indication.
 
 ```bash
 python3 -c "
@@ -205,9 +231,11 @@ import yaml, os
 with open('$POLICY') as f:
     doc = yaml.safe_load(f)
 for agent, pol in (doc.get('agents') or {}).items():
-    if (pol or {}).get('require_approval'):
-        if not (os.environ.get('NOCKGUARD_APPROVAL_BOT_TOKEN') and os.environ.get('NOCKGUARD_APPROVAL_CHAT_ID')):
-            print(f'Agent {agent!r}: require_approval is set but approval bot env vars are not configured — gates will be un-enforced')
+    pol = pol or {}
+    if pol.get('ask') or pol.get('require_approval'):
+        telegram = all(os.environ.get(v) for v in ('NOCKGUARD_APPROVAL_BOT_TOKEN', 'NOCKGUARD_APPROVAL_CHAT_ID'))
+        if not (telegram or os.environ.get('NOCKGUARD_APPROVER') == 'local'):
+            print(f'Agent {agent!r}: ask/require_approval is set but no approver is configured — those calls will be denied')
             break
 " 2>/dev/null
 ```
@@ -226,4 +254,4 @@ Fix: deny always wins — if this is intentional, no change needed; otherwise re
 
 End with a pass/fail summary: "X errors, Y warnings, Z info. Policy is [READY TO DEPLOY / NOT READY — fix errors first]."
 
-A policy with zero errors is safe to load. Warnings should be reviewed but do not block deployment.
+A policy with zero errors loads (the loader has already rejected anything structurally invalid). Warnings should be reviewed but do not block deployment.

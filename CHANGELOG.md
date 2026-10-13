@@ -18,6 +18,7 @@ All notable changes to NockGuard are documented here.
 
 ### Documentation
 - Correct Wall installation guidance and replace source line references with file links.
+- Correct the `/policy-lint`, `/vuln-scan` and `/threat-model` helper commands, the Warden `CLAUDE.md` and README, and the model-API egress template against the engine: unknown keys fail the load, `mode` defaults to deny, the full agent key list, per-agent audit trails and `keygen --agent`, `egress-proxy --enforce`, and the SSRF guard. A test now keeps the Warden command copies identical to `.claude/commands/` and the lint key list in step with `AgentPolicy`.
 - Document Homebrew and Linux archive installation, including the Live Wall.
 - Linux install verifies the release archive against SHA256SUMS before installing.
 
