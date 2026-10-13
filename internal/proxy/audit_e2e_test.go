@@ -69,8 +69,8 @@ agents:
 	}
 
 	lines := readAuditFile(t, auditPath)
-	if len(lines) != 4 {
-		t.Fatalf("expected 4 audit records, got %d: %v", len(lines), lines)
+	if len(lines) != 6 {
+		t.Fatalf("expected 2 dispatch and 4 decision records, got %d: %v", len(lines), lines)
 	}
 
 	// Every record carries the audited shape.
@@ -84,8 +84,8 @@ agents:
 		}
 	}
 
-	decisions := []string{lines[0]["decision"], lines[1]["decision"], lines[2]["decision"], lines[3]["decision"]}
-	want := []string{"allow", "allow", "ratelimit", "deny"}
+	decisions := []string{lines[0]["decision"], lines[1]["decision"], lines[2]["decision"], lines[3]["decision"], lines[4]["decision"], lines[5]["decision"]}
+	want := []string{"dispatch", "dispatch", "allow", "allow", "ratelimit", "deny"}
 	for i := range want {
 		if decisions[i] != want[i] {
 			t.Errorf("record %d decision = %q, want %q (all: %v)", i, decisions[i], want[i], decisions)
@@ -94,12 +94,12 @@ agents:
 
 	// Provenance, end-to-end: a policy decision names the matching rule in the
 	// audit reason — so an allow/deny is explainable through the real binary and
-	// the on-disk trail, not an opaque "policy". (Record 2 is a rate-limit, whose
+	// the on-disk trail, not an opaque "policy". (Record 4 is a rate-limit, whose
 	// reason belongs to the limiter, so it is not asserted here.)
-	if got := lines[0]["reason"]; got != `allow-rule "nockcc_nock_*"` {
+	if got := lines[2]["reason"]; got != `allow-rule "nockcc_nock_*"` {
 		t.Errorf("allow record reason = %q, want the matching allow-rule", got)
 	}
-	if got := lines[3]["reason"]; got != `deny-rule "nockcc_kill_switch_set"` {
+	if got := lines[5]["reason"]; got != `deny-rule "nockcc_kill_switch_set"` {
 		t.Errorf("deny record reason = %q, want the matching deny-rule", got)
 	}
 }

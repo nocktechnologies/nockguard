@@ -76,7 +76,6 @@ func TestRecordRequiredLatchesCheckpointFailure(t *testing.T) {
 	if err := a.RecordRequired(Event{Agent: "worker", Tool: "first", Decision: "allow"}); err != nil {
 		t.Fatal(err)
 	}
-
 	// The existing checkpoint remains readable, while making the temp path a
 	// directory forces the actual sidecar replacement to fail after appending.
 	tmpPath := path + hwmSuffix + ".tmp"
@@ -89,6 +88,9 @@ func TestRecordRequiredLatchesCheckpointFailure(t *testing.T) {
 	latched := a.RequiredError()
 	if latched == nil {
 		t.Fatal("checkpoint failure was not latched")
+	}
+	if !FailureStatus(path) {
+		t.Fatal("checkpoint failure was not visible to status readers")
 	}
 	if err := os.Remove(tmpPath); err != nil {
 		t.Fatal(err)
@@ -110,8 +112,93 @@ func TestRecordRequiredLatchesCheckpointFailure(t *testing.T) {
 		t.Fatalf("reopen after repairing checkpoint failure: %v", err)
 	}
 	defer reopened.Close()
+	if FailureStatus(path) {
+		t.Fatal("verified reopen did not clear the failure marker")
+	}
 	if err := reopened.RecordRequired(Event{Agent: "worker", Tool: "after-reopen", Decision: "allow"}); err != nil {
 		t.Fatal(err)
+	}
+	if FailureStatus(path) {
+		t.Fatal("successful required write did not clear failure status")
+	}
+}
+
+func TestOtherWriterCannotClearRequiredFailureMarker(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	failed, err := New(path, WithEd25519Key(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer failed.Close()
+	if err := failed.RecordRequired(Event{Agent: "worker", Tool: "seed", Decision: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	other, err := New(path, WithEd25519Key(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	tmpPath := path + hwmSuffix + ".tmp"
+	if err := os.Mkdir(tmpPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := failed.RecordRequired(Event{Agent: "worker", Tool: "failed", Decision: "allow"}); err == nil {
+		t.Fatal("checkpoint failure did not latch")
+	}
+	if err := os.Remove(tmpPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.RecordRequired(Event{Agent: "worker", Tool: "success", Decision: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	if !FailureStatus(path) || failed.RequiredError() == nil {
+		t.Fatal("another writer's success cleared a latched required failure")
+	}
+}
+
+func TestFailureStatusTreatsSelfReferentialSymlinkAsDegraded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	marker := path + ".audit-failing"
+	if err := os.Symlink(marker, marker); err != nil {
+		t.Fatal(err)
+	}
+	if !FailureStatus(path) {
+		t.Fatal("unknown marker status reported healthy")
+	}
+}
+
+func TestFailureStatusTreatsDanglingSymlinkAsDegraded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	marker := path + ".audit-failing"
+	if FailureStatus(path) {
+		t.Fatal("absent failure marker reported degraded")
+	}
+	if err := os.Symlink(filepath.Join(filepath.Dir(path), "missing"), marker); err != nil {
+		t.Fatal(err)
+	}
+	if !FailureStatus(path) {
+		t.Fatal("dangling marker symlink reported healthy")
+	}
+}
+
+func TestFailedAuditTrailMustExistForVerifiedReopen(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	if err := os.Mkdir(path+".audit-failing", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(path, WithEd25519Key(priv)); err == nil {
+		t.Fatal("missing trail was accepted as verified recovery")
+	}
+	if !FailureStatus(path) {
+		t.Fatal("failed reopen cleared the marker")
 	}
 }
 

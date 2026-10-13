@@ -451,11 +451,29 @@ func TestMCPListenSubcommandForwardsAuditsAndShutsDown(t *testing.T) {
 	waitForCommandExit(t, cmd, stderr)
 
 	events := readAuditEvents(t, auditPath)
-	if len(events) != 1 {
-		t.Fatalf("audit rows = %d, want 1: %+v", len(events), events)
+	if len(events) != 2 {
+		t.Fatalf("audit rows = %d, want dispatch and allow: %+v", len(events), events)
 	}
-	if events[0].Agent != "mira" || events[0].Tool != "nockcc_nock_list" || events[0].Decision != "allow" {
-		t.Fatalf("audit row = %+v, want mira/nockcc_nock_list/allow", events[0])
+	if events[0].Decision != "dispatch" || events[1].Agent != "mira" || events[1].Tool != "nockcc_nock_list" || events[1].Decision != "allow" {
+		t.Fatalf("audit rows = %+v, want dispatch then mira/nockcc_nock_list/allow", events)
+	}
+}
+
+func TestStatusShowsAuditFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.audit.jsonl")
+	if err := os.Mkdir(path+".audit-failing", 0700); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := runCommandForTest(t, "status", "--agent", "mira", "--audit", path)
+	if code != 2 || !strings.Contains(out, "last required audit write failed") || strings.Contains(out, "calls refused") {
+		t.Fatalf("status = (%d, %q), want visible degraded state", code, out)
+	}
+	if err := os.Remove(path + ".audit-failing"); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ = runCommandForTest(t, "doctor", "--agent", "mira", "--audit", path)
+	if code != 0 || strings.Contains(out, "last required audit write failed") {
+		t.Fatalf("doctor after recovery = (%d, %q)", code, out)
 	}
 }
 

@@ -100,10 +100,11 @@ response; SSE tool results currently do not commit card state.
 
 Proxy or gateway failure must be visible to the connector. Document an operator
 rollback to the original upstream endpoint and test it; do not promise a fixed
-recovery time. Audit-write failures currently log an error rather than blocking
-all tool execution. That behavior needs an explicit operational decision before
-claiming every hosted call is durably audited. Do not rely on an untested
-tripwire as the hosted listener's recovery mechanism.
+recovery time. When audit is enabled, the local listener writes a durable
+dispatch record before forwarding a tool call and refuses calls if that write
+fails. `--audit-best-effort` is an explicit local opt-out; do not use it for a
+hosted listener that claims complete audit evidence. The `mcp-gateway` keeps
+its required-audit contract for authenticated hosted calls.
 
 ## Validation and the Kevin-gated cutover
 

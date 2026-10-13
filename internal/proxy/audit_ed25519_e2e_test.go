@@ -81,8 +81,8 @@ func TestEd25519AuditEndToEnd(t *testing.T) {
 	}
 
 	out, code := verify()
-	if code != 0 || !strings.Contains(out, "OK") || !strings.Contains(out, "2 entries verified") {
-		t.Fatalf("expected OK/2 entries (exit 0), got exit %d: %s", code, out)
+	if code != 0 || !strings.Contains(out, "OK") || !strings.Contains(out, "4 entries verified") {
+		t.Fatalf("expected OK/4 entries (exit 0), got exit %d: %s", code, out)
 	}
 
 	// 5. Tamper one entry -> verification must fail with exit 2.

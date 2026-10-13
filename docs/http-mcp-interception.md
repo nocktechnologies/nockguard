@@ -77,9 +77,10 @@ The `nockguard mcp-http` subcommand (see `cmd/nockguard/main.go` and
    chain verifying. Auth headers and tool arguments are NEVER logged (only tool
    name + decision).
 
-3. **Observe mode only** — the proxy never blocks or denies a call; every
-   request is forwarded unconditionally. This matches `WithEnforce(false)`
-   semantics in the egress proxy.
+3. **Observe policy mode** — the proxy does not deny calls by policy. When
+   auditing is enabled, a tool call is forwarded only after its observe
+   decision is durable. `--audit-best-effort` explicitly restores forwarding
+   after audit-write errors.
 
 4. **Kill-switch tripwire** — `NOCKGUARD_TRIPWIRE=1` disables audit writes while
    still forwarding calls (never a silent dead-end). The proxy logs loudly on
@@ -142,7 +143,7 @@ you need to rule out the proxy as a problem.
 
 - `go test ./...` green, including `internal/proxy/mcphttp/`.
 - A simulated tools/call through the proxy: (a) reaches a stub upstream, (b)
-  produces a signed audit entry with a verifying chain, (c) is observe-only
-  (never blocks), (d) tripwire forwards directly with no audit writes.
+  produces a signed audit entry with a verifying chain, (c) has no policy
+  denial, (d) tripwire forwards directly with no audit writes.
 - Mira can execute the cutover and verify real traffic lands in
   `mira.audit.jsonl` + the Live Wall with a passing chain.

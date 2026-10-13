@@ -20,7 +20,7 @@ Go tests live beside each package as `*_test.go` unless noted otherwise.
 | `internal/policy/` | YAML loader, verdicts, key discovery and shadow rules; package tests including fail-open guards. |
 | `internal/pool/` | Pool config, routing and budget logic; package tests. |
 | `internal/proxy/` | Stdio/HTTP gates, discovery filtering, required audit and integration tests. |
-| `internal/proxy/mcphttp/` | Observe-only stdio-to-HTTP bridge; package end-to-end tests. |
+| `internal/proxy/mcphttp/` | Stdio-to-HTTP bridge with observe-only policy mode and required pre-forward audit when enabled; package end-to-end tests. |
 | `internal/proxy/forwardhttp/` | Explicit HTTP/CONNECT egress proxy and SSRF guard; package tests. |
 | `internal/ratelimit/` | Sliding-window and session-call caps; package and proxy tests. |
 | `internal/secrets/` | Credential reference resolution; package and proxy injection tests. |

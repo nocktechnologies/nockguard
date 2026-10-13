@@ -14,10 +14,12 @@
    before retrying any call: a failed response can follow a successful side
    effect. Repair storage, verify the signed trail, then restart the gateway;
    filesystem repair alone does not clear its failed writer.
-4. For stdio `proxy` or local `mcp-listen`, treat audit-write errors as possible
-   evidence gaps because those paths may continue forwarding. Review upstream
-   state and the policy, then decide whether to stop the route until evidence
-   is available. Do not describe a clean trail as proof of calls that never
+4. For stdio `proxy`, local `mcp-listen`, or `mcp-http`, a required audit-write
+   error refuses that call before forwarding when the write is pre-forward, and
+   the latched writer refuses later calls. Inspect upstream state if a failure
+   follows forwarding; a tool may already have executed. Check whether the
+   route explicitly uses `--audit-best-effort`, which restores forwarding after
+   write errors. Do not describe a clean trail as proof of calls that never
    reached that trail.
 5. Capture a Wall PROOF export only for Guard rows and consult
    [the proof limits](../verifying-the-trail.md). Restore the prior endpoint and

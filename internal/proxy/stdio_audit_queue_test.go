@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"io"
 	"log"
 	"sort"
 	"strings"
@@ -11,6 +12,56 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/extract"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 )
+
+type auditWriteCheck func([]byte) (int, error)
+
+func (f auditWriteCheck) Write(p []byte) (int, error) { return f(p) }
+
+func TestStdioOutOfOrderResponseAuditLimit(t *testing.T) {
+	auditor, path, _ := newEd25519Auditor(t)
+	defer auditor.Close()
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	pending := &sync.Map{}
+	forwards := 0
+	forward := auditWriteCheck(func(p []byte) (int, error) {
+		forwards++
+		rows := readAuditEvents(t, path)
+		if len(rows) != forwards || rows[forwards-1].Decision != "dispatch" {
+			t.Fatalf("forward %d preceded its durable dispatch: %+v", forwards, rows)
+		}
+		return len(p), nil
+	})
+	input := toolCall("1", "first_tool") + "\n" + toolCall("2", "second_tool") + "\n"
+	if err := gate.agentToUpstream(strings.NewReader(input), forward, pending); err != nil {
+		t.Fatal(err)
+	}
+	if forwards != 2 {
+		t.Fatalf("forwards=%d, want 2", forwards)
+	}
+	rows := readAuditEvents(t, path)
+	if len(rows) != 2 || rows[0].Tool != "first_tool" || rows[1].Tool != "second_tool" {
+		t.Fatalf("both dispatch rows should precede upstream responses: %+v", rows)
+	}
+	var agent bytes.Buffer
+	second := `{"jsonrpc":"2.0","id":2,"result":{}}` + "\n"
+	if err := gate.upstreamToAgent(strings.NewReader(second), &agent, pending); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(agent.String(), `"id":2`) || !strings.Contains(agent.String(), `"result"`) {
+		t.Fatalf("out-of-order response was held: %s", agent.String())
+	}
+	if rows = readAuditEvents(t, path); len(rows) != 2 {
+		t.Fatalf("deferred decision overtook pending first call: %+v", rows)
+	}
+	first := `{"jsonrpc":"2.0","id":1,"result":{}}` + "\n"
+	if err := gate.upstreamToAgent(strings.NewReader(first), io.Discard, pending); err != nil {
+		t.Fatal(err)
+	}
+	rows = readAuditEvents(t, path)
+	if len(rows) != 4 || rows[2].Tool != "first_tool" || rows[2].Decision != "allow" || rows[3].Tool != "second_tool" || rows[3].Decision != "allow" {
+		t.Fatalf("deferred decisions not written in request order: %+v", rows)
+	}
+}
 
 // TestStdioDrainDoesNotLoseResolvedAudits verifies that when the upstream
 // closes, drainAudits marks all still-pending seqs as resolved and flushes
@@ -150,6 +201,7 @@ agents:
 	}
 	var logs bytes.Buffer
 	proxy := NewStdioProxy(nil, "mira", engine, validator, nil, auditor, nil, log.New(&logs, "", 0))
+	proxy.WithBestEffortAudit() // this case isolates deferred queue ordering
 	proxy.WithResolver(&mockResolver{
 		values: map[string]string{
 			"env:ECHO_TOKEN": "audit-secret-0001",

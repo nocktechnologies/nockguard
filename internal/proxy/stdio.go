@@ -33,7 +33,7 @@ type StdioProxy struct {
 	validator     *validate.Validator
 	limiter       *ratelimit.Limiter
 	auditor       *audit.Auditor
-	requiredAudit bool // enabled only by a serialized HTTP listener
+	requiredAudit bool // enabled by default when the local audit trail is on
 	forwarder     *forward.Forwarder
 	trust         *trust.Accumulator
 	approver      approval.Approver // Phase 5; nil = no approval gate (Phase 1-4 behavior)
@@ -148,6 +148,13 @@ func (p *StdioProxy) WithApprover(a approval.Approver) *StdioProxy {
 	return p
 }
 
+// WithBestEffortAudit explicitly restores logging without a forwarding gate.
+func (p *StdioProxy) WithBestEffortAudit() *StdioProxy {
+	p.requiredAudit = false
+	p.auditor.ClearFailureStatus()
+	return p
+}
+
 func (p *StdioProxy) WithTrust(t *trust.Accumulator) *StdioProxy {
 	p.trust = t
 	if p.limiter != nil && t.Enabled() {
@@ -172,6 +179,7 @@ func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, valid
 		validator:     validator,
 		limiter:       limiter,
 		auditor:       auditor,
+		requiredAudit: auditor.Enabled(),
 		forwarder:     forwarder,
 		logger:        logger,
 		resolver:      resolver,
@@ -601,11 +609,37 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 	for scanner.Scan() {
+		if p.requiredAudit {
+			if err := p.auditor.RequiredError(); err != nil {
+				p.logger.Printf("AUDIT-ERROR agent=%s audit failing: calls refused: %v", p.agent, err)
+				id := json.RawMessage("null")
+				if msg, decodeErr := jsonrpc.Decode(scanner.Bytes()); decodeErr == nil {
+					id = msg.ID
+				}
+				if rejectErr := p.rejectToAgent(id, -32603, AuditBeforeForwardError); rejectErr != nil {
+					return rejectErr
+				}
+				continue
+			}
+		}
 		// Assign sequence number to this request for audit ordering
 		seq := atomic.AddUint64(&p.auditSeq, 1) - 1
 		deferred := false
 
 		d := p.decide(scanner.Bytes(), seq)
+		if p.requiredAudit && p.auditor.RequiredError() != nil {
+			p.resolveAudit(seq)
+			id := d.rejectID
+			if d.forward != nil {
+				if msg, err := jsonrpc.Decode(d.forward); err == nil {
+					id = msg.ID
+				}
+			}
+			if err := p.rejectToAgent(id, -32603, AuditBeforeForwardError); err != nil {
+				return err
+			}
+			continue
+		}
 		if d.toolsListID != nil {
 			// tools/list (always a request) — track the id so the response can be
 			// filtered by upstreamToAgent. Mark as deferred so we don't resolve
@@ -614,6 +648,10 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			deferred = true
 		}
 		if d.reject {
+			p.resolveAudit(seq)
+			if p.requiredAudit && p.auditor.RequiredError() != nil {
+				d.rejectCode, d.rejectMsg = -32603, AuditBeforeForwardError
+			}
 			// A denied REQUEST returns a JSON-RPC error; a denied NOTIFICATION
 			// (rejectID nil) is dropped — rejectToAgent no-ops on a nil id.
 			if werr := p.rejectToAgent(d.rejectID, d.rejectCode, d.rejectMsg); werr != nil {
@@ -621,6 +659,18 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			}
 		}
 		if d.forward != nil {
+			var request jsonrpc.Message
+			_ = json.Unmarshal(d.forward, &request)
+			if p.requiredAudit && request.Method == "tools/call" {
+				p.audit(d.tool, "dispatch", "required-audit-before-forward", d.refsForAudit)
+				if p.auditor.RequiredError() != nil {
+					p.resolveAudit(seq)
+					if err := p.rejectToAgent(request.ID, -32603, AuditBeforeForwardError); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			if _, writeErr := fmt.Fprintf(w, "%s\n", d.forward); writeErr != nil {
 				return writeErr
 			}
@@ -953,6 +1003,9 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 					// Resolve audits unconditionally - even if shouldCommit is false.
 					// Appended audits will be emitted in order by flushAuditsLocked.
 					p.resolveAudit(cardVal.auditSeq)
+					if p.requiredAudit && p.auditor.RequiredError() != nil {
+						line = jsonrpc.ErrorResponse(msg.ID, -32603, auditAfterForwardError)
+					}
 				}
 			}
 		}
