@@ -12,7 +12,7 @@ If a path is provided, lint that file. Otherwise, lint `~/.nockguard/policy.yaml
 
 ```bash
 # Resolve the path
-POLICY="${1:-$HOME/.nockguard/policy.yaml}"
+POLICY="${1:-${POLICY:-$HOME/.nockguard/policy.yaml}}"
 [ -f "$POLICY" ] || { echo "No policy file found at $POLICY. Run \`nockguard init\` to scaffold one." >&2; exit 1; }
 cat "$POLICY"
 ```
@@ -22,6 +22,7 @@ Run each snippet in this command as its own bash invocation; they `exit` non-zer
 Verify NockGuard can parse it. The probe runs a copy of the policy with the `audit` block neutralised (`enabled: false`; `path` and both signing env names removed; `forward` kept but set to `enabled: false`, so it makes no request and its field names are still checked) under a throwaway `HOME`, so it cannot create a trail, forward records or fail on a missing signing env. Unknown keys elsewhere, including inside `audit`, still fail the load. It has a timeout, and it captures the proxy's own status (piping to `head` would report `head`'s status instead):
 
 ```bash
+POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 PROBE_DIR=$(mktemp -d)   # left for the OS temp cleaner; the probe never deletes anything
 python3 - "$POLICY" "$PROBE_DIR/policy.yaml" <<'PY' || { echo "ERROR: could not prepare the probe copy of $POLICY (invalid YAML, or PyYAML missing)" >&2; exit 1; }
 import sys, yaml

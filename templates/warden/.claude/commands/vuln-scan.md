@@ -150,7 +150,7 @@ Interpret what you find:
 
 ## Step 4 — Verify the audit chain
 
-Pick the verifier from the policy's signing settings. Do not run the verifiers in turn: a verifier for the wrong scheme can exit 2 and read as tampering. The snippet reads the settings, classifies a missing trail before it calls any verifier, then maps the verifier's own exit status. Run it as its own bash invocation, because it `exit`s and sets `set -e`. Set `TRAIL` to the trail selected in Step 3 and `AGENT` to its signing agent; set `PER_AGENT=1` if a per-agent trail was written with `--audit` under another name, and `PUB_ENV` if the Ed25519 public key is not in `NOCKGUARD_AUDIT_ED25519_PUB`:
+Pick the verifier from the policy's signing settings. Do not run the verifiers in turn: a verifier for the wrong scheme can exit 2 and read as tampering. The snippet reads the settings, classifies a missing trail before it calls any verifier, then maps the verifier's own exit status. Run it as its own bash invocation, because it `exit`s and sets `set -e`. Set `TRAIL` to the trail selected in Step 3 and `AGENT` to its signing agent; set `PER_AGENT=1` or `0` when `--audit` gave the trail a name that does not follow `<agent>.<audit.path basename>` (1: signed with the agent's own key; 0: signed with the policy key), and `PUB_ENV` if the Ed25519 public key is not in `NOCKGUARD_AUDIT_ED25519_PUB`:
 
 ```bash
 set -e
@@ -188,9 +188,10 @@ if [ ! -e "$TRAIL" ]; then
 fi
 
 # A per-agent trail is <agent>.<basename of audit.path> (AgentAuditPath) and is
-# signed with that agent's own Ed25519 key. Set PER_AGENT=1 if --audit gave the
-# trail another name.
-if [ "$(basename "$TRAIL")" = "$AGENT.$BASE" ] || [ -n "${PER_AGENT:-}" ]; then
+# signed with that agent's own Ed25519 key. The name is only a guess when
+# --audit chose the path: PER_AGENT=1 forces the per-agent verifier, PER_AGENT=0
+# forces the policy verifier.
+if [ "${PER_AGENT:-}" = 1 ] || { [ -z "${PER_AGENT:-}" ] && [ "$(basename "$TRAIL")" = "$AGENT.$BASE" ]; }; then
   SIGN=agent
 fi
 
@@ -217,7 +218,7 @@ Which verifier applies (Ed25519 takes precedence over HMAC, as in `AuditorForAge
 
 | Trail and policy | Verifier |
 |---|---|
-| trail is `<agent>.<basename of audit.path>` (default `<agent>.audit.jsonl`), or `PER_AGENT=1` | `verify --agent` (public key from `NOCKGUARD_AGENT_<NAME>_ED25519_PUB` or `~/.nockguard/keys/<agent>.pub`) |
+| trail is `<agent>.<basename of audit.path>` (default `<agent>.audit.jsonl`), or `PER_AGENT=1`; `PER_AGENT=0` turns the name match off | `verify --agent` (public key from `NOCKGUARD_AGENT_<NAME>_ED25519_PUB` or `~/.nockguard/keys/<agent>.pub`) |
 | `audit.sign_ed25519_key_env` set | `verify --ed25519-pub-env` |
 | only `audit.sign_key_env` set | `verify --key-env <that name>` (HMAC) |
 | none of the above | unsigned; nothing to verify (finding 2h) |
