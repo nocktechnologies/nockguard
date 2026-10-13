@@ -160,7 +160,7 @@ func TestOtherWriterCannotClearRequiredFailureMarker(t *testing.T) {
 	}
 }
 
-func TestFailureStatusTreatsStatErrorAsDegraded(t *testing.T) {
+func TestFailureStatusTreatsSelfReferentialSymlinkAsDegraded(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
 	marker := path + ".audit-failing"
 	if err := os.Symlink(marker, marker); err != nil {
@@ -168,6 +168,20 @@ func TestFailureStatusTreatsStatErrorAsDegraded(t *testing.T) {
 	}
 	if !FailureStatus(path) {
 		t.Fatal("unknown marker status reported healthy")
+	}
+}
+
+func TestFailureStatusTreatsDanglingSymlinkAsDegraded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	marker := path + ".audit-failing"
+	if FailureStatus(path) {
+		t.Fatal("absent failure marker reported degraded")
+	}
+	if err := os.Symlink(filepath.Join(filepath.Dir(path), "missing"), marker); err != nil {
+		t.Fatal(err)
+	}
+	if !FailureStatus(path) {
+		t.Fatal("dangling marker symlink reported healthy")
 	}
 }
 

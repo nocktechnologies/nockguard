@@ -278,7 +278,7 @@ func (a *Auditor) RecordRequired(ev Event) error {
 // FailureStatus reports the last required-audit write failure for a trail.
 // Only a verified reopen or an explicit best-effort choice clears the signal.
 func FailureStatus(path string) bool {
-	_, err := os.Stat(path + ".audit-failing")
+	_, err := os.Lstat(path + ".audit-failing")
 	return !os.IsNotExist(err)
 }
 
