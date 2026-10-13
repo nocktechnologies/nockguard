@@ -3,16 +3,21 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
+	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
@@ -472,6 +477,11 @@ func (p *StdioProxy) drainAudits() {
 	p.flushAuditsLocked()
 }
 
+// Once the upstream leader exits, Run has at most this long to deliver its
+// remaining output and in-flight errors. Bytes still in the pipe are dropped
+// at the deadline, including when the client stops reading stdout.
+const upstreamShutdownBound = time.Second
+
 func (p *StdioProxy) Run() error {
 
 	cmd := exec.Command(p.upstream[0], p.upstream[1:]...)
@@ -494,54 +504,168 @@ func (p *StdioProxy) Run() error {
 	strip = append(strip, p.engine.InjectEnvNames()...)
 	strip = append(strip, "NOCKCC_BASE_URL", "NOCKGUARD_VAULT_AGENT_TOKEN")
 	cmd.Env = sanitizedEnv(strip)
+	// Own process group, so a cutoff can kill grandchildren that inherited stdout.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	upstreamIn, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("stdin pipe: %w", err)
 	}
-	upstreamOut, err := cmd.StdoutPipe()
+	// An *os.File stdout (not StdoutPipe) so cmd.Wait neither closes the read
+	// end nor waits on a grandchild that inherited it.
+	upstreamOut, upstreamOutW, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
+	defer upstreamOut.Close()
+	cmd.Stdout = upstreamOutW
+	// A closed client stdout must surface as EPIPE so Run can clean up the
+	// upstream group instead of exiting immediately on SIGPIPE. Notify installs
+	// a caught handler, which exec resets in the upstream child.
+	brokenPipeSignals := make(chan os.Signal, 1)
+	if !signal.Ignored(syscall.SIGPIPE) {
+		signal.Notify(brokenPipeSignals, syscall.SIGPIPE)
+		defer signal.Stop(brokenPipeSignals)
+	}
+	signals := make(chan os.Signal, 1)
+	for _, sig := range []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT} {
+		if !signal.Ignored(sig) {
+			signal.Notify(signals, sig)
+		}
+	}
+	defer signal.Stop(signals)
 
-	if err := cmd.Start(); err != nil {
+	err = cmd.Start()
+	upstreamOutW.Close()
+	if err != nil {
 		return fmt.Errorf("start upstream: %w", err)
 	}
+	defer upstreamIn.Close()
+	waitCh := observeLeaderExit(cmd)
 
-	var wg sync.WaitGroup
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 1)
+	var agentEOF atomic.Bool
+	var outputFailed atomic.Bool
+	outputErrCh := make(chan error, 1)
+	upstreamDone := make(chan struct{})
 
 	pendingCalls := &sync.Map{}
 
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
 		if err := p.agentToUpstream(os.Stdin, upstreamIn, pendingCalls); err != nil {
 			errCh <- fmt.Errorf("agent->upstream: %w", err)
+		} else {
+			agentEOF.Store(true)
 		}
 		upstreamIn.Close()
 	}()
 
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
+		defer close(upstreamDone)
 		if err := p.upstreamToAgent(upstreamOut, os.Stdout, pendingCalls); err != nil {
-			errCh <- fmt.Errorf("upstream->agent: %w", err)
+			outputFailed.Store(true)
+			outputErrCh <- fmt.Errorf("upstream->agent: %w", err)
 		}
 	}()
 
-	wg.Wait()
-	close(errCh)
-
-	// Drain any unresolved audits before checking upstream exit
-	p.drainAudits()
-
-	if waitErr := cmd.Wait(); waitErr != nil {
+	var observed error
+	select {
+	case <-upstreamDone:
+		// The output loop can end while the leader is still alive (for example,
+		// on a client write error). If client input finished cleanly, let the
+		// upstream finish its own shutdown before stopping any descendants.
+		if outputFailed.Load() || !agentEOF.Load() {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		select {
+		case observed = <-waitCh:
+		case sig := <-signals:
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return fmt.Errorf("proxy received %s", sig)
+		}
+	case observed = <-waitCh:
+	case sig := <-signals:
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return fmt.Errorf("proxy received %s", sig)
+	}
+	// One absolute deadline covers output draining, client writes, error replies,
+	// and audit cleanup. A blocked client write is abandoned when it expires.
+	shutdown, cancel := context.WithTimeout(context.Background(), upstreamShutdownBound)
+	defer cancel()
+	outputTimedOut, shutdownTimedOut := false, false
+	select {
+	case <-upstreamDone:
+	case <-shutdown.Done():
+		outputTimedOut, shutdownTimedOut = true, true
+		p.logger.Print("upstream exited: output drain deadline reached; dropping remaining output")
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = upstreamOut.Close()
+	case sig := <-signals:
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return fmt.Errorf("proxy received %s", sig)
+	}
+	if !agentEOF.Load() && !outputTimedOut {
+		replied := make(chan struct{})
+		go func() {
+			defer close(replied)
+			pendingCalls.Range(func(key, _ any) bool {
+				if err := p.rejectToAgent(json.RawMessage(key.(string)), -32603, "upstream exited"); err != nil {
+					p.logger.Printf("upstream exited: reply for in-flight request failed: %v", err)
+				}
+				return true
+			})
+		}()
+		select {
+		case <-replied:
+		case <-shutdown.Done():
+			shutdownTimedOut = true
+			p.logger.Print("upstream exited: client reply deadline reached; abandoning remaining replies")
+		case sig := <-signals:
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return fmt.Errorf("proxy received %s", sig)
+		}
+	}
+	audited := make(chan struct{})
+	go func() { p.drainAudits(); close(audited) }()
+	select {
+	case <-audited:
+	case <-shutdown.Done():
+		shutdownTimedOut = true
+		p.logger.Print("upstream exited: audit drain deadline reached")
+	case sig := <-signals:
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return fmt.Errorf("proxy received %s", sig)
+	}
+	// Linux and macOS waitid leave the leader unreaped until this kill, so
+	// the PGID cannot have been reused. Output errors and signals also kill
+	// the group before waiting for the leader.
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	waitErr := reapLeader(cmd, observed)
+	if !outputTimedOut {
+		select {
+		case e := <-outputErrCh:
+			return e
+		default:
+		}
+	}
+	if waitErr != nil {
 		return fmt.Errorf("upstream exit: %w", waitErr)
 	}
-
-	for e := range errCh {
+	if !agentEOF.Load() {
+		select {
+		case e := <-errCh:
+			return e
+		default:
+		}
+		return errors.New("upstream exited before the client closed stdin")
+	}
+	if shutdownTimedOut {
+		return errors.New("upstream shutdown deadline reached")
+	}
+	select {
+	case e := <-errCh:
 		return e
+	default:
 	}
 	return nil
 }
@@ -589,8 +713,8 @@ type mcpDecision struct {
 	// a tools/call (informational; empty otherwise).
 	toolsListID json.RawMessage
 	tool        string
-	// forwardID is the JSON-RPC request id (for requests only). Set for tool calls
-	// that forward, so upstreamToAgent can correlate the response.
+	// forwardID is the JSON-RPC request id for a forwarded request other than
+	// tools/list, so upstreamToAgent can correlate its response.
 	forwardID json.RawMessage
 	// cardStateUpdate stores tool name and extracted refs for updateCardState()
 	// after the JSON-RPC response is verified as successful. nil means no state update needed.
@@ -773,8 +897,12 @@ func (p *StdioProxy) decide(line []byte, seq uint64) mcpDecision {
 	// (not the raw line) so duplicate-key collapsing reaches upstream — a shadow
 	// "method" can't differ between the proxy's view and upstream's.
 	d := mcpDecision{forward: canonicalLine}
-	if msg.IsRequest() && msg.Method == "tools/list" {
-		d.toolsListID = msg.ID
+	if msg.IsRequest() {
+		if msg.Method == "tools/list" {
+			d.toolsListID = msg.ID
+		} else {
+			d.forwardID = msg.ID
+		}
 	}
 	return d
 }
