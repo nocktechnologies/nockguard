@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Usage: build-release-assets.sh <tag> <outdir>
-# Builds nockguard for four targets into <outdir>/nockguard_<version>_<os>_<arch>.tar.gz
+# Builds nockguard and nockguard-wall for four targets into <outdir>/nockguard_<version>_<os>_<arch>.tar.gz
 # and writes <outdir>/SHA256SUMS. <version> is the tag without its leading "v".
 # Needs GNU tar and coreutils sha256sum (Linux, as CI runs it).
 set -euo pipefail
@@ -33,9 +33,10 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
   dir="$stage/$os-$arch"
   mkdir -p "$dir"
   GOOS=$os GOARCH=$arch go build -trimpath -o "$dir/nockguard" ./cmd/nockguard
+  GOOS=$os GOARCH=$arch go build -trimpath -o "$dir/nockguard-wall" ./cmd/nockguard-wall
 
   tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 \
-    -C "$dir" -cf - nockguard | gzip -n >"$out/nockguard_${version}_${os}_${arch}.tar.gz"
+    -C "$dir" -cf - nockguard nockguard-wall | gzip -n >"$out/nockguard_${version}_${os}_${arch}.tar.gz"
   archives+=("nockguard_${version}_${os}_${arch}.tar.gz")
 done
 

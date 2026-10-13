@@ -13,8 +13,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -49,6 +51,100 @@ func TestVerifyCommandCleanTrailProtected(t *testing.T) {
 	}
 	if got.Verdict != "PROTECTED" || got.Entries != 3 || got.Path != path {
 		t.Fatalf("json verdict = %+v, want PROTECTED/3/%s", got, path)
+	}
+}
+
+func TestWallSubcommandPassesFlagsToCompanionBinary(t *testing.T) {
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "wall-args")
+	wallPath := filepath.Join(dir, "nockguard-wall")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$NOCKGUARD_WALL_CAPTURE\"\n"
+	if err := os.WriteFile(wallPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NOCKGUARD_WALL_CAPTURE", capture)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	code, stdout, stderr := runCommandForTest(t, "wall", "--agent", "coder", "--verify-ed25519-pub-env", "CUSTOM_PUB")
+	if code != 0 {
+		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	got, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "--agent\ncoder\n--verify-ed25519-pub-env\nCUSTOM_PUB\n"; string(got) != want {
+		t.Fatalf("Wall arguments = %q, want %q", got, want)
+	}
+}
+
+func TestWallLauncherForwardsTermination(t *testing.T) {
+	if os.Getenv("NOCKGUARD_WALL_TEST_CHILD") == "1" {
+		os.Exit(runCLI([]string{"wall"}))
+	}
+
+	for _, tc := range []struct {
+		name string
+		sig  syscall.Signal
+	}{{"interrupt", syscall.SIGTERM}, {"hangup", syscall.SIGHUP}} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			readyFile := filepath.Join(dir, "wall-ready")
+			stoppedFile := filepath.Join(dir, "wall-stopped")
+			pidFile := filepath.Join(dir, "wall-pid")
+			wallPath := filepath.Join(dir, "nockguard-wall")
+			script := "#!/bin/sh\necho $$ > \"$NOCKGUARD_WALL_PID_FILE\"\ntrap 'echo stopped > \"$NOCKGUARD_WALL_STOPPED_FILE\"; exit 0' TERM INT HUP\necho ready > \"$NOCKGUARD_WALL_READY_FILE\"\nwhile :; do sleep 0.1; done\n"
+			if err := os.WriteFile(wallPath, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("NOCKGUARD_WALL_READY_FILE", readyFile)
+			t.Setenv("NOCKGUARD_WALL_STOPPED_FILE", stoppedFile)
+			t.Setenv("NOCKGUARD_WALL_PID_FILE", pidFile)
+			t.Setenv("NOCKGUARD_WALL_TEST_CHILD", "1")
+
+			cmd := exec.Command(os.Args[0], "-test.run=^TestWallLauncherForwardsTermination$")
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			finished := false
+			defer func() {
+				if finished {
+					return
+				}
+				if data, err := os.ReadFile(pidFile); err == nil {
+					if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+						if process, err := os.FindProcess(pid); err == nil {
+							_ = process.Kill()
+						}
+					}
+				}
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+			}()
+
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if _, err := os.Stat(readyFile); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("Wall child did not start")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if err := cmd.Process.Signal(tc.sig); err != nil {
+				t.Fatalf("send %s to launcher: %v", tc.sig, err)
+			}
+			if err := cmd.Wait(); err != nil {
+				t.Fatalf("launcher exit after %s: %v", tc.sig, err)
+			}
+			finished = true
+			if _, err := os.Stat(stoppedFile); err != nil {
+				t.Fatalf("Wall child did not receive %s: %v", tc.sig, err)
+			}
+		})
 	}
 }
 

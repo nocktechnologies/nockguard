@@ -6,17 +6,20 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
+	"github.com/nocktechnologies/nockguard/internal/policy"
 )
 
 func TestBrokerUnregisterDoesNotDependOnBackgroundRunLoop(t *testing.T) {
@@ -212,6 +215,25 @@ func TestEmbeddedPageWiresSeverityFilter(t *testing.T) {
 	for _, gone := range []string{"t-threats", "t-crit", "body.threats", "body.crit"} {
 		if strings.Contains(html, gone) {
 			t.Errorf("embedded page still references removed toggle: %q", gone)
+		}
+	}
+}
+
+func TestEmbeddedPageShowsUnconfiguredVerification(t *testing.T) {
+	page, err := indexFS.ReadFile("index.html")
+	if err != nil {
+		t.Fatalf("read embedded index.html: %v", err)
+	}
+	html := string(page)
+	for _, want := range []string{
+		"v.status === 'unconfigured'",
+		"v.status === 'unanchored'",
+		"v.status === 'no_rows'",
+		"Audit chain verification is unconfigured",
+		"v.public_key_source",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("embedded page must show unconfigured verification: missing %q", want)
 		}
 	}
 }
@@ -442,7 +464,7 @@ func TestHandleExportMarksTamperedRowsFailed(t *testing.T) {
 	}
 
 	t.Setenv("NOCKGUARD_TEST_EXPORT_PUB", hex.EncodeToString(pub))
-	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "")
+	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "", "")
 	if err != nil {
 		t.Fatalf("newVerifier: %v", err)
 	}
@@ -642,7 +664,7 @@ func TestHandleExportHMACSnapshot(t *testing.T) {
 	writeHMACTrail(t, path, key, sampleTrailEvents())
 
 	t.Setenv("NOCKGUARD_TEST_EXPORT_HMAC", string(key))
-	v, err := newVerifier("", "NOCKGUARD_TEST_EXPORT_HMAC")
+	v, err := newVerifier("", "NOCKGUARD_TEST_EXPORT_HMAC", "")
 	if err != nil {
 		t.Fatalf("newVerifier: %v", err)
 	}
@@ -677,7 +699,7 @@ func TestHandleExportUsesOneTrailSnapshotAcrossRotation(t *testing.T) {
 	// Negative control: the former two-read sequence verifies the old file, then
 	// loads the replacement at line 1 and falsely calls that new row verified.
 	t.Setenv("NOCKGUARD_TEST_EXPORT_PUB", hex.EncodeToString(pub))
-	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "")
+	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "", "")
 	if err != nil {
 		t.Fatalf("newVerifier: %v", err)
 	}
@@ -790,7 +812,7 @@ func TestHandleExportRejectsOversizedSnapshot(t *testing.T) {
 	}
 
 	t.Setenv("NOCKGUARD_TEST_EXPORT_PUB", hex.EncodeToString(pub))
-	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "")
+	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "", "")
 	if err != nil {
 		t.Fatalf("newVerifier: %v", err)
 	}
@@ -913,7 +935,7 @@ func TestHandleExportUnsignedTrailOverLimitStreamsLastWindow(t *testing.T) {
 func TestHandleExportMissingTrailAndCheckpointIsEmpty(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(nil)
 	t.Setenv("NOCKGUARD_TEST_EXPORT_PUB", hex.EncodeToString(pub))
-	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "")
+	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "", "")
 	if err != nil {
 		t.Fatalf("newVerifier: %v", err)
 	}
@@ -936,7 +958,7 @@ func TestHandleExportMissingTrailWithCheckpointReportsTamper(t *testing.T) {
 	}
 
 	t.Setenv("NOCKGUARD_TEST_EXPORT_PUB", hex.EncodeToString(pub))
-	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "")
+	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "", "")
 	if err != nil {
 		t.Fatalf("newVerifier: %v", err)
 	}
@@ -1048,7 +1070,7 @@ func TestHandleExportSerializesConcurrentRequests(t *testing.T) {
 func exportJSON(t *testing.T, path string, pub ed25519.PublicKey, afterCheckpoint, afterSnapshot func()) []event {
 	t.Helper()
 	t.Setenv("NOCKGUARD_TEST_EXPORT_PUB", hex.EncodeToString(pub))
-	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "")
+	v, err := newVerifier("NOCKGUARD_TEST_EXPORT_PUB", "", "")
 	if err != nil {
 		t.Fatalf("newVerifier: %v", err)
 	}
@@ -1157,7 +1179,7 @@ func TestVerifyEndpoint(t *testing.T) {
 	writeSignedTrail(t, path, priv, sampleTrailEvents())
 
 	t.Setenv("NOCKGUARD_TEST_AUDIT_PUB", hex.EncodeToString(pub))
-	v, err := newVerifier("NOCKGUARD_TEST_AUDIT_PUB", "")
+	v, err := newVerifier("NOCKGUARD_TEST_AUDIT_PUB", "", "")
 	if err != nil {
 		t.Fatalf("newVerifier: %v", err)
 	}
@@ -1172,6 +1194,9 @@ func TestVerifyEndpoint(t *testing.T) {
 	}
 	if rep.EntriesVerified != 3 {
 		t.Fatalf("clean trail: entries_verified = %d, want 3", rep.EntriesVerified)
+	}
+	if rep.Verdict != "PROTECTED" || rep.PublicKeySource != "NOCKGUARD_TEST_AUDIT_PUB" {
+		t.Fatalf("clean trail: verdict/source = %q/%q, want PROTECTED/env source", rep.Verdict, rep.PublicKeySource)
 	}
 	if rep.BreakAt != nil {
 		t.Fatalf("clean trail: break_at = %v, want nil", *rep.BreakAt)
@@ -1206,6 +1231,75 @@ func TestVerifyEndpoint(t *testing.T) {
 	}
 }
 
+func TestVerifyEndpointDoesNotProtectEmptyTrail(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+	pubEnv := "NOCKGUARD_TEST_EMPTY_TRAIL_PUB"
+	t.Setenv(pubEnv, hex.EncodeToString(pub))
+	path := filepath.Join(t.TempDir(), "empty.audit.jsonl")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	v, err := newVerifier(pubEnv, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = v
+
+	rep := doVerify(t, b)
+	if rep.Status != statusNoRows || rep.Verdict != "NO_ROWS" || rep.EntriesVerified != 0 {
+		t.Fatalf("empty trail status/verdict/entries = %q/%q/%d, want no_rows/NO_ROWS/0", rep.Status, rep.Verdict, rep.EntriesVerified)
+	}
+}
+
+func TestVerifyEndpointDoesNotProtectUnanchoredTail(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "unanchored.audit.jsonl")
+	writeSignedTrail(t, path, priv, []audit.Event{{Agent: "coder", Tool: "Read", Decision: "allow"}})
+	checkpoint, err := os.ReadFile(path + ".hwm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendSignedTrail(t, path, priv, audit.Event{Agent: "coder", Tool: "Edit", Decision: "allow"})
+	if err := os.WriteFile(path+".hwm", checkpoint, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	pubEnv := "NOCKGUARD_TEST_UNANCHORED_PUB"
+	t.Setenv(pubEnv, hex.EncodeToString(priv.Public().(ed25519.PublicKey)))
+	v, err := newVerifier(pubEnv, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = v
+
+	rep := doVerify(t, b)
+	if rep.Status != statusUnanchored || rep.Verdict != "UNANCHORED" || rep.ChainIntact == nil || !*rep.ChainIntact {
+		t.Fatalf("unanchored trail report = %+v, want unanchored with intact entry signatures", rep)
+	}
+}
+
+func TestVerifyEndpointReadFailureIncludesKeySource(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+	pubEnv := "NOCKGUARD_TEST_UNAVAILABLE_PUB"
+	t.Setenv(pubEnv, hex.EncodeToString(pub))
+	v, err := newVerifier(pubEnv, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := newBroker()
+	b.auditPath = filepath.Join(t.TempDir(), "missing.audit.jsonl")
+	b.verifier = v
+
+	rep := doVerify(t, b)
+	if rep.Status != statusUnavailable || rep.Verdict != "UNAVAILABLE" || rep.PublicKeySource != pubEnv {
+		t.Fatalf("read failure report = %+v, want unavailable and source %s", rep, pubEnv)
+	}
+}
+
 // TestVerifyEndpointHMAC exercises the modeHMAC branch of the verifier — the
 // default: case that calls audit.Verify — which the Ed25519 tests never reach.
 // The trusted HMAC key is sourced SERVER-SIDE by env-var name (--verify-key-env),
@@ -1214,12 +1308,31 @@ func TestVerifyEndpoint(t *testing.T) {
 func TestVerifyEndpointHMAC(t *testing.T) {
 	key := []byte("test-hmac-audit-key-not-a-real-secret")
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
-	writeHMACTrail(t, path, key, sampleTrailEvents())
+	events := sampleTrailEvents()
+	writeHMACTrail(t, path, key, events[:2])
+	partialCheckpoint, err := os.ReadFile(path + ".hwm")
+	if err != nil {
+		t.Fatalf("read partial HMAC checkpoint: %v", err)
+	}
+	writeHMACTrail(t, path, key, events[2:])
+	fullCheckpoint, err := os.ReadFile(path + ".hwm")
+	if err != nil {
+		t.Fatalf("read full HMAC checkpoint: %v", err)
+	}
+	var checkpoint struct {
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(fullCheckpoint, &checkpoint); err != nil {
+		t.Fatalf("decode full HMAC checkpoint: %v", err)
+	}
+	if checkpoint.Count != len(events) {
+		t.Fatalf("HMAC checkpoint count = %d, want %d", checkpoint.Count, len(events))
+	}
 
 	t.Setenv("NOCKGUARD_TEST_AUDIT_HMAC", string(key))
 	// pubEnv MUST be "": Ed25519 takes precedence in newVerifier, so a populated
 	// pub env would silently route to modeEd25519 and this would not test HMAC.
-	v, err := newVerifier("", "NOCKGUARD_TEST_AUDIT_HMAC")
+	v, err := newVerifier("", "NOCKGUARD_TEST_AUDIT_HMAC", "")
 	if err != nil {
 		t.Fatalf("newVerifier: %v", err)
 	}
@@ -1238,8 +1351,25 @@ func TestVerifyEndpointHMAC(t *testing.T) {
 	if rep.EntriesVerified != 3 {
 		t.Fatalf("clean HMAC trail: entries_verified = %d, want 3", rep.EntriesVerified)
 	}
+	if rep.Status != statusVerified || rep.Verdict != "PROTECTED" {
+		t.Fatalf("clean HMAC trail: status/verdict = %q/%q, want verified/PROTECTED", rep.Status, rep.Verdict)
+	}
 	if rep.BreakAt != nil {
 		t.Fatalf("clean HMAC trail: break_at = %v, want nil", *rep.BreakAt)
+	}
+
+	// A valid checkpoint from before the last append must not make the whole
+	// trail PROTECTED: signatures verify, but the checkpoint count covers only
+	// two of the three rows.
+	if err := os.WriteFile(path+".hwm", partialCheckpoint, 0o600); err != nil {
+		t.Fatalf("restore partial HMAC checkpoint: %v", err)
+	}
+	rep = doVerify(t, b)
+	if rep.Status != statusUnanchored || rep.Verdict != "UNANCHORED" || rep.ChainIntact == nil || !*rep.ChainIntact {
+		t.Fatalf("partial HMAC checkpoint report = %+v, want intact but UNANCHORED", rep)
+	}
+	if err := os.WriteFile(path+".hwm", fullCheckpoint, 0o600); err != nil {
+		t.Fatalf("restore full HMAC checkpoint: %v", err)
 	}
 
 	// Tamper the MIDDLE entry so the break lands inside the scan loop (entry 2),
@@ -1271,6 +1401,44 @@ func TestVerifyEndpointHMAC(t *testing.T) {
 	}
 }
 
+func TestBuildViewWithNilVerifierOnGuardReadError(t *testing.T) {
+	b := newBroker()
+	view := b.buildView(guardRead{err: errors.New("guard trail read failed")})
+	if view.rep.Status != statusUnavailable || view.rep.Verdict != "UNAVAILABLE" {
+		t.Fatalf("guard read error report = %+v, want UNAVAILABLE", view.rep)
+	}
+	if view.rep.ChainIntact != nil {
+		t.Fatalf("guard read error chain_intact = %v, want unknown", *view.rep.ChainIntact)
+	}
+}
+
+func TestNewVerifierNamesMalformedPublicKeySource(t *testing.T) {
+	t.Run("environment variable", func(t *testing.T) {
+		const pubEnv = "NOCKGUARD_TEST_BAD_PUBLIC_KEY"
+		t.Setenv(pubEnv, "not-hex")
+		if _, err := newVerifier(pubEnv, "", ""); err == nil || !strings.Contains(err.Error(), pubEnv) {
+			t.Fatalf("malformed env key error = %v, want source %s", err, pubEnv)
+		}
+	})
+
+	t.Run("agent public-key file", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		pubEnv := policy.AgentPubKeyEnvName("coder")
+		t.Setenv(pubEnv, "")
+		path := policy.AgentPubPath(home, "coder")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("not-hex"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := newVerifier(pubEnv, "", "coder"); err == nil || !strings.Contains(err.Error(), path) {
+			t.Fatalf("malformed file key error = %v, want source %s", err, path)
+		}
+	})
+}
+
 // TestReplayHistoryEnrichesVerifyState proves per-event enrichment: replay tags
 // entries before the break "ok", the broken entry "broken", and everything after
 // it "unknown".
@@ -1288,7 +1456,7 @@ func TestReplayHistoryEnrichesVerifyState(t *testing.T) {
 	}
 
 	t.Setenv("NOCKGUARD_TEST_AUDIT_PUB2", hex.EncodeToString(pub))
-	v, err := newVerifier("NOCKGUARD_TEST_AUDIT_PUB2", "")
+	v, err := newVerifier("NOCKGUARD_TEST_AUDIT_PUB2", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1319,7 +1487,7 @@ func TestVerifyDisabledIsUnknown(t *testing.T) {
 	writeSignedTrail(t, path, ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)), sampleTrailEvents())
 
 	// Point at an env var that is not set → verifier disabled.
-	v, err := newVerifier("NOCKGUARD_TEST_UNSET_ENV", "")
+	v, err := newVerifier("NOCKGUARD_TEST_UNSET_ENV", "", "")
 	if err != nil {
 		t.Fatalf("newVerifier: %v", err)
 	}
@@ -1331,8 +1499,65 @@ func TestVerifyDisabledIsUnknown(t *testing.T) {
 	if rep.ChainIntact != nil {
 		t.Fatalf("disabled verifier: chain_intact = %v, want null", *rep.ChainIntact)
 	}
+	if rep.Status != statusUnconfigured || rep.Verdict != "UNCONFIGURED" {
+		t.Fatalf("disabled verifier: status/verdict = %q/%q, want unconfigured/UNCONFIGURED", rep.Status, rep.Verdict)
+	}
 	if got := b.tailState(); got != "unknown" {
 		t.Fatalf("tailState = %q, want unknown", got)
+	}
+}
+
+func TestVerifyEndpointResolvesKeygenPublicKeyFile(t *testing.T) {
+	modCache, err := exec.Command("go", "env", "GOMODCACHE").Output()
+	if err != nil {
+		t.Fatalf("go env GOMODCACHE: %v", err)
+	}
+	buildCache, err := exec.Command("go", "env", "GOCACHE").Output()
+	if err != nil {
+		t.Fatalf("go env GOCACHE: %v", err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GOMODCACHE", strings.TrimSpace(string(modCache)))
+	t.Setenv("GOCACHE", strings.TrimSpace(string(buildCache)))
+	t.Setenv(policy.AgentPubKeyEnvName("coder"), "")
+
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", "./cmd/nockguard", "keygen", "--agent", "coder")
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("nockguard keygen --agent coder: %v\n%s", err, output)
+	}
+
+	seed, err := os.ReadFile(policy.AgentSeedPath(home, "coder"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv, err := audit.PrivateKeyFromHex(string(seed))
+	if err != nil {
+		t.Fatalf("load generated seed for signed fixture: %v", err)
+	}
+	path := filepath.Join(home, ".nockguard", "logs", "coder.audit.jsonl")
+	writeSignedTrail(t, path, priv, sampleTrailEvents())
+
+	v, err := newVerifier(policy.AgentPubKeyEnvName("coder"), "", "coder")
+	if err != nil {
+		t.Fatalf("newVerifier: %v", err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	b.verifier = v
+
+	rep := doVerify(t, b)
+	if rep.Status != statusVerified || rep.Verdict != "PROTECTED" {
+		t.Fatalf("/verify status/verdict = %q/%q, want verified/PROTECTED", rep.Status, rep.Verdict)
+	}
+	if rep.PublicKeySource != policy.AgentPubPath(home, "coder") {
+		t.Fatalf("/verify public_key_source = %q, want %q", rep.PublicKeySource, policy.AgentPubPath(home, "coder"))
 	}
 }
 
@@ -1349,7 +1574,7 @@ func TestTailTipPendingOnIntactChain(t *testing.T) {
 	writeSignedTrail(t, path, priv, sampleTrailEvents())
 
 	t.Setenv("NOCKGUARD_TEST_AUDIT_PUB", hex.EncodeToString(pub))
-	v, err := newVerifier("NOCKGUARD_TEST_AUDIT_PUB", "")
+	v, err := newVerifier("NOCKGUARD_TEST_AUDIT_PUB", "", "")
 	if err != nil {
 		t.Fatalf("newVerifier: %v", err)
 	}
