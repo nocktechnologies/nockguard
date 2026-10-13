@@ -54,6 +54,35 @@ func TestVerifyCommandCleanTrailProtected(t *testing.T) {
 	}
 }
 
+func TestVerifyCommandAgentHonorsExplicitAuditPath(t *testing.T) {
+	dir := t.TempDir()
+	defaultPath, pubHex := writeEd25519Trail(t, dir, "kit")
+	t.Setenv(policy.AgentPubKeyEnvName("kit"), pubHex)
+	explicitPath := filepath.Join(dir, "corrupt.audit.jsonl")
+	if err := os.WriteFile(explicitPath, []byte("not a valid audit row\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The default trail is valid, so a passing verdict would mean the requested file was skipped.
+	if code, stdout, stderr := runCommandForTest(t, "verify", "--agent", "kit", "--audit-dir", dir, "--json"); code != 0 || !strings.Contains(stdout, defaultPath) {
+		t.Fatalf("default trail exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	code, stdout, stderr := runCommandForTest(t, "verify", "--agent", "kit", "--audit-dir", dir, "--audit", explicitPath, "--json")
+	if code != 2 {
+		t.Fatalf("explicit corrupt trail exit %d, want 2\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	var got verifyResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("verify --json emitted invalid JSON: %v\n%s", err, stdout)
+	}
+	if got.Verdict != "TAMPERED" || got.AuditPath != explicitPath {
+		t.Fatalf("explicit trail verdict = %+v, want TAMPERED at %s", got, explicitPath)
+	}
+	if code, stdout, stderr := runCommandForTest(t, "verify", "--agent", "kit", "--audit-dir", dir, "--audit", "", "--json"); code == 0 || !strings.Contains(stderr, "--audit requires a non-empty path") {
+		t.Fatalf("empty explicit trail exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+}
+
 func TestWallSubcommandPassesFlagsToCompanionBinary(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "wall-args")
