@@ -28,8 +28,24 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Go version
+        run: go version
+
       - name: build archives and SHA256SUMS
         run: scripts/build-release-assets.sh "$TAG" dist
+
+      - name: govulncheck release binaries
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          for archive in dist/nockguard_*.tar.gz; do
+            scan_dir="$RUNNER_TEMP/scan-$(basename "$archive" .tar.gz)"
+            mkdir "$scan_dir"
+            tar -xzf "$archive" -C "$scan_dir"
+            for binary in nockguard nockguard-wall; do
+              echo "Scanning $archive: $binary"
+              "$(go env GOPATH)/bin/govulncheck" -mode=binary "$scan_dir/$binary"
+            done
+          done
 
       - name: tag must match the shipped linux/amd64 binary's version
         run: |

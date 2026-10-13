@@ -19,6 +19,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Go version
+        run: go version
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -40,6 +43,14 @@ jobs:
 
       - name: build
         run: go build ./...
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            echo "Scanning $target"
+            CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" "$(go env GOPATH)/bin/govulncheck" ./...
+          done
 
       - name: test
         run: go test -race ./...
