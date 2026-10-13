@@ -23,6 +23,8 @@ import (
 // allow-all agent governs every call.
 const defaultObserveAgent = "default"
 
+const observeSetupLockName = ".state-setup"
+
 // observePolicyYAML is the in-memory zero-config OBSERVE policy: one "default"
 // agent in allow mode — allow every tool, deny nothing. It is loaded through the
 // real policy loader (policy.LoadBytes), so the observe engine is parsed and
@@ -112,12 +114,19 @@ func ensureObserveKey(home, agent string) (ed25519.PrivateKey, ed25519.PublicKey
 	} else if !info.IsDir() {
 		return nil, nil, fmt.Errorf("home path %s is not a directory", home)
 	}
-
 	nockguardDir, err := openOrCreateObserveDir(int(homeDir.Fd()), ".nockguard", 0o700, unix.Fsync)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening nockguard state dir: %w", err)
 	}
 	defer nockguardDir.Close()
+	// Serialize key-directory setup from the stable state directory. Keep this
+	// lock inside ~/.nockguard so observe never leaves ~/.nockguard.lock in HOME.
+	unlockState, err := lockAgentKeys(nockguardDir, observeSetupLockName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("locking observe state directory setup: %w", err)
+	}
+	defer unlockState()
+
 	keyDir, err := openOrCreateObserveDir(int(nockguardDir.Fd()), "keys", 0o700, unix.Fsync)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening observe key dir: %w", err)
@@ -226,6 +235,10 @@ func openOrCreateObserveDir(parentFD int, name string, perm uint32, syncParent f
 		_ = dir.Close()
 		return nil, err
 	}
+	if lstat.Dev != stat.Dev || lstat.Ino != stat.Ino {
+		_ = dir.Close()
+		return nil, fmt.Errorf("%s changed while opening directory", name)
+	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
 		_ = dir.Close()
 		return nil, fmt.Errorf("%s is not a directory", name)
@@ -276,6 +289,15 @@ func openOrCreateObserveDir(parentFD int, name string, perm uint32, syncParent f
 	if name != "keys" && mode&0o022 != 0 {
 		_ = dir.Close()
 		return nil, fmt.Errorf("%s permissions = %o, want no group or other write access", name, mode)
+	}
+	var current unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		_ = dir.Close()
+		return nil, fmt.Errorf("checking %s after opening directory: %w", name, err)
+	}
+	if current.Dev != stat.Dev || current.Ino != stat.Ino {
+		_ = dir.Close()
+		return nil, fmt.Errorf("%s directory was replaced during setup", name)
 	}
 	if err := syncParent(parentFD); err != nil {
 		_ = dir.Close()
