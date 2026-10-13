@@ -76,7 +76,7 @@ func newVerifier(pubEnv, keyEnv, agent string) (*verifier, error) {
 		if pubHex != "" {
 			pub, err := audit.PublicKeyFromHex(pubHex)
 			if err != nil {
-				return nil, fmt.Errorf("%s: %w", pubEnv, err)
+				return nil, fmt.Errorf("%s: %w", source, err)
 			}
 			v.mode = modeEd25519
 			v.pub = pub

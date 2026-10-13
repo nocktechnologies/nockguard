@@ -223,11 +223,13 @@ func (b *broker) buildView(g guardRead) *wallView {
 	case g.err != nil:
 		v.guardEvs = g.events
 		v.rep = verifyReport{
-			Status:          statusUnavailable,
-			Verdict:         "UNAVAILABLE",
-			PublicKeySource: b.verifier.pubSource,
-			Detail:          strptr(g.err.Error()),
-			LastVerifiedAt:  v.at.Format(time.RFC3339),
+			Status:         statusUnavailable,
+			Verdict:        "UNAVAILABLE",
+			Detail:         strptr(g.err.Error()),
+			LastVerifiedAt: v.at.Format(time.RFC3339),
+		}
+		if b.verifier != nil {
+			v.rep.PublicKeySource = b.verifier.pubSource
 		}
 	case g.events != nil:
 		v.guardEvs = g.events

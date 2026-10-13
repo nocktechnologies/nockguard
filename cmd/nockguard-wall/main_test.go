@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -1235,7 +1236,26 @@ func TestVerifyEndpointReadFailureIncludesKeySource(t *testing.T) {
 func TestVerifyEndpointHMAC(t *testing.T) {
 	key := []byte("test-hmac-audit-key-not-a-real-secret")
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
-	writeHMACTrail(t, path, key, sampleTrailEvents())
+	events := sampleTrailEvents()
+	writeHMACTrail(t, path, key, events[:2])
+	partialCheckpoint, err := os.ReadFile(path + ".hwm")
+	if err != nil {
+		t.Fatalf("read partial HMAC checkpoint: %v", err)
+	}
+	writeHMACTrail(t, path, key, events[2:])
+	fullCheckpoint, err := os.ReadFile(path + ".hwm")
+	if err != nil {
+		t.Fatalf("read full HMAC checkpoint: %v", err)
+	}
+	var checkpoint struct {
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(fullCheckpoint, &checkpoint); err != nil {
+		t.Fatalf("decode full HMAC checkpoint: %v", err)
+	}
+	if checkpoint.Count != len(events) {
+		t.Fatalf("HMAC checkpoint count = %d, want %d", checkpoint.Count, len(events))
+	}
 
 	t.Setenv("NOCKGUARD_TEST_AUDIT_HMAC", string(key))
 	// pubEnv MUST be "": Ed25519 takes precedence in newVerifier, so a populated
@@ -1259,8 +1279,25 @@ func TestVerifyEndpointHMAC(t *testing.T) {
 	if rep.EntriesVerified != 3 {
 		t.Fatalf("clean HMAC trail: entries_verified = %d, want 3", rep.EntriesVerified)
 	}
+	if rep.Status != statusVerified || rep.Verdict != "PROTECTED" {
+		t.Fatalf("clean HMAC trail: status/verdict = %q/%q, want verified/PROTECTED", rep.Status, rep.Verdict)
+	}
 	if rep.BreakAt != nil {
 		t.Fatalf("clean HMAC trail: break_at = %v, want nil", *rep.BreakAt)
+	}
+
+	// A valid checkpoint from before the last append must not make the whole
+	// trail PROTECTED: signatures verify, but the checkpoint count covers only
+	// two of the three rows.
+	if err := os.WriteFile(path+".hwm", partialCheckpoint, 0o600); err != nil {
+		t.Fatalf("restore partial HMAC checkpoint: %v", err)
+	}
+	rep = doVerify(t, b)
+	if rep.Status != statusUnanchored || rep.Verdict != "UNANCHORED" || rep.ChainIntact == nil || !*rep.ChainIntact {
+		t.Fatalf("partial HMAC checkpoint report = %+v, want intact but UNANCHORED", rep)
+	}
+	if err := os.WriteFile(path+".hwm", fullCheckpoint, 0o600); err != nil {
+		t.Fatalf("restore full HMAC checkpoint: %v", err)
 	}
 
 	// Tamper the MIDDLE entry so the break lands inside the scan loop (entry 2),
@@ -1290,6 +1327,44 @@ func TestVerifyEndpointHMAC(t *testing.T) {
 	if rep.Detail == nil || *rep.Detail == "" {
 		t.Fatal("tampered HMAC trail: expected a non-empty detail")
 	}
+}
+
+func TestBuildViewWithNilVerifierOnGuardReadError(t *testing.T) {
+	b := newBroker()
+	view := b.buildView(guardRead{err: errors.New("guard trail read failed")})
+	if view.rep.Status != statusUnavailable || view.rep.Verdict != "UNAVAILABLE" {
+		t.Fatalf("guard read error report = %+v, want UNAVAILABLE", view.rep)
+	}
+	if view.rep.ChainIntact != nil {
+		t.Fatalf("guard read error chain_intact = %v, want unknown", *view.rep.ChainIntact)
+	}
+}
+
+func TestNewVerifierNamesMalformedPublicKeySource(t *testing.T) {
+	t.Run("environment variable", func(t *testing.T) {
+		const pubEnv = "NOCKGUARD_TEST_BAD_PUBLIC_KEY"
+		t.Setenv(pubEnv, "not-hex")
+		if _, err := newVerifier(pubEnv, "", ""); err == nil || !strings.Contains(err.Error(), pubEnv) {
+			t.Fatalf("malformed env key error = %v, want source %s", err, pubEnv)
+		}
+	})
+
+	t.Run("agent public-key file", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		pubEnv := policy.AgentPubKeyEnvName("coder")
+		t.Setenv(pubEnv, "")
+		path := policy.AgentPubPath(home, "coder")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("not-hex"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := newVerifier(pubEnv, "", "coder"); err == nil || !strings.Contains(err.Error(), path) {
+			t.Fatalf("malformed file key error = %v, want source %s", err, path)
+		}
+	})
 }
 
 // TestReplayHistoryEnrichesVerifyState proves per-event enrichment: replay tags

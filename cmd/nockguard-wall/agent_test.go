@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
+	"github.com/nocktechnologies/nockguard/internal/policy"
 )
 
 func TestWallSubprocess(t *testing.T) {
@@ -122,6 +123,17 @@ func wallVerify(t *testing.T, url string) verifyReport {
 		t.Fatalf("decode /verify: %v", err)
 	}
 	return report
+}
+
+func TestWallAgentWithoutPublicKeyStartsUnconfigured(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(policy.AgentPubKeyEnvName("coder"), "")
+
+	url, _ := startWall(t, home, "-agent", "coder")
+	report := wallVerify(t, url)
+	if report.Status != statusUnconfigured || report.Verdict != "UNCONFIGURED" || report.ChainIntact != nil {
+		t.Fatalf("missing public key report = %+v, want unconfigured with unknown chain", report)
+	}
 }
 
 func TestWallAgentSignedTrail(t *testing.T) {
