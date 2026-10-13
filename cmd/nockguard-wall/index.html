@@ -302,8 +302,8 @@
   let recentSession = '';
 
   fetch('/context', { cache:'no-store' }).then(r => r.json()).then(c => {
-    MAX_ROWS = c.window;
-    document.getElementById('window-size').textContent = c.window;
+    MAX_ROWS = Number.isSafeInteger(c.window) && c.window > 0 ? Math.min(c.window, 500) : 500;
+    document.getElementById('window-size').textContent = MAX_ROWS;
     demoMode = !!c.demo;
     document.getElementById('source-guard').textContent = demoMode ? 'synthetic (no Guard evidence)' : c.guardTrail;
     document.getElementById('source-lock').textContent = demoMode ? 'synthetic (no Lock evidence)' : (c.lockDB || 'not configured');

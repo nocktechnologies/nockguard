@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const { test } = require('node:test');
 
-function wall() {
+function wall(contextPayload) {
   const elements = new Map();
   function element() {
     const classes = new Set();
@@ -63,12 +63,26 @@ function wall() {
   const context = vm.createContext({
     document, window: {}, Date, URLSearchParams,
     Option: function(label, value) { this.label = label; this.value = value; },
-    EventSource: class {}, fetch: () => new Promise(() => {}), setInterval() {},
+    EventSource: class {}, fetch: () => contextPayload === undefined
+      ? new Promise(() => {})
+      : Promise.resolve({ json: () => Promise.resolve(contextPayload) }), setInterval() {},
   });
   const page = fs.readFileSync(new URL('./index.html', `file://${__filename}`), 'utf8');
   vm.runInContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], context);
   return { context, elements, decisions };
 }
+
+test('context window stays a bounded positive integer', async () => {
+  for (const [window, expected] of [
+    [undefined, 500], [0, 500], [-1, 500], [1.5, 500], ['2', 500],
+    [Infinity, 500], [1000000, 500], [12, 12],
+  ]) {
+    const w = wall({ window });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(vm.runInContext('MAX_ROWS', w.context), expected);
+    assert.equal(w.elements.get('window-size').textContent, expected);
+  }
+});
 
 test('one unreadable row leaves the readable block count visible', () => {
   const w = wall();
