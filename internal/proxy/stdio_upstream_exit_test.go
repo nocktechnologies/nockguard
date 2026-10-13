@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -308,6 +309,89 @@ func TestProxyAllowsUpstreamToFinishAfterClosingStdout(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("proxy did not exit after upstream finished")
 	}
+}
+
+func TestProxyBoundsLeaderWaitAfterCleanEOF(t *testing.T) {
+	dir := t.TempDir()
+	leaderFile := filepath.Join(dir, "leader.pid")
+	childFile := filepath.Join(dir, "child.pid")
+	closedFile := filepath.Join(dir, "closed")
+	script := filepath.Join(dir, "close-stdout-and-wait.sh")
+	body := "#!/bin/bash\necho $$ > " + leaderFile + "\nsleep 30 >/dev/null 2>&1 &\necho $! > " + childFile + "\nIFS= read -r line || true\necho DONE\nexec 1>&-\necho closed > " + closedFile + "\nwait\n"
+	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+		t.Fatal(err)
+	}
+	in, out, exited := runWithOpenStdin(t, "bash "+script)
+	readPID := func(path string) int {
+		t.Helper()
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pid
+	}
+	if err := in.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Scan() || out.Text() != "DONE" {
+		t.Fatalf("want final output before clean EOF; last line %q, error %v", out.Text(), out.Err())
+	}
+	stdoutEOF := make(chan error, 1)
+	go func() {
+		if out.Scan() {
+			stdoutEOF <- errors.New("unexpected output after DONE")
+		} else {
+			stdoutEOF <- out.Err()
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(closedFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("upstream did not close stdout")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	leaderPID, childPID := readPID(leaderFile), readPID(childFile)
+	groupGone := false
+	t.Cleanup(func() {
+		if !groupGone {
+			_ = syscall.Kill(-leaderPID, syscall.SIGKILL)
+		}
+	})
+	started := time.Now()
+	shutdownDeadline := time.NewTimer(upstreamShutdownBound + 500*time.Millisecond)
+	defer shutdownDeadline.Stop()
+	select {
+	case err := <-stdoutEOF:
+		if err != nil {
+			t.Fatalf("client did not read stdout to EOF: %v", err)
+		}
+	case <-shutdownDeadline.C:
+		t.Fatal("client did not receive stdout EOF after the upstream closed it")
+	}
+	select {
+	case err := <-exited:
+		if err == nil {
+			t.Fatal("proxy exited successfully while the upstream needed a forced shutdown")
+		}
+	case <-shutdownDeadline.C:
+		t.Fatal("proxy waited without a deadline after clean output EOF")
+	}
+	if elapsed := time.Since(started); elapsed > upstreamShutdownBound+500*time.Millisecond {
+		t.Fatalf("proxy exit took %s after output EOF", elapsed)
+	}
+	if err := syscall.Kill(leaderPID, 0); err != syscall.ESRCH {
+		t.Fatalf("upstream leader still alive after proxy exit: %v", err)
+	}
+	waitGrandchildGone(t, childPID)
+	groupGone = true
 }
 
 func TestProxyClosedClientStdoutKillsUpstreamGroup(t *testing.T) {
