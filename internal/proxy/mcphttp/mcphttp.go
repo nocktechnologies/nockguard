@@ -1,5 +1,5 @@
 // Package mcphttp implements an MCP stdio↔HTTP bridge that intercepts
-// tools/call events for per-call audit without blocking (observe-only).
+// tools/call events for per-call audit.
 //
 // Claude Code launches this as a stdio MCP server (via .mcp.json command entry);
 // the proxy forwards each JSON-RPC request to an HTTP MCP upstream and writes
@@ -26,6 +26,7 @@ import (
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/jsonrpc"
+	"github.com/nocktechnologies/nockguard/internal/proxy"
 )
 
 // EnvTripwire is the environment variable that disables the proxy's audit and
@@ -42,16 +43,18 @@ const (
 	scannerBufMax  = 10 * 1024 * 1024 // 10 MB max token size
 )
 
-// Proxy bridges stdio MCP (client-facing) to HTTP MCP (upstream). Observe-only:
-// every tools/call is audited and forwarded; the proxy never blocks a call.
+// Proxy bridges stdio MCP (client-facing) to HTTP MCP (upstream). Tool calls
+// require a durable audit record when auditing is enabled.
 // Tripwire: when NOCKGUARD_TRIPWIRE is set, auditing is skipped but calls still
 // forward — the operator is told loudly via logs that the guard is disabled.
 type Proxy struct {
-	upstreamURL string
-	agent       string
-	authHeader  string // e.g. "Bearer <token>"; sent as Authorization on every upstream request
-	auditor     *audit.Auditor
-	logger      *log.Logger
+	upstreamURL   string
+	agent         string
+	authHeader    string // e.g. "Bearer <token>"; sent as Authorization on every upstream request
+	auditor       *audit.Auditor
+	requiredAudit bool
+	bestEffort    bool
+	logger        *log.Logger
 
 	client *http.Client
 
@@ -67,16 +70,24 @@ type Proxy struct {
 // The auditor may be nil or disabled (audit.New("")) to disable audit writes.
 func New(upstreamURL, agent, authHeader string, auditor *audit.Auditor, logger *log.Logger) *Proxy {
 	return &Proxy{
-		upstreamURL: upstreamURL,
-		agent:       agent,
-		authHeader:  authHeader,
-		auditor:     auditor,
-		logger:      logger,
+		upstreamURL:   upstreamURL,
+		agent:         agent,
+		authHeader:    authHeader,
+		auditor:       auditor,
+		requiredAudit: auditor.Enabled(),
+		logger:        logger,
 		// ponytail: plain http.Client; upstream URL is operator-configured at
 		// startup, not request-derived, so SSRF risk is low here vs. the egress
 		// proxy case. Add forwardhttp.GuardedDial if upstream becomes user-controllable.
 		client: &http.Client{Timeout: 60 * time.Second},
 	}
+}
+
+// WithBestEffortAudit restores forwarding after audit-write errors.
+func (p *Proxy) WithBestEffortAudit() *Proxy {
+	p.bestEffort = true
+	p.auditor.ClearFailureStatus()
+	return p
 }
 
 // Run bridges os.Stdin → upstream → os.Stdout until the context is cancelled or
@@ -112,15 +123,21 @@ func (p *Proxy) handleLine(ctx context.Context, line []byte, out io.Writer, trip
 		return nil
 	}
 
-	// Audit tools/call in observe mode (never deny; tripwire skips audit entirely).
+	// Audit tools/call before forwarding (tripwire skips audit entirely).
 	if msg.Method == "tools/call" && !tripwire {
 		toolName := extractToolName(msg.Params)
 		if err := p.record(toolName); err != nil {
 			p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, toolName, err)
+			if !p.bestEffort {
+				if msg.IsRequest() {
+					_, _ = fmt.Fprintf(out, "%s\n", jsonrpc.ErrorResponse(msg.ID, -32603, proxy.AuditBeforeForwardError))
+				}
+				return nil
+			}
 		}
 	}
 
-	// Forward to upstream unconditionally.
+	// Forward after the audit gate clears.
 	resp, err := p.post(ctx, line)
 	if err != nil {
 		p.logger.Printf("UPSTREAM-ERROR agent=%s: %v", p.agent, err)
@@ -206,15 +223,19 @@ func (p *Proxy) writeSSEResponse(r io.Reader, out io.Writer) error {
 }
 
 func (p *Proxy) record(tool string) error {
-	if !p.auditor.Enabled() {
+	if !p.requiredAudit {
 		return nil
 	}
-	return p.auditor.Record(audit.Event{
+	ev := audit.Event{
 		Agent:    p.agent,
 		Tool:     tool,
 		Decision: "observe",
 		Reason:   "mcp-http-intercept",
-	})
+	}
+	if p.bestEffort {
+		return p.auditor.Record(ev)
+	}
+	return p.auditor.RecordRequired(ev)
 }
 
 func extractToolName(params json.RawMessage) string {

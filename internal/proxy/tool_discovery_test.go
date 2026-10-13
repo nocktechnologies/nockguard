@@ -187,7 +187,7 @@ func TestHTTPToolDiscoverySSEResolvesAuditBeforeStreamCloses(t *testing.T) {
 
 	auditor, auditPath, _ := newEd25519Auditor(t)
 	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, auditor)
-	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
+	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 
 	go func() {

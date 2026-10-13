@@ -142,6 +142,9 @@ func runCLI(args []string) int {
 	if args[0] == "trust" {
 		return runTrust(args[1:])
 	}
+	if args[0] == "status" || args[0] == "doctor" {
+		return runStatus(args[1:])
+	}
 
 	if args[0] == "egress-proxy" {
 		return runEgressProxy(args[1:])
@@ -165,10 +168,11 @@ func runCLI(args []string) int {
 	}
 
 	var (
-		upstreamCmd    string
-		agent          string
-		policyPath     string
-		policyProvided bool
+		upstreamCmd     string
+		agent           string
+		policyPath      string
+		policyProvided  bool
+		auditBestEffort bool
 	)
 
 	for i := 1; i < len(args); i++ {
@@ -193,6 +197,8 @@ func runCLI(args []string) int {
 				i++
 				policyPath = args[i]
 			}
+		case "--audit-best-effort":
+			auditBestEffort = true
 		}
 	}
 
@@ -308,6 +314,10 @@ func runCLI(args []string) int {
 	p := proxy.NewStdioProxy(upstream, agent, engine, validator, limiter, auditor, forwarder, logger).
 		WithTrust(trustAccumulator).
 		WithApprover(approver)
+	if auditBestEffort {
+		logger.Print("WARNING: --audit-best-effort enabled: audit write failures will NOT refuse tool calls")
+		p.WithBestEffortAudit()
+	}
 	if err := p.Run(); err != nil {
 		logger.Printf("proxy error: %v", err)
 		return 1
@@ -529,11 +539,12 @@ func runEgressProxy(args []string) int {
 
 func runMCPListen(args []string) int {
 	var (
-		listen     string
-		upstream   string
-		agent      string
-		policyPath string
-		auditPath  string
+		listen          string
+		upstream        string
+		agent           string
+		policyPath      string
+		auditPath       string
+		auditBestEffort bool
 	)
 
 	for i := 0; i < len(args); i++ {
@@ -563,6 +574,8 @@ func runMCPListen(args []string) int {
 				i++
 				auditPath = args[i]
 			}
+		case "--audit-best-effort":
+			auditBestEffort = true
 		}
 	}
 
@@ -652,10 +665,15 @@ func runMCPListen(args []string) int {
 	gate := proxy.NewStdioProxy(nil, agent, engine, validator, limiter, auditor, forwarder, logger).
 		WithTrust(trustAccumulator).
 		WithApprover(approver)
+	listener := proxy.NewHTTPListener(listen, upstream, gate, logger)
+	if auditBestEffort {
+		logger.Print("WARNING: --audit-best-effort enabled: audit write failures will NOT refuse tool calls")
+		listener.WithBestEffortAudit()
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := proxy.NewHTTPListener(listen, upstream, gate, logger).Run(ctx); err != nil {
+	if err := listener.Run(ctx); err != nil {
 		logger.Printf("mcp-listen error: %v", err)
 		return 1
 	}
@@ -1269,6 +1287,47 @@ func runTrust(args []string) int {
 	return 0
 }
 
+func runStatus(args []string) int {
+	var agent, path string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--agent", "--audit":
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "error: %s requires a value\n", args[i])
+				return 1
+			}
+			flag := args[i]
+			i++
+			if flag == "--agent" {
+				agent = args[i]
+			} else {
+				path = args[i]
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "error: unknown status flag %q\n", args[i])
+			return 1
+		}
+	}
+	if !policy.ValidAgentName(agent) {
+		fmt.Fprintln(os.Stderr, "usage: nockguard status --agent <name> [--audit <path>]")
+		return 1
+	}
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+			return 1
+		}
+		path = policy.AgentAuditPath(filepath.Join(home, policy.DefaultAuditPath), agent)
+	}
+	if audit.FailureStatus(path) {
+		fmt.Printf("agent: %s\naudit: last required audit write failed\n", agent)
+		return 2
+	}
+	fmt.Printf("agent: %s\naudit: no failure reported\n", agent)
+	return 0
+}
+
 // runInit handles `nockguard init` — it scaffolds a sensible, default-deny
 // starter policy so a new user is guarded in seconds instead of hand-writing
 // YAML. It never overwrites an existing policy without --force.
@@ -1312,14 +1371,15 @@ func runInit(args []string) int {
 }
 
 // runMCPHTTP implements the `mcp-http` subcommand: an MCP stdio↔HTTP bridge
-// that audits per tools/call in observe mode without blocking. See
+// that audits each tools/call before forwarding when audit is enabled. See
 // docs/http-mcp-interception.md for design rationale and the full cutover plan.
 func runMCPHTTP(args []string) int {
 	var (
-		upstreamURL string
-		agent       string
-		policyPath  string
-		authEnv     string
+		upstreamURL     string
+		agent           string
+		policyPath      string
+		authEnv         string
+		auditBestEffort bool
 	)
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -1343,6 +1403,8 @@ func runMCPHTTP(args []string) int {
 				i++
 				authEnv = args[i]
 			}
+		case "--audit-best-effort":
+			auditBestEffort = true
 		}
 	}
 	if upstreamURL == "" {
@@ -1393,7 +1455,12 @@ func runMCPHTTP(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := mcphttp.New(upstreamURL, agent, authHeader, auditor, logger).Run(ctx); err != nil {
+	bridge := mcphttp.New(upstreamURL, agent, authHeader, auditor, logger)
+	if auditBestEffort {
+		logger.Print("WARNING: --audit-best-effort enabled: audit write failures will NOT refuse tool calls")
+		bridge.WithBestEffortAudit()
+	}
+	if err := bridge.Run(ctx); err != nil {
 		logger.Printf("mcp-http proxy error: %v", err)
 		return 1
 	}
@@ -1405,15 +1472,16 @@ func printUsage() {
 
 Usage:
   nockguard init [--policy <path>] [--force]
-  nockguard proxy --upstream <command> --agent <name> [--policy <path>]
-  nockguard mcp-http --upstream <url> --agent <name> [--policy <path>] [--auth-env <ENV>]
-  nockguard mcp-listen --listen 127.0.0.1:<port> --upstream <url> --agent <name> [--policy <path>] [--audit <path>]
+  nockguard proxy --upstream <command> --agent <name> [--policy <path>] [--audit-best-effort]
+  nockguard mcp-http --upstream <url> --agent <name> [--policy <path>] [--auth-env <ENV>] [--audit-best-effort]
+  nockguard mcp-listen --listen 127.0.0.1:<port> --upstream <url> --agent <name> [--policy <path>] [--audit <path>] [--audit-best-effort]
   nockguard mcp-gateway --config <path>  (OAuth resource behind a loopback HTTPS ingress)
   nockguard egress-proxy --listen <addr> --agent <name> --policy <path> [--audit <path>] [--enforce]
   nockguard verify (--all | --agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
   nockguard verify --session <id> --lock-db <path> --guard-trail <path> (--pub-env <ENV> | --lock-pub-env <ENV> --guard-pub-env <ENV>) [--json]
   nockguard verify --export <wall.proof.json> (--agent <name> | --ed25519-pub-env <ENV>)
   nockguard selftest [--policy <path>] [--json]
+  nockguard status --agent <name> [--audit <path>]  (alias: doctor)
   nockguard policy propose --agent <name> [--audit <path>] [--audit-dir <dir>]
   nockguard policy shadow-report --agent <name> [--audit <path>] [--audit-dir <dir>]
   nockguard trust show --agent <name>
@@ -1436,6 +1504,7 @@ Options:
   --key-env          Env var holding the HMAC signing key (tamper-evident verify)
   --ed25519-pub-env  Env var holding the hex Ed25519 public key (non-repudiable verify)
   --audit            Path to the audit JSONL (default: ~/.nockguard/logs/audit.jsonl)
+  --audit-best-effort  Permit local tool calls when enabled audit writes fail; off by default (proxy, mcp-http, mcp-listen)
   --audit-dir        Directory holding per-agent audit files (for: audit verify / evidence --agent)
   --session          nocklock session id to verify across the NockLock log and a NockGuard trail (for: verify)
   --lock-db          Path to the NockLock SQLite audit log (for: verify --session; required, no discovery)

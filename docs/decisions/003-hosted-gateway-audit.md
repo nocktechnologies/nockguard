@@ -17,3 +17,9 @@ audit outside this gateway.
 Sources: [0.3.0 changelog](../../CHANGELOG.md#030---2026-10-01),
 [gateway contract](../design/hosted-gateway.md),
 `internal/proxy/required_audit.go`, `internal/proxy/stdio.go`.
+
+**2026-10-13 update — superseded in part.** Local stdio `proxy`, `mcp-listen`,
+and `mcp-http` now require an audit write before forwarding tool calls when
+auditing is enabled and refuse calls on required-writer failure. Operators can
+explicitly choose the former behavior with `--audit-best-effort`. The hosted
+gateway requirement and recovery contract above still apply.

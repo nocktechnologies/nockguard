@@ -127,7 +127,7 @@ def show_trail(path):
         for line in f:
             e = json.loads(line)
             if e.get("tool") in ("read_file", "send_email"):
-                verdict = "ALLOW" if e["decision"] == "allow" else "DENY "
+                verdict = {"allow": "ALLOW", "dispatch": "GATE "}.get(e["decision"], "DENY ")
                 print("   %s  %-10s  %s: %s" % (verdict, e["tool"], e["decision"], e.get("reason", "")))
 
 

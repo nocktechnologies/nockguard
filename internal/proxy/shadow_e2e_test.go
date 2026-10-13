@@ -40,16 +40,16 @@ agents:
 	}
 
 	lines := readAuditFile(t, auditPath)
-	if len(lines) != 2 {
-		t.Fatalf("expected would-deny plus live allow audit records, got %d: %v", len(lines), lines)
+	if len(lines) != 3 {
+		t.Fatalf("expected dispatch, would-deny and live allow records, got %d: %v", len(lines), lines)
 	}
-	if lines[0]["decision"] != "would-deny" {
-		t.Fatalf("first audit decision = %q, want would-deny; all=%v", lines[0]["decision"], lines)
+	if lines[0]["decision"] != "dispatch" || lines[1]["decision"] != "would-deny" {
+		t.Fatalf("first two audit decisions = %q, %q, want dispatch and would-deny; all=%v", lines[0]["decision"], lines[1]["decision"], lines)
 	}
-	if lines[1]["decision"] != "allow" {
-		t.Fatalf("second audit decision = %q, want allow; all=%v", lines[1]["decision"], lines)
+	if lines[2]["decision"] != "allow" {
+		t.Fatalf("third audit decision = %q, want allow; all=%v", lines[2]["decision"], lines)
 	}
-	if !strings.Contains(lines[0]["reason"], "would-deny shadow") {
-		t.Fatalf("would-deny reason should name shadow basis, got %q", lines[0]["reason"])
+	if !strings.Contains(lines[1]["reason"], "would-deny shadow") {
+		t.Fatalf("would-deny reason should name shadow basis, got %q", lines[1]["reason"])
 	}
 }

@@ -166,11 +166,11 @@ func TestHTTPListener_AllowForwardsAndAudits(t *testing.T) {
 		t.Fatalf("audit chain verification failed: %v", err)
 	}
 	evs := readAuditEvents(t, auditPath)
-	if n != len(evs) || len(evs) != 1 {
-		t.Fatalf("expected 1 verified audit row, got n=%d rows=%d", n, len(evs))
+	if n != len(evs) || len(evs) != 2 {
+		t.Fatalf("expected dispatch and allow rows, got n=%d rows=%d", n, len(evs))
 	}
-	if evs[0].Decision != "allow" || evs[0].Tool != "nockcc_nock_list" || evs[0].Agent != "mira" {
-		t.Errorf("audit row = %+v, want allow/nockcc_nock_list/mira", evs[0])
+	if evs[0].Decision != "dispatch" || evs[1].Decision != "allow" || evs[1].Tool != "nockcc_nock_list" || evs[1].Agent != "mira" {
+		t.Errorf("audit rows = %+v, want dispatch then allow/nockcc_nock_list/mira", evs)
 	}
 }
 

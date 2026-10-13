@@ -197,6 +197,10 @@
 <body data-lock="0">
   <div id="flash"></div>
   <div id="demo-banner" class="demo-banner" role="status" hidden>DEMO DATA — synthetic traffic, not verified evidence</div>
+  <div id="auditfail" class="tamper" role="alert" aria-live="assertive" hidden>
+    <span class="tamper-icon">⚠</span>
+    <span class="tamper-text">last required audit write failed</span>
+  </div>
   <div id="tamper" class="tamper" role="alert" aria-live="assertive" hidden>
     <span class="tamper-icon">⚠</span>
     <span class="tamper-text">AUDIT CHAIN TAMPERED — the signed audit trail failed verification. Live events keep streaming, but the record can no longer be trusted.</span>
@@ -587,6 +591,7 @@
   // — a true incremental tip-check would need an audit-package API to resume from
   // the last-verified signature (deferred; see the PR).
   const tamper = document.getElementById('tamper');
+  const auditfail = document.getElementById('auditfail');
   const tamperDetail = document.getElementById('tamper-detail');
   const chainnote = document.getElementById('chainnote');
   const chainnoteText = document.getElementById('chainnote-text');
@@ -601,6 +606,7 @@
       document.getElementById('verification-status').textContent = v.status === 'verified' && v.entries_verified === 0
         ? 'NO EVIDENCE — empty trail' : (v.status || 'unavailable');
       document.getElementById('verification-time').textContent = v.last_verified_at || '—';
+      auditfail.hidden = !v.audit_failing;
       // ONLY an explicit chain_intact:false is a tamper. status "unavailable"
       // (a read/scan error, chain_intact null) surfaces as the quiet chainnote,
       // never the red banner — a benign read glitch must not cry wolf (N9870).

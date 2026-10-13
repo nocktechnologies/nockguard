@@ -86,8 +86,9 @@ func TestAuditableReferencesEndToEnd(t *testing.T) {
 
 	// Parse each line as JSON to access individual fields.
 	type auditEntry struct {
-		Tool   string `json:"tool"`
-		NockID int    `json:"nock_id,omitempty"`
+		Tool     string `json:"tool"`
+		Decision string `json:"decision"`
+		NockID   int    `json:"nock_id,omitempty"`
 	}
 	entries := make([]auditEntry, 0)
 	for _, line := range lines {
@@ -98,7 +99,9 @@ func TestAuditableReferencesEndToEnd(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			t.Fatalf("failed to parse audit line: %v\naudit content:\n%s", err, auditContent)
 		}
-		entries = append(entries, entry)
+		if entry.Decision != "dispatch" {
+			entries = append(entries, entry)
+		}
 	}
 
 	if len(entries) != 6 {

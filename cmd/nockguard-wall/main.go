@@ -158,6 +158,7 @@ func (b *broker) snapshot() verifyReport {
 // /verify handler.
 func (b *broker) refreshSnapshot() verifyReport {
 	rep := b.verifier.verify(b.auditPath)
+	rep.AuditFailing = audit.FailureStatus(b.auditPath)
 	b.vmu.Lock()
 	b.vsnap = rep
 	b.vmu.Unlock()

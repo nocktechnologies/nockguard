@@ -22,6 +22,42 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/policy"
 )
 
+func TestVerifyReportsAuditFailureForWall(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.audit.jsonl")
+	if err := os.Mkdir(path+".audit-failing", 0700); err != nil {
+		t.Fatal(err)
+	}
+	b := newBroker()
+	b.auditPath = path
+	w := httptest.NewRecorder()
+	b.handleVerify(w, httptest.NewRequest(http.MethodGet, "/verify", nil))
+	var rep verifyReport
+	if err := json.Unmarshal(w.Body.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if !rep.AuditFailing {
+		t.Fatalf("/verify did not report audit failure: %s", w.Body.String())
+	}
+	page, err := indexFS.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(page), "last required audit write failed") || strings.Contains(string(page), "audit failing: calls refused") {
+		t.Fatal("Wall failure label claims an unobservable call refusal")
+	}
+	if err := os.Remove(path + ".audit-failing"); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	b.handleVerify(w, httptest.NewRequest(http.MethodGet, "/verify", nil))
+	if err := json.Unmarshal(w.Body.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.AuditFailing {
+		t.Fatalf("/verify still reports failure after recovery: %s", w.Body.String())
+	}
+}
+
 func TestBrokerUnregisterDoesNotDependOnBackgroundRunLoop(t *testing.T) {
 	b := newBroker()
 	c := make(chan event, 1)
