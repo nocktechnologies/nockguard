@@ -3,12 +3,17 @@ package proxy
 import (
 	"bufio"
 	"encoding/json"
+	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nocktechnologies/nockguard/internal/approval"
+	"github.com/nocktechnologies/nockguard/internal/policy"
 )
 
 // runLocalApproval starts a real proxy with NOCKGUARD_APPROVER=local, sends one
@@ -45,7 +50,34 @@ func runLocalApproval(t *testing.T, decision string) map[string]interface{} {
 		}
 		close(lines)
 	}()
-	if _, err := stdin.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nockcc_kill_switch_set","arguments":{"k":"hunter2"}}}` + "\n")); err != nil {
+	if _, err := stdin.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case line := <-lines:
+		var listing struct {
+			Result struct {
+				Tools []struct {
+					Name string `json:"name"`
+				} `json:"tools"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal([]byte(line), &listing); err != nil {
+			t.Fatalf("decode tools/list response: %v (%s)", err, line)
+		}
+		found := false
+		for _, tool := range listing.Result.Tools {
+			if tool.Name == "nockcc_kill_switch_set" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("ask tool was not listed: %s", line)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no tools/list response")
+	}
+	if _, err := stdin.Write([]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"nockcc_kill_switch_set","arguments":{"k":"hunter2"}}}` + "\n")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -101,5 +133,37 @@ func TestLocalApproverDenyBlocks(t *testing.T) {
 	m := runLocalApproval(t, "deny")
 	if msg := errorMessage(t, m); !strings.Contains(msg, "denied by approval gate") {
 		t.Errorf("denied call should be blocked, got %q", msg)
+	}
+}
+
+func TestLocalApproverTimeoutFailsClosedThroughStdioGate(t *testing.T) {
+	home, err := os.MkdirTemp("/tmp", "nghta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(home)
+	engine, err := policy.LoadBytes([]byte(approvalPolicy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator, err := engine.ValidatorFor("kit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approver, err := approval.NewLocalApprover(filepath.Join(home, "approvals"), 50*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer approver.Close()
+	gate := NewStdioProxy(nil, "kit", engine, validator, nil, nil, nil, log.New(io.Discard, "", 0)).WithApprover(approver)
+	forwarded, reply, err := gate.Probe([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nockcc_kill_switch_set"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forwarded {
+		t.Fatal("timed-out approval reached the upstream")
+	}
+	if !strings.Contains(string(reply), "denied by approval gate") {
+		t.Fatalf("timeout reply = %s, want approval denial", reply)
 	}
 }

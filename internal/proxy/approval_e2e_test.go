@@ -146,13 +146,13 @@ func TestLegacyRequireApprovalStillGatesWithoutHidingFromList(t *testing.T) {
 
 func TestAskVerdictAppliesWithheldWritesOnlyOnApprove(t *testing.T) {
 	for _, tc := range []struct {
-		name           string
-		approval       string
-		wantCallError  bool
-		wantStateWrite bool
+		name          string
+		approval      string
+		wantCallError bool
+		wantDecisions []string
 	}{
-		{"approved applies withheld write", "approve", false, true},
-		{"denied drops withheld write", "deny", true, false},
+		{"approved applies withheld write", "approve", false, []string{"approval-granted", "state-write", "allow", "dispatch"}},
+		{"denied drops withheld write", "deny", true, []string{"approval-denied"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -171,14 +171,12 @@ func TestAskVerdictAppliesWithheldWritesOnlyOnApprove(t *testing.T) {
 			}
 
 			lines := readAuditFile(t, auditPath)
-			foundStateWrite := false
+			decisions := make([]string, 0, len(lines))
 			for _, ev := range lines {
-				if ev["decision"] == "state-write" && ev["reason"] == `approval-state approved for ask-rule "nockcc_kill_switch_set"` {
-					foundStateWrite = true
-				}
+				decisions = append(decisions, ev["decision"])
 			}
-			if foundStateWrite != tc.wantStateWrite {
-				t.Errorf("state-write audit present = %v, want %v; audit=%v", foundStateWrite, tc.wantStateWrite, lines)
+			if strings.Join(decisions, ",") != strings.Join(tc.wantDecisions, ",") {
+				t.Errorf("audit decisions = %v, want %v; rows=%v", decisions, tc.wantDecisions, lines)
 			}
 		})
 	}
@@ -203,5 +201,34 @@ func TestFailModeAskParksUnextractableToolName(t *testing.T) {
 	approved := runProxyEnv(t, policyContent, request, "NOCKGUARD_APPROVAL_TEST=approve")
 	if approved[1]["error"] != nil {
 		t.Fatalf("fail_mode ask approved should forward the canonical call, got error: %v", approved[1]["error"])
+	}
+}
+
+func TestFailModeAskAuditsApprovalBeforeDispatch(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	policyContent := `audit:
+  enabled: true
+  path: ` + auditPath + `
+agents:
+  kit:
+    allow: ["nockcc_*"]
+    fail_mode: ask
+`
+	request := []string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"arguments":{"x":1}}}`,
+	}
+	byID := runProxyEnv(t, policyContent, request, "NOCKGUARD_APPROVAL_TEST=approve")
+	if byID[1]["error"] != nil {
+		t.Fatalf("approved fail_mode ask should forward, got error: %v", byID[1]["error"])
+	}
+
+	rows := readAuditFile(t, auditPath)
+	decisions := make([]string, 0, len(rows))
+	for _, row := range rows {
+		decisions = append(decisions, row["decision"])
+	}
+	want := []string{"approval-granted", "state-write", "dispatch"}
+	if strings.Join(decisions, ",") != strings.Join(want, ",") {
+		t.Fatalf("fail_mode ask audit decisions = %v, want %v; rows=%v", decisions, want, rows)
 	}
 }

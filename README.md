@@ -116,7 +116,7 @@ nockguard proxy \
 - **deny**: Tool patterns blocked regardless of allow rules. Deny takes precedence.
 - **shadow**: Dry-run allowlist for observe-to-enforce staging. A tool outside
   `shadow` records `would-deny` in the audit trail but is not blocked.
-- **ask**: Tool patterns that return the `Ask` verdict. NockGuard holds the call for a human approval decision before forwarding it. Denial or timeout drops the call.
+- **ask**: Tool patterns that return the `Ask` verdict. Ask tools remain visible in `tools/list`; NockGuard holds each call for a human approval decision before forwarding it. Denial or timeout drops the call.
 - **fail_mode**: `deny` (default) rejects malformed or ambiguous `tools/call` messages that NockGuard cannot safely interpret; `ask` parks those failures behind approval instead.
 - **mode**: Explicit `allow` permits unlisted tools when there is no allow list;
   `deny` blocks them. With no allow list or explicit mode, the policy denies
@@ -409,7 +409,7 @@ With `--lock-db`, the `/export` CSV and JSON include every Guard row in the wind
 
 NockGuard intercepts two MCP methods:
 
-- **tools/list**: Filters the tool list response, hiding denied tools from the agent.
+- **tools/list**: Keeps allowed and ask-verdict tools visible and hides denied tools. An ask tool is held for approval when called.
 - **tools/call**: Checks the tool name against policy before forwarding. `Deny` rejects immediately. `Ask` holds the call for the configured approver and forwards only on approval, applying any withheld state writes after that approval. With Phase 2 validation enabled, NockGuard also scans the call's arguments (recursively, keys and values) against the configured rule categories and custom patterns, blocking injection attempts and outbound sensitive-data leaks. With Phase 3 limits enabled, a call that clears policy and validation is then metered against the agent's rate limit and spend cap. Denied, ask-denied, blocked, or over-limit calls get a JSON-RPC error response.
 
 All other MCP traffic passes through unmodified. NockGuard is version-transparent — it works with any MCP protocol version. Input validation is opt-in: an allowlist-only policy behaves exactly as in Phase 1.

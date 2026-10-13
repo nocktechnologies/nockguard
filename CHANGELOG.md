@@ -4,6 +4,9 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Changed
+- `tools/list` now keeps tools with an `Ask` verdict visible while holding their calls for local or Telegram approval; denied tools stay hidden. Approved calls record their final `allow` audit row before dispatch.
+
 ### Documentation
 - Document Homebrew and Linux archive installation, including the Live Wall.
 
