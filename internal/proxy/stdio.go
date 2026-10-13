@@ -933,11 +933,7 @@ func (p *StdioProxy) handleFailModeAsk(tool string, params json.RawMessage, reas
 	if dec.Verdict != policy.Ask {
 		return false
 	}
-	approved := p.approveAsk(tool, params, nil, dec, seq)
-	if approved {
-		p.resolveAudit(seq)
-	}
-	return approved
+	return p.approveAsk(tool, params, nil, dec, seq)
 }
 
 func (p *StdioProxy) applyWithheld(tool string, writes []policy.StateWrite, seq uint64) {

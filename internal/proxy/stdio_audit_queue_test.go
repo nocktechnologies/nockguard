@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log"
 	"sort"
@@ -9,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/extract"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 )
@@ -178,6 +180,38 @@ func TestStdioResolveAuditIsIdempotent(t *testing.T) {
 
 	if err := auditor.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHandleFailModeAskKeepsCallerDenyAudit(t *testing.T) {
+	auditor, auditPath, _ := newEd25519Auditor(t)
+	proxy := newGate(t, "agents:\n  mira:\n    fail_mode: ask\n", nil, auditor)
+	proxy.WithApprover(approval.NewStaticApprover(true, "approved by test"))
+
+	const seq = uint64(0)
+	if !proxy.handleFailModeAsk("echo_args", json.RawMessage(`{"name":"echo_args"}`), "canonical-marshal-failed", seq) {
+		t.Fatal("fail-mode Ask was not approved")
+	}
+	proxy.appendAudit(seq, "echo_args", "deny", "canonical-marshal-failed", nil)
+	proxy.resolveAudit(seq)
+
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	events := readAuditEvents(t, auditPath)
+	decisions := make([]string, 0, len(events))
+	for _, event := range events {
+		decisions = append(decisions, event.Decision)
+	}
+	if strings.Join(decisions, ",") != "approval-granted,state-write,deny" {
+		t.Fatalf("audit decisions = %v, want approval-granted, state-write, deny; rows=%+v", decisions, events)
+	}
+	if events[0].Tool != "echo_args" || events[0].Reason != "approved by test" || events[2].Tool != "echo_args" || events[2].Reason != "canonical-marshal-failed" {
+		t.Fatalf("audit rows = %+v, want the approval and caller denial for echo_args", events)
+	}
+	if len(proxy.auditTodo) != 0 {
+		t.Fatalf("auditTodo has %d entries after resolving caller denial, want empty", len(proxy.auditTodo))
 	}
 }
 
