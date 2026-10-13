@@ -9,6 +9,7 @@ All notable changes to NockGuard are documented here.
 
 ### Documentation
 - Document Homebrew and Linux archive installation, including the Live Wall.
+- Linux install verifies the release archive against SHA256SUMS before installing.
 
 ## [0.6.0] - 2026-10-13
 
