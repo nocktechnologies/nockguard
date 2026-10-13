@@ -26,6 +26,14 @@
   .brand .sub { color:var(--dim); font-size:12px; }
   .dot { width:9px; height:9px; border-radius:50%; background:var(--allow);
          box-shadow:0 0 10px var(--allow); animation:pulse 2s infinite; }
+  .evidence { flex-basis:100%; padding:11px 14px; border:1px solid var(--line); border-radius:8px; background:var(--panel);
+              display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px 24px; font-size:12px; }
+  .evidence .label { color:var(--dim); }
+  .evidence .value { overflow-wrap:anywhere; }
+  .evidence .scope { grid-column:1 / -1; color:var(--dim); }
+  .demo-banner { padding:9px 22px; background:rgba(210,153,34,.2); color:var(--ratelimit);
+                 font-weight:800; letter-spacing:1px; border-bottom:1px solid var(--ratelimit); }
+  .demo-banner[hidden] { display:none; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
   .stats { margin-left:auto; display:flex; gap:9px; flex-wrap:wrap; align-items:center; }
   .pill { background:var(--panel); border:1px solid var(--line); border-radius:8px;
@@ -34,7 +42,9 @@
   .pill .l { font-size:10px; letter-spacing:1px; color:var(--dim); text-transform:uppercase; }
   .pill.allowed .n{color:var(--allow)} .pill.blocked .n{color:var(--block)}
   .pill.limited .n{color:var(--ratelimit)} .pill.denied .n{color:var(--deny)}
+  .pill.unreadable .n{color:var(--dim)}
   .pill.caught .n{color:var(--block)}
+  .pill.other .n{color:var(--dim)}
   .toggle { background:var(--panel); border:1px solid var(--line); color:var(--dim);
             border-radius:8px; padding:8px 12px; font:inherit; font-size:12px; cursor:pointer;
             letter-spacing:.5px; }
@@ -62,7 +72,9 @@
   .ptile .pl { font-size:10px; letter-spacing:1.5px; text-transform:uppercase; color:var(--dim); }
   .ptile.approved { border-left-color:var(--allow); } .ptile.approved .pn{ color:var(--allow); }
   .ptile.blocked  { border-left-color:var(--block); } .ptile.blocked .pn{ color:var(--block); }
-  .ptile.pending  { border-left-color:var(--ratelimit); } .ptile.pending .pn{ color:var(--ratelimit); }
+  .ptile.other    { border-left-color:var(--hide); } .ptile.other .pn{ color:var(--dim); }
+  .ptile.limited  { border-left-color:var(--ratelimit); } .ptile.limited .pn{ color:var(--ratelimit); }
+  .ptile.unreadable { border-left-color:var(--hide); } .ptile.unreadable .pn{ color:var(--dim); }
   .ptile.critical { border-left-color:var(--block); } .ptile.critical .pn{ color:var(--block); }
   .ptile.high     { border-left-color:var(--deny); }  .ptile.high .pn{ color:var(--deny); }
 
@@ -82,10 +94,11 @@
   .pagent .pa-count { color:var(--dim); margin-left:6px; }
   .dimquiet { color:var(--dim); }
 
-  #feed { flex:1; overflow:hidden; padding:10px 14px; display:flex; flex-direction:column; gap:6px; }
+  #feed { flex:1; overflow-x:hidden; overflow-y:auto; padding:10px 14px; display:flex; flex-direction:column; gap:6px; }
   #feed .row.fout { display:none; }
   .row {
     display:grid; grid-template-columns:80px 120px 1fr auto; align-items:center; gap:14px;
+    flex:0 0 auto;
     background:var(--panel); border:1px solid var(--line); border-left:4px solid var(--hide);
     border-radius:8px; padding:9px 14px; animation:slidein .28s ease-out;
   }
@@ -129,9 +142,11 @@
                 box-shadow:inset 0 0 0 1px rgba(255,77,77,.22); }
   .allow      { border-left-color:var(--allow); }
   .allow      .badge{ background:rgba(63,185,80,.15); color:var(--allow); }
-  .deny       { border-left-color:var(--deny); }  .deny .badge{ background:rgba(240,136,62,.15); color:var(--deny); }
+  .deny, .approval-denied { border-left-color:var(--deny); }
+  .deny .badge, .approval-denied .badge { background:rgba(240,136,62,.15); color:var(--deny); }
   .ratelimit  { border-left-color:var(--ratelimit); } .ratelimit .badge{ background:rgba(210,153,34,.15); color:var(--ratelimit); }
   .hide       { border-left-color:var(--hide); } .hide .badge{ background:rgba(110,118,129,.18); color:var(--dim); }
+  .unknown    { border-left-color:var(--accent); } .unknown .badge{ background:rgba(88,166,255,.12); color:var(--text); text-transform:none; }
   .block {
     border-left-color:var(--block); border-color:rgba(255,77,77,.4);
     background:linear-gradient(90deg, rgba(255,77,77,.10), var(--panel) 60%);
@@ -140,6 +155,7 @@
   .block .badge{ background:rgba(255,77,77,.18); color:var(--block); }
   @keyframes flashred { 0%{box-shadow:0 0 0 0 rgba(255,77,77,.55)} 100%{box-shadow:0 0 22px 2px rgba(255,77,77,0)} }
   .empty { color:var(--dim); text-align:center; margin:auto; }
+  .empty code { color:var(--accent); }
 
   /* tamper banner (leg 3): the loud global signal when the signed audit chain
      fails verification. Live events keep streaming underneath (optimistic) — this
@@ -180,6 +196,7 @@
 </head>
 <body data-lock="0">
   <div id="flash"></div>
+  <div id="demo-banner" class="demo-banner" role="status" hidden>DEMO DATA — synthetic traffic, not verified evidence</div>
   <div id="auditfail" class="tamper" role="alert" aria-live="assertive" hidden>
     <span class="tamper-icon">⚠</span>
     <span class="tamper-text">last required audit write failed</span>
@@ -204,13 +221,22 @@
       <h1>NockGuard <span style="color:var(--dim)">·</span> Live Wall</h1>
       <span class="sub">every tool call your agents attempt — and what the firewall did</span>
     </div>
+    <section class="evidence" aria-label="Evidence status">
+      <div><span class="label">Guard trail:</span> <span class="value" id="source-guard">loading…</span></div>
+      <div><span class="label">Lock DB:</span> <span class="value" id="source-lock">loading…</span></div>
+      <div><span class="label">Agent:</span> <span class="value" id="context-agent">loading…</span> · <span class="label">Session:</span> <span class="value" id="context-session">none observed</span></div>
+      <div><span class="label">Verification:</span> <span class="value" id="verification-status">checking…</span> · <span class="label">last check:</span> <span class="value" id="verification-time">—</span></div>
+      <div class="scope" id="export-scope">PROOF: signed Guard rows only when enabled; never Lock rows. CSV/JSON: Guard rows plus available Lock snapshot; Lock rows are marked verified only for protected sessions.</div>
+      <div class="scope">Counts and pulse cover the same filtered view of the newest <span id="window-size">500</span> decisions. A blank source or unverified trail is not a zero-violation finding.</div>
+    </section>
     <div class="stats">
-      <div class="pill"><span class="n" id="c-total">0</span><span class="l">total</span></div>
-      <div class="pill allowed"><span class="n" id="c-allow">0</span><span class="l">allowed</span></div>
-      <div class="pill blocked"><span class="n" id="c-block">0</span><span class="l">blocked</span></div>
-      <div class="pill limited"><span class="n" id="c-rate">0</span><span class="l">limited</span></div>
-      <div class="pill denied"><span class="n" id="c-deny">0</span><span class="l">denied/hidden</span></div>
-      <div class="pill caught"><span class="n" id="c-caught">0%</span><span class="l">catch rate</span></div>
+      <div class="pill"><span class="n" id="c-total">—</span><span class="l">in view</span></div>
+      <div class="pill allowed"><span class="n" id="c-allow">—</span><span class="l">allowed</span></div>
+      <div class="pill blocked"><span class="n" id="c-block">—</span><span class="l">rejected</span></div>
+      <div class="pill other"><span class="n" id="c-other">—</span><span class="l">other</span></div>
+      <div class="pill limited"><span class="n" id="c-rate">—</span><span class="l">rate limited</span></div>
+      <div class="pill unreadable"><span class="n" id="c-unreadable">—</span><span class="l">unreadable</span></div>
+      <div class="pill caught"><span class="n" id="c-caught">—</span><span class="l">catch rate</span></div>
       <button class="toggle snd" id="t-sound" title="beep when something is blocked">🔊 SOUND</button>
     </div>
     <div class="filters">
@@ -222,6 +248,7 @@
         <option value="block">block</option>
         <option value="ratelimit">ratelimit</option>
         <option value="hide">hide</option>
+        <option value="approval-denied">approval-denied</option>
       </select>
       <select id="f-severity" class="finput" title="filter by threat severity">
         <option value="">all severities</option>
@@ -245,17 +272,19 @@
   </header>
   <div id="pulse" class="pulse" title="live aggregate of what's on the wall — respects the active filters">
     <div class="hero" title="non-allow catches (critical + high + low) in view">
-      <span class="hn" id="p-threats">0</span>
+      <span class="hn" id="p-threats">—</span>
       <span class="hl">threats caught</span>
     </div>
     <div class="pgroup sev" title="threats broken out by severity — a secret-exfil block is not a routine deny">
-      <div class="ptile critical"><span class="pn" id="p-critical">0</span><span class="pl">critical</span></div>
-      <div class="ptile high"><span class="pn" id="p-high">0</span><span class="pl">high</span></div>
+      <div class="ptile critical"><span class="pn" id="p-critical">—</span><span class="pl">critical</span></div>
+      <div class="ptile high"><span class="pn" id="p-high">—</span><span class="pl">high</span></div>
     </div>
     <div class="pgroup">
-      <div class="ptile approved"><span class="pn" id="p-approved">0</span><span class="pl">approved</span></div>
-      <div class="ptile blocked"><span class="pn" id="p-blocked">0</span><span class="pl">blocked</span></div>
-      <div class="ptile pending"><span class="pn" id="p-pending">0</span><span class="pl">pending</span></div>
+      <div class="ptile approved"><span class="pn" id="p-approved">—</span><span class="pl">approved</span></div>
+      <div class="ptile blocked"><span class="pn" id="p-blocked">—</span><span class="pl">rejected</span></div>
+      <div class="ptile other"><span class="pn" id="p-other">—</span><span class="pl">other</span></div>
+      <div class="ptile limited"><span class="pn" id="p-limited">—</span><span class="pl">rate limited</span></div>
+      <div class="ptile unreadable"><span class="pn" id="p-unreadable">—</span><span class="pl">unreadable</span></div>
     </div>
     <div class="ptop">
       <span class="ptop-label">top agents</span>
@@ -263,7 +292,7 @@
     </div>
   </div>
   <div id="sessions" hidden title="signed-proof verdict per session: both the NockLock and the NockGuard chain must verify"></div>
-  <div id="feed"><div class="empty" id="empty">waiting for the first decision…</div></div>
+  <div id="feed"><div class="empty" id="empty">No decisions in this view yet.<br>Run <code>go run ./cmd/nockguard-wall --demo</code> for sample traffic,<br>or run <code>nockguard proxy --upstream &lt;command&gt; --agent &lt;name&gt;</code> with auditing enabled.</div></div>
   <footer>
     <span id="conn">connecting…</span>
     <span>NockGuard — Align · Decide · Deploy</span>
@@ -273,9 +302,32 @@
   const feed = document.getElementById('feed');
   const flash = document.getElementById('flash');
   let empty = document.getElementById('empty');
-  const counts = { total:0, allow:0, block:0, rate:0, deny:0 };
-  const MAX_ROWS = 200;
-  const KNOWN = { allow:1, deny:1, block:1, ratelimit:1, hide:1 };
+  let MAX_ROWS = 500;
+  let demoMode = false;
+  let recentSession = '';
+
+  fetch('/context', { cache:'no-store' }).then(r => r.json()).then(c => {
+    MAX_ROWS = Number.isSafeInteger(c.window) && c.window > 0 ? Math.min(c.window, 500) : 500;
+    document.getElementById('window-size').textContent = MAX_ROWS;
+    demoMode = !!c.demo;
+    document.getElementById('source-guard').textContent = demoMode ? 'synthetic (no Guard evidence)' : c.guardTrail;
+    document.getElementById('source-lock').textContent = demoMode ? 'synthetic (no Lock evidence)' : (c.lockDB || 'not configured');
+    document.getElementById('context-agent').textContent = demoMode ? 'sample agents' : c.agent;
+    document.getElementById('demo-banner').hidden = !demoMode;
+    if (demoMode) {
+      document.getElementById('verification-status').textContent = 'DEMO — not verified';
+      document.getElementById('verification-time').textContent = '—';
+      document.getElementById('tamper').hidden = true;
+      document.getElementById('chainnote').hidden = true;
+      document.getElementById('export-scope').textContent = 'Evidence export is disabled for demo data.';
+      fExport.hidden = true;
+      fProof.hidden = true;
+    } else if (!c.proof) {
+      document.getElementById('export-scope').textContent += ' PROOF is unavailable until a signing key is configured.';
+    }
+  }).catch(() => {
+    document.getElementById('verification-status').textContent = 'context unavailable';
+  });
 
   // --- toggles ---
   let soundOn = false;
@@ -291,6 +343,8 @@
   // --- filters: substring match on agent/tool + exact decision + time range ---
   const fText = document.getElementById('f-text');
   const fDecision = document.getElementById('f-decision');
+  const fixedDecisions = new Set([...fDecision.options].map(option => option.value));
+  const fixedDecisionCount = fDecision.options.length;
   const fSeverity = document.getElementById('f-severity');
   const fTimerange = document.getElementById('f-timerange');
   const fClear = document.getElementById('f-clear');
@@ -322,7 +376,7 @@
     if (q) p.set('q', q);
     if (fDecision.value) p.set('decision', fDecision.value);
     if (fSeverity.value) p.set('severity', fSeverity.value);
-    const since = fTimerange.value ? durationToSince(fTimerange.value) : null;
+    const since = Number.isFinite(ftimeSinceMs) ? new Date(ftimeSinceMs).toISOString() : null;
     if (since) p.set('since', since);
     const qs = p.toString();
     fExport.href = '/export' + (qs ? '?' + qs : '');
@@ -383,23 +437,28 @@
   // the active filters. O(rows), mirrors the server-side /pulse aggregation. ---
   const pApproved = document.getElementById('p-approved');
   const pBlocked = document.getElementById('p-blocked');
-  const pPending = document.getElementById('p-pending');
+  const pOther = document.getElementById('p-other');
+  const pLimited = document.getElementById('p-limited');
+  const pUnreadable = document.getElementById('p-unreadable');
   const pThreats = document.getElementById('p-threats');
   const pCritical = document.getElementById('p-critical');
   const pHigh = document.getElementById('p-high');
   const pAgents = document.getElementById('p-agents');
-  function pulseBucket(decision) {
-    if (decision === 'allow') return 'approved';
-    if (decision === 'ratelimit') return 'pending';
-    return 'blocked'; // deny | block | hide
-  }
   function renderPulse() {
-    let approved = 0, blocked = 0, pending = 0, threats = 0, critical = 0, high = 0;
+    let approved = 0, blocked = 0, other = 0, limited = 0, threats = 0, critical = 0, high = 0;
+    let totalRows = 0, unreadable = 0, hasEvidence = false;
     const byAgent = new Map();
     for (const row of feed.children) {
-      if (!row.classList.contains('row') || !rowMatches(row)) continue;
-      const b = pulseBucket(row.dataset.decision || 'hide');
-      if (b === 'approved') approved++; else if (b === 'pending') pending++; else blocked++;
+      if (!row.classList.contains('row')) continue;
+      hasEvidence = true;
+      if (!rowMatches(row)) continue;
+      totalRows++;
+      const b = row.dataset.bucket;
+      if (b === 'approved') approved++;
+      else if (b === 'blocked') blocked++;
+      else if (b === 'unreadable') unreadable++;
+      else other++;
+      if (row.dataset.decision === 'ratelimit') limited++;
       // Severity is classified server-side (forward.Severity); the wall only reads
       // the tag — it never re-derives "how bad is this?" in the browser.
       const sev = row.dataset.severity || 'none';
@@ -409,12 +468,23 @@
       const a = row.dataset.agentName || '';
       if (a) byAgent.set(a, (byAgent.get(a) || 0) + 1);
     }
-    pApproved.textContent = approved;
-    pBlocked.textContent = blocked;
-    pPending.textContent = pending;
-    pThreats.textContent = threats;
-    pCritical.textContent = critical;
-    pHigh.textContent = high;
+    const shown = n => hasEvidence ? n : '—';
+    pApproved.textContent = shown(approved);
+    pBlocked.textContent = shown(blocked);
+    pOther.textContent = shown(other);
+    pLimited.textContent = shown(limited);
+    pUnreadable.textContent = shown(unreadable);
+    pThreats.textContent = shown(threats);
+    pCritical.textContent = shown(critical);
+    pHigh.textContent = shown(high);
+    document.getElementById('c-total').textContent = hasEvidence ? totalRows : '—';
+    document.getElementById('c-allow').textContent = shown(approved);
+    document.getElementById('c-block').textContent = shown(blocked);
+    document.getElementById('c-other').textContent = shown(other);
+    document.getElementById('c-rate').textContent = shown(limited);
+    document.getElementById('c-unreadable').textContent = shown(unreadable);
+    const rated = approved + blocked;
+    document.getElementById('c-caught').textContent = hasEvidence && rated && !unreadable ? Math.round(blocked / rated * 100) + '%' : '—';
     const top = [...byAgent.entries()]
       .sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1))
       .slice(0, 3);
@@ -438,22 +508,6 @@
     flash.classList.remove('hit'); void flash.offsetWidth; flash.classList.add('hit');
   }
 
-  function bump(decision) {
-    counts.total++;
-    if (decision === 'allow') counts.allow++;
-    else if (decision === 'block') counts.block++;
-    else if (decision === 'ratelimit') counts.rate++;
-    else counts.deny++; // deny + hide
-    const caught = counts.total - counts.allow;
-    const pct = counts.total ? Math.round(caught / counts.total * 100) : 0;
-    document.getElementById('c-total').textContent = counts.total;
-    document.getElementById('c-allow').textContent = counts.allow;
-    document.getElementById('c-block').textContent = counts.block;
-    document.getElementById('c-rate').textContent = counts.rate;
-    document.getElementById('c-deny').textContent = counts.deny;
-    document.getElementById('c-caught').textContent = pct + '%';
-  }
-
   function hhmmss(ts) {
     const d = new Date(ts);
     return isNaN(d) ? (ts || '') : d.toLocaleTimeString([], {hour12:false});
@@ -465,7 +519,11 @@
   const SEV = { critical:1, high:1, low:1, none:1 };
   function render(ev) {
     if (empty) { empty.remove(); empty = null; }
-    const dec = KNOWN[ev.decision] ? ev.decision : 'hide';
+    if (ev.session_id) {
+      recentSession = ev.session_id;
+      document.getElementById('context-session').textContent = recentSession;
+    }
+    const dec = fixedDecisions.has(ev.decision) ? ev.decision : 'unknown';
     const sev = SEV[ev.severity] ? ev.severity : 'none';
     const row = document.createElement('div');
     row.className = 'row ' + dec;
@@ -473,7 +531,8 @@
     row.dataset.agent = (ev.agent || '').toLowerCase();
     row.dataset.agentName = ev.agent || '';
     row.dataset.tool = (ev.tool || '').toLowerCase();
-    row.dataset.decision = dec;
+    row.dataset.decision = ev.decision || '';
+    row.dataset.bucket = ev.bucket || 'other';
     row.dataset.severity = sev;
     row.dataset.source = ev.source || '';
     // Verification badge is derived server-side (verify.go) and arrives on the
@@ -495,11 +554,21 @@
       '<span class="verdict">' + vChip + sevChip +
         '<span class="badge">' + esc(ev.decision || '?') + '</span></span>';
     feed.prepend(row);
-    if ((fq || fdec || fsev) && !rowMatches(row)) row.classList.add('fout');
     while (feed.childElementCount > MAX_ROWS) feed.lastElementChild.remove();
-    if (fq || fdec || fsev) applyFilters(); // refresh the "shown / total" count
+    const selectedDecision = fDecision.value;
+    while (fDecision.options.length > fixedDecisionCount) fDecision.remove(fixedDecisionCount);
+    const unknown = new Set();
+    for (const kept of feed.children) {
+      const decision = kept.dataset.decision;
+      if (decision && !fixedDecisions.has(decision) && !unknown.has(decision)) {
+        unknown.add(decision);
+        fDecision.add(new Option(decision, decision));
+      }
+    }
+    fDecision.value = selectedDecision;
+    if (selectedDecision && fDecision.value !== selectedDecision) fDecision.value = '';
+    if (fq || fdec || fsev || ftimerange) applyFilters(); // refresh the "shown / total" count
     else renderPulse();                     // (applyFilters already refreshes the pulse)
-    bump(dec);
     // The alarm fires on the loudest signals: any block, and any critical catch
     // (e.g. a secret-exfil deny) — a routine allowlist deny stays quiet.
     if (dec === 'block' || sev === 'critical') { hitFlash(); beep(); }
@@ -528,10 +597,15 @@
   const chainnoteText = document.getElementById('chainnote-text');
   const chainnoteDetail = document.getElementById('chainnote-detail');
   async function checkChain() {
+    if (demoMode) return;
     try {
       const r = await fetch('/verify', { cache: 'no-store' });
-      if (!r.ok) return;
+      if (!r.ok) throw new Error('verification request failed');
       const v = await r.json();
+      if (demoMode) return;
+      document.getElementById('verification-status').textContent = v.status === 'verified' && v.entries_verified === 0
+        ? 'NO EVIDENCE — empty trail' : (v.status || 'unavailable');
+      document.getElementById('verification-time').textContent = v.last_verified_at || '—';
       auditfail.hidden = !v.audit_failing;
       // ONLY an explicit chain_intact:false is a tamper. status "unavailable"
       // (a read/scan error, chain_intact null) surfaces as the quiet chainnote,
@@ -557,7 +631,11 @@
         tamper.hidden = true;
         chainnote.hidden = true;
       }
-    } catch (e) { /* transient fetch failure: leave the banners as-is */ }
+    } catch (e) {
+      if (demoMode) return;
+      document.getElementById('verification-status').textContent = 'unavailable';
+      document.getElementById('verification-time').textContent = '—';
+    }
   }
   checkChain();
   setInterval(checkChain, 15000);
@@ -574,6 +652,7 @@
       const r = await fetch('/sessions', { cache: 'no-store' });
       if (!r.ok) return;
       const list = (await r.json()) || [];
+      document.getElementById('context-session').textContent = list.length ? list[0].session_id : (recentSession || 'none observed');
       sessionsEl.hidden = list.length === 0;
       sessionsEl.replaceChildren(...list.map(s => {
         const v = VERDICTS[s.verdict] ? s.verdict : 'UNVERIFIABLE';
