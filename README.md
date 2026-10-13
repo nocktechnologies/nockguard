@@ -62,7 +62,8 @@ brew install nocktechnologies/tap/nockguard
 ```
 
 On Linux, download the [latest release](https://github.com/nocktechnologies/nockguard/releases/latest)
-archive for your architecture, then run these commands in its directory:
+archive for your architecture into an empty directory, then run these commands
+there:
 
 ```bash
 tar -xzf nockguard_*_linux_*.tar.gz
