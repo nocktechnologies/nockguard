@@ -67,9 +67,9 @@ from the same release. Run these commands there, and continue only if the check
 prints `OK` for your archive:
 
 ```bash
-sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf nockguard_*_linux_*.tar.gz
-sudo install -m 0755 nockguard nockguard-wall /usr/local/bin/
+sha256sum --check --ignore-missing SHA256SUMS \
+  && tar -xzf nockguard_*_linux_*.tar.gz \
+  && sudo install -m 0755 nockguard nockguard-wall /usr/local/bin/
 ```
 
 Run `nockguard wall` to start the Live Wall.
