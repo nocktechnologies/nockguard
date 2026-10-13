@@ -191,7 +191,7 @@
        role="status" (polite), never role="alert", so it never reads as a breach. -->
   <div id="chainnote" class="chainnote" role="status" aria-live="polite" hidden>
     <span class="chainnote-icon">◌</span>
-    <span class="chainnote-text">Audit chain verification unavailable — the trail could not be fully read, so its integrity is unknown (not a tamper).</span>
+    <span class="chainnote-text" id="chainnote-text">Audit chain verification unavailable — the trail could not be fully read, so its integrity is unknown (not a tamper).</span>
     <span class="chainnote-detail" id="chainnote-detail"></span>
   </div>
   <header>
@@ -520,6 +520,7 @@
   const tamper = document.getElementById('tamper');
   const tamperDetail = document.getElementById('tamper-detail');
   const chainnote = document.getElementById('chainnote');
+  const chainnoteText = document.getElementById('chainnote-text');
   const chainnoteDetail = document.getElementById('chainnote-detail');
   async function checkChain() {
     try {
@@ -534,10 +535,18 @@
         tamperDetail.textContent =
           (v.break_at != null ? 'break at entry ' + v.break_at + ' · ' : '') + (v.detail || '');
         chainnote.hidden = true;
-      } else if (v.status === 'unavailable') {
+      } else if (v.status === 'unavailable' || v.status === 'unconfigured' ||
+                 v.status === 'unanchored' || v.status === 'no_rows') {
         tamper.hidden = true;
         chainnote.hidden = false;
-        chainnoteDetail.textContent = v.detail || '';
+        chainnoteText.textContent = {
+          unconfigured: 'Audit chain verification is unconfigured — this trail has not been verified.',
+          unavailable: 'Audit chain verification unavailable — the trail could not be fully read, so its integrity is unknown (not a tamper).',
+          unanchored: 'Audit signatures verify, but the signed checkpoint does not cover the full trail.',
+          no_rows: 'The audit trail has no entries to verify.'
+        }[v.status];
+        chainnoteDetail.textContent = [v.public_key_source ? 'public key: ' + v.public_key_source : '', v.detail || '']
+          .filter(Boolean).join(' · ');
       } else {
         tamper.hidden = true;
         chainnote.hidden = true;

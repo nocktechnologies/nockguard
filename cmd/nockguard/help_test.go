@@ -19,7 +19,7 @@ func TestSubcommandHelpNoSideEffects(t *testing.T) {
 		"egress-proxy", "verify", "verify --session", "verify --export",
 		"selftest", "policy", "policy propose", "policy shadow-report",
 		"trust", "trust show", "audit", "audit verify", "audit verify --agent", "evidence",
-		"keygen", "version",
+		"keygen", "wall", "version",
 	}
 	for _, command := range commands {
 		for _, helpFlag := range []string{"--help", "-h"} {
@@ -36,6 +36,14 @@ func TestSubcommandHelpNoSideEffects(t *testing.T) {
 					if err := os.MkdirAll(dir, 0700); err != nil {
 						t.Fatal(err)
 					}
+				}
+				pathEnv := os.Getenv("PATH")
+				if command == "wall" {
+					wallStub := filepath.Join(root, "nockguard-wall")
+					if err := os.WriteFile(wallStub, []byte("#!/bin/sh\necho Usage: nockguard-wall\n"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					pathEnv = root + string(os.PathListSeparator) + pathEnv
 				}
 				baseline := make(map[string]bool)
 				if err := filepath.WalkDir(root, func(path string, _ fs.DirEntry, err error) error {
@@ -54,6 +62,7 @@ func TestSubcommandHelpNoSideEffects(t *testing.T) {
 					"XDG_CACHE_HOME="+cache,
 					"XDG_STATE_HOME="+state,
 					"XDG_RUNTIME_DIR="+runtime,
+					"PATH="+pathEnv,
 				)
 				output, err := cmd.CombinedOutput()
 				if err != nil {

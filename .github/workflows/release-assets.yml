@@ -34,6 +34,8 @@ jobs:
       - name: tag must match the shipped linux/amd64 binary's version
         run: |
           tar -xzf "dist/nockguard_${TAG#v}_linux_amd64.tar.gz" -C "$RUNNER_TEMP"
+          test -x "$RUNNER_TEMP/nockguard-wall"
+          "$RUNNER_TEMP/nockguard" wall --help
           scripts/check-release-version.sh "$TAG" "$RUNNER_TEMP/nockguard"
 
       - name: version check rejects a mismatched tag (negative control)
