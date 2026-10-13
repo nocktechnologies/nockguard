@@ -93,7 +93,7 @@ because a verifier for the wrong scheme exits 2 and reads as tampering. The
 `/vuln-scan` command holds the full snippet (Step 4).
 
 ```bash
-# Per-agent keygen key (~/.nockguard/keys/<agent>.pub), for <agent>.audit.jsonl:
+# Per-agent key (NOCKGUARD_AGENT_<NAME>_ED25519_PUB or ~/.nockguard/keys/<agent>.pub), for the trail named <agent>.<audit.path basename>:
 nockguard verify --agent "$AGENT" --audit "$TRAIL"
 # Policy audit.sign_ed25519_key_env (public key in an env var):
 nockguard verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB --audit "$TRAIL"

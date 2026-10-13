@@ -17,9 +17,9 @@ POLICY="${1:-$HOME/.nockguard/policy.yaml}"
 cat "$POLICY"
 ```
 
-Run each snippet in this command as its own bash invocation; they `exit` non-zero on failure.
+Run each snippet in this command as its own bash invocation; they `exit` non-zero on failure. Shells do not share variables, so every later snippet resolves `POLICY` itself (default `~/.nockguard/policy.yaml`); when the user gave a path, export `POLICY` to it before running each one.
 
-Verify NockGuard can parse it. The probe runs a copy of the policy with the `audit` block neutralised (`enabled: false`; `path`, both signing env names and `forward` removed) under a throwaway `HOME`, so it cannot create a trail, forward records or fail on a missing signing env. Unknown keys elsewhere, including inside `audit`, still fail the load. It has a timeout, and it captures the proxy's own status (piping to `head` would report `head`'s status instead):
+Verify NockGuard can parse it. The probe runs a copy of the policy with the `audit` block neutralised (`enabled: false`; `path` and both signing env names removed; `forward` kept but set to `enabled: false`, so it makes no request and its field names are still checked) under a throwaway `HOME`, so it cannot create a trail, forward records or fail on a missing signing env. Unknown keys elsewhere, including inside `audit`, still fail the load. It has a timeout, and it captures the proxy's own status (piping to `head` would report `head`'s status instead):
 
 ```bash
 PROBE_DIR=$(mktemp -d)   # left for the OS temp cleaner; the probe never deletes anything
@@ -33,7 +33,8 @@ if isinstance(audit, dict):
     audit.pop("path", None)
     audit.pop("sign_key_env", None)
     audit.pop("sign_ed25519_key_env", None)
-    audit.pop("forward", None)
+    if isinstance(audit.get("forward"), dict):
+        audit["forward"]["enabled"] = False
 with open(sys.argv[2], "w") as f:
     yaml.safe_dump(doc, f)
 PY
@@ -57,6 +58,7 @@ A non-zero status is an **ERROR**; stop, because the remaining checks require a 
 The only valid top-level keys are `agents` and `audit`. Any other key makes the policy fail to load (strict YAML decoding, `KnownFields(true)`) and is likely a typo.
 
 ```bash
+POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 python3 -c "
 import yaml, sys
 with open('$POLICY') as f:
@@ -73,6 +75,7 @@ if extra:
 Valid keys under each agent: `allow`, `deny`, `ask`, `shadow`, `mode`, `fail_mode`, `validate_input`, `block_params`, `rate_limit`, `spend_cap`, `trust`, `require_approval` (legacy; prefer `ask`), `inject`. Anything else makes the policy fail to load. Source: `AgentPolicy` in `internal/policy/policy.go`.
 
 ```bash
+POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 python3 -c "
 import yaml, sys
 with open('$POLICY') as f:
@@ -91,6 +94,7 @@ for agent, pol in (doc.get('agents') or {}).items():
 `mode` must be `"allow"` or `"deny"`; `fail_mode` must be `"deny"` (default) or `"ask"`. The loader does not validate these values. An unrecognised `mode` behaves like an omitted one: with no `allow` list the agent is denied every tool (`default-deny (no allow list)`); with an `allow` list `mode` is not consulted. Any `fail_mode` other than `"ask"` behaves as `"deny"`. Either way the operator's intent is lost, so flag it.
 
 ```bash
+POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 python3 -c "
 import yaml
 with open('$POLICY') as f:
@@ -111,6 +115,7 @@ for agent, pol in (doc.get('agents') or {}).items():
 A `rate_limit` block without a positive Go-duration `window` (`30s`, `1m`, `1h`) is rejected when the policy loads (`rateLimitWindow` in `internal/policy/policy.go`).
 
 ```bash
+POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 python3 -c "
 import yaml
 with open('$POLICY') as f:
@@ -127,6 +132,7 @@ for agent, pol in (doc.get('agents') or {}).items():
 If signing is configured but the env var is missing, NockGuard fails at startup.
 
 ```bash
+POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 python3 -c "
 import yaml, os
 with open('$POLICY') as f:
@@ -142,6 +148,7 @@ for key in ('sign_key_env', 'sign_ed25519_key_env'):
 ### E006 — audit.forward.api_key_env set but env var unset (WARNING)
 
 ```bash
+POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 python3 -c "
 import yaml, os
 with open('$POLICY') as f:
@@ -163,6 +170,7 @@ if fwd.get('enabled'):
 An agent with no `allow` list and `mode: allow` permits every tool that is not denied. This is almost never intended. (An agent with no `allow` list and `mode` omitted or `deny` is the opposite: every tool is denied, see W006.)
 
 ```bash
+POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 python3 -c "
 import yaml
 with open('$POLICY') as f:
@@ -179,6 +187,7 @@ for agent, pol in (doc.get('agents') or {}).items():
 `"*"` in allow matches every tool name, including destructive ones:
 
 ```bash
+POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 python3 -c "
 import yaml
 with open('$POLICY') as f:
@@ -195,6 +204,7 @@ for agent, pol in (doc.get('agents') or {}).items():
 An allow pattern that is broader than a deny pattern may reach tools the deny was meant to block — but since deny always wins, this is a readability issue, not a logic error. Flag it so the operator knows the deny is redundant if the intent was to block that tool via the allow side.
 
 ```bash
+POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 python3 -c "
 import yaml, fnmatch
 with open('$POLICY') as f:
@@ -213,6 +223,7 @@ for agent, pol in (doc.get('agents') or {}).items():
 A named agent with no `allow` list, `mode` omitted or `deny`, and no `ask` (or legacy `require_approval`) rules is denied every tool (`default-deny (no allow list)` / `mode "deny", no allow list`). That is the right shape for `default`, but on a working agent it usually means a forgotten `allow` list.
 
 ```bash
+POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 python3 -c "
 import yaml
 with open('$POLICY') as f:
@@ -229,6 +240,7 @@ for agent, pol in (doc.get('agents') or {}).items():
 Without a `default` entry, any unrecognized `--agent` value fails-closed (all tools denied). This is safe but can be surprising. Add `default: { mode: deny }` as an explicit backstop.
 
 ```bash
+POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 python3 -c "
 import yaml
 with open('$POLICY') as f:
@@ -243,6 +255,7 @@ if 'default' not in (doc.get('agents') or {}):
 `ask` (and legacy `require_approval`) rules need an approver: the Telegram bot (`NOCKGUARD_APPROVAL_BOT_TOKEN` and `NOCKGUARD_APPROVAL_CHAT_ID`) or the local approver (`NOCKGUARD_APPROVER=local`). With neither, every such call is denied, so the tool is effectively unusable. The policy file gives no indication.
 
 ```bash
+POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 python3 -c "
 import yaml, os
 with open('$POLICY') as f:

@@ -150,7 +150,7 @@ Interpret what you find:
 
 ## Step 4 — Verify the audit chain
 
-Pick the verifier from the policy's signing settings. Do not run the verifiers in turn: a verifier for the wrong scheme can exit 2 and read as tampering. The snippet reads the settings, classifies a missing trail before it calls any verifier, then maps the verifier's own exit status. Run it as its own bash invocation, because it `exit`s and sets `set -e`. Set `TRAIL` to the trail selected in Step 3 and `AGENT` to its signing agent; set `PUB_ENV` if the Ed25519 public key is not in `NOCKGUARD_AUDIT_ED25519_PUB`:
+Pick the verifier from the policy's signing settings. Do not run the verifiers in turn: a verifier for the wrong scheme can exit 2 and read as tampering. The snippet reads the settings, classifies a missing trail before it calls any verifier, then maps the verifier's own exit status. Run it as its own bash invocation, because it `exit`s and sets `set -e`. Set `TRAIL` to the trail selected in Step 3 and `AGENT` to its signing agent; set `PER_AGENT=1` if a per-agent trail was written with `--audit` under another name, and `PUB_ENV` if the Ed25519 public key is not in `NOCKGUARD_AUDIT_ED25519_PUB`:
 
 ```bash
 set -e
@@ -160,18 +160,20 @@ POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 
 # Which verifier applies is a property of the policy's signing settings
 # (Ed25519 takes precedence over HMAC), not something to try in turn.
-SIGN=$(python3 - "$POLICY" <<'PY'
-import sys, yaml
+OUT=$(python3 - "$POLICY" <<'PY'
+import os, sys, yaml
 with open(sys.argv[1]) as f:
     audit = (yaml.safe_load(f) or {}).get("audit") or {}
+base = os.path.basename(str(audit.get("path") or "audit.jsonl"))
 if audit.get("sign_ed25519_key_env"):
-    print("ed25519")
+    print("ed25519 -", base)
 elif audit.get("sign_key_env"):
-    print("hmac " + audit["sign_key_env"])
+    print("hmac", audit["sign_key_env"], base)
 else:
-    print("none")
+    print("none -", base)
 PY
 ) || { echo "ERROR: could not read the signing settings from $POLICY (invalid YAML, or PyYAML missing)" >&2; exit 1; }
+read -r SIGN HMAC_ENV BASE <<<"$OUT"
 
 KEYS=$(compgen -G "$HOME/.nockguard/keys/*.pub" || true)
 LOGS=$(compgen -G "$HOME/.nockguard/logs/*audit.jsonl" || true)
@@ -185,18 +187,19 @@ if [ ! -e "$TRAIL" ]; then
   exit 0
 fi
 
-# A trail named <agent>.audit.jsonl is signed with that agent's keygen key,
-# which takes precedence over the policy key (AuditorForAgent).
-if [ "$(basename "$TRAIL")" = "$AGENT.audit.jsonl" ] && [ -e "$HOME/.nockguard/keys/$AGENT.pub" ]; then
+# A per-agent trail is <agent>.<basename of audit.path> (AgentAuditPath) and is
+# signed with that agent's own Ed25519 key. Set PER_AGENT=1 if --audit gave the
+# trail another name.
+if [ "$(basename "$TRAIL")" = "$AGENT.$BASE" ] || [ -n "${PER_AGENT:-}" ]; then
   SIGN=agent
 fi
 
 case "$SIGN" in
   agent) VERIFY=(nockguard verify --agent "$AGENT" --audit "$TRAIL") ;;
   ed25519) VERIFY=(nockguard verify --ed25519-pub-env "${PUB_ENV:-NOCKGUARD_AUDIT_ED25519_PUB}" --audit "$TRAIL") ;;
-  hmac\ *) VERIFY=(nockguard verify --key-env "${SIGN#hmac }" --audit "$TRAIL") ;;
+  hmac) VERIFY=(nockguard verify --key-env "$HMAC_ENV" --audit "$TRAIL") ;;
   *)
-    echo "LOW: $TRAIL exists but the policy configures no signing and there is no key for $AGENT; nothing to verify; see finding 2h."
+    echo "LOW: $TRAIL exists but the policy configures no signing and it is not a per-agent trail; nothing to verify; see finding 2h."
     exit 0 ;;
 esac
 
@@ -214,12 +217,12 @@ Which verifier applies (Ed25519 takes precedence over HMAC, as in `AuditorForAge
 
 | Trail and policy | Verifier |
 |---|---|
-| trail is `<agent>.audit.jsonl` and `~/.nockguard/keys/<agent>.pub` exists (`nockguard keygen --agent`) | `verify --agent` |
+| trail is `<agent>.<basename of audit.path>` (default `<agent>.audit.jsonl`), or `PER_AGENT=1` | `verify --agent` (public key from `NOCKGUARD_AGENT_<NAME>_ED25519_PUB` or `~/.nockguard/keys/<agent>.pub`) |
 | `audit.sign_ed25519_key_env` set | `verify --ed25519-pub-env` |
 | only `audit.sign_key_env` set | `verify --key-env <that name>` (HMAC) |
 | none of the above | unsigned; nothing to verify (finding 2h) |
 
-The per-agent key comes first because it overrides the policy key when the agent runs. A per-agent key supplied only through `NOCKGUARD_AGENT_<NAME>_ED25519_KEY` leaves no `.pub` file; verify with `--agent` and `NOCKGUARD_AGENT_<NAME>_ED25519_PUB` set.
+The trail's name decides the first row, because the per-agent path is only used when a per-agent key signs (`AuditorForAgent`): a key from `NOCKGUARD_AGENT_<NAME>_ED25519_KEY` always wins; a policy signing key wins over a `keygen` key file; otherwise the key file signs a per-agent trail. A per-agent key supplied only through the environment leaves no `.pub` file; set `NOCKGUARD_AGENT_<NAME>_ED25519_PUB` before verifying.
 
 Exit codes (`runAudit` and `verifyAllAgents` in `cmd/nockguard/main.go`). The verifier selects the key before it opens the trail, so a missing public key or unset key env var exits 1 whether or not the trail exists (`requirePubHex` in `cmd/nockguard/keygen.go`). Once the key is chosen, a trail that cannot be opened exits 2, the same as a broken chain (`audit.VerifyEd25519` returns the open error, and `runAudit` reports every error from it as TAMPER). That is why the snippet tests for the file first: exit 2 alone cannot tell a deleted trail from a forged one.
 
