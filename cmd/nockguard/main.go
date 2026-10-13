@@ -1579,7 +1579,7 @@ Examples:
   nockguard mcp-listen --listen 127.0.0.1:8790 --upstream https://mcp.example.com/mcp --agent coder --policy policy.yaml
   nockguard egress-proxy --listen 127.0.0.1:8899 --agent coder --policy egress.yaml
   nockguard keygen --agent coder                        # write per-agent keypair to ~/.nockguard/keys (seed never printed)
-  nockguard verify --agent coder                        # prove coder's trail is intact + non-repudiable (exit 0 = clean, 2 = tampered)
+  nockguard verify --agent coder                        # exit 0 = non-empty, fully checkpointed; 1 = setup/key error, NO_ROWS or UNANCHORED; 2 = tampered
   nockguard selftest --policy policy.yaml               # prove the firewall BLOCKS a denied tool + catches a secret (exit 0 = proven, 2 = gap)
   nockguard verify --session "$NOCKLOCK_SESSION_ID" --lock-db <nocklock.db> --guard-trail ~/.nockguard/logs/coder.audit.jsonl --lock-pub-env LOCK_PUB --guard-pub-env GUARD_PUB   # one verdict across both chains (exit 0 = PROTECTED, 2 = TAMPERED, 1 = anything else)
   nockguard verify --all                                # prove EVERY per-agent trail in ~/.nockguard/logs (exit 0 = all protected, 2 = tampered, 1 = NO_ROWS, UNANCHORED, unverifiable or no trails)
