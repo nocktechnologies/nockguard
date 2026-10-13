@@ -192,6 +192,12 @@ func TestEnsureObserveKeyConcurrentFirstStart(t *testing.T) {
 	if _, _, err := loadSeedHex(seedPath, string(seed)); err != nil {
 		t.Fatalf("published seed is incomplete or invalid: %v", err)
 	}
+	if _, err := os.Lstat(filepath.Join(home, ".nockguard", ".state-setup.lock")); err != nil {
+		t.Errorf("state setup lock is not inside .nockguard: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(home, ".nockguard.lock")); !os.IsNotExist(err) {
+		t.Errorf("unexpected setup lock in HOME root (lstat err = %v)", err)
+	}
 }
 
 func TestOpenOrCreateObserveDirExistingDirValidatesAndSyncsParent(t *testing.T) {
@@ -219,6 +225,68 @@ func TestOpenOrCreateObserveDirExistingDirValidatesAndSyncsParent(t *testing.T) 
 	defer dir.Close()
 	if syncCalls != 1 {
 		t.Fatalf("parent sync calls = %d, want 1 after Mkdirat EEXIST", syncCalls)
+	}
+}
+
+func TestOpenOrCreateObserveDirConcurrentUsesSameLiveDirectory(t *testing.T) {
+	parentPath := t.TempDir()
+	parent, err := os.Open(parentPath)
+	if err != nil {
+		t.Fatalf("open parent: %v", err)
+	}
+	defer parent.Close()
+
+	const callers = 16
+	type result struct {
+		stat unix.Stat_t
+		err  error
+	}
+	results := make(chan result, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			dir, err := openOrCreateObserveDir(int(parent.Fd()), "state", 0o700, unix.Fsync)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			defer dir.Close()
+			var st unix.Stat_t
+			err = unix.Fstat(int(dir.Fd()), &st)
+			results <- result{stat: st, err: err}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	var want unix.Stat_t
+	haveWant := false
+	for got := range results {
+		if got.err != nil {
+			t.Errorf("concurrent directory setup: %v", got.err)
+			continue
+		}
+		if !haveWant {
+			want = got.stat
+			haveWant = true
+			continue
+		}
+		if got.stat.Dev != want.Dev || got.stat.Ino != want.Ino {
+			t.Errorf("callers opened different state directories: got (%v,%v), want (%v,%v)", got.stat.Dev, got.stat.Ino, want.Dev, want.Ino)
+		}
+	}
+	if !haveWant {
+		t.Fatal("no concurrent directory setup succeeded")
+	}
+
+	var live unix.Stat_t
+	if err := unix.Fstatat(int(parent.Fd()), "state", &live, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		t.Fatalf("stat live state directory: %v", err)
+	}
+	if live.Dev != want.Dev || live.Ino != want.Ino {
+		t.Fatalf("state directory entry was replaced: live (%v,%v), opened (%v,%v)", live.Dev, live.Ino, want.Dev, want.Ino)
 	}
 }
 
