@@ -778,6 +778,7 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 		// upstream might still resolve a name the proxy could not see.
 		dec := p.engine.FailModeVerdict(p.agent, "unextractable-name")
 		if dec.Verdict == policy.Ask && p.approveAsk("", canonicalLine, nil, dec, seq) {
+			p.resolveAudit(seq)
 			return mcpDecision{forward: canonicalLine}
 		}
 		p.logger.Printf("DENY agent=%s reason=unextractable-name", p.agent)
@@ -885,6 +886,11 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 	}
 	audits = append(audits, deferredAudit{"allow", dec.Reason})
 	p.appendAudit(seq, toolName, "allow", dec.Reason, &refs)
+	if dec.Verdict == policy.Ask {
+		// Keep approval and withheld state writes before the required dispatch
+		// row, while also recording this call's final allow decision.
+		p.resolveAudit(seq)
+	}
 
 	// Only set card state for tools that actually update card state (claim/release).
 	// This ensures updateCardState is only called on JSON-RPC success.
@@ -939,7 +945,6 @@ func (p *StdioProxy) applyWithheld(tool string, writes []policy.StateWrite, seq 
 		p.logger.Printf("STATE-WRITE agent=%s tool=%s reason=%q", p.agent, tool, reason)
 		p.appendAudit(seq, tool, "state-write", reason, nil)
 	}
-	p.resolveAudit(seq)
 }
 
 // rejectToAgent returns a JSON-RPC error to the agent for a denied REQUEST
@@ -1047,7 +1052,7 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64) []byte {
 		if json.Unmarshal(tool["name"], &name) != nil || name == "" {
 			return invalid()
 		}
-		if dec := p.engine.Evaluate(p.agent, name); dec.Allowed() {
+		if dec := p.engine.Evaluate(p.agent, name); dec.Allowed() || dec.Verdict == policy.Ask {
 			filtered = append(filtered, tool)
 		} else {
 			p.logger.Printf("HIDE agent=%s tool=%s reason=%q", p.agent, name, dec.Reason)
