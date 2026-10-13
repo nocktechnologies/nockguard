@@ -26,6 +26,7 @@ import (
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/jsonrpc"
+	"github.com/nocktechnologies/nockguard/internal/proxy"
 )
 
 // EnvTripwire is the environment variable that disables the proxy's audit and
@@ -85,6 +86,7 @@ func New(upstreamURL, agent, authHeader string, auditor *audit.Auditor, logger *
 // WithBestEffortAudit restores forwarding after audit-write errors.
 func (p *Proxy) WithBestEffortAudit() *Proxy {
 	p.bestEffort = true
+	p.auditor.ClearFailureStatus()
 	return p
 }
 
@@ -128,7 +130,7 @@ func (p *Proxy) handleLine(ctx context.Context, line []byte, out io.Writer, trip
 			p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, toolName, err)
 			if !p.bestEffort {
 				if msg.IsRequest() {
-					_, _ = fmt.Fprintf(out, "%s\n", jsonrpc.ErrorResponse(msg.ID, -32603, "nockguard: audit unavailable; request was not forwarded"))
+					_, _ = fmt.Fprintf(out, "%s\n", jsonrpc.ErrorResponse(msg.ID, -32603, proxy.AuditBeforeForwardError))
 				}
 				return nil
 			}

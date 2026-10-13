@@ -151,6 +151,7 @@ func (p *StdioProxy) WithApprover(a approval.Approver) *StdioProxy {
 // WithBestEffortAudit explicitly restores logging without a forwarding gate.
 func (p *StdioProxy) WithBestEffortAudit() *StdioProxy {
 	p.requiredAudit = false
+	p.auditor.ClearFailureStatus()
 	return p
 }
 
@@ -615,7 +616,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				if msg, decodeErr := jsonrpc.Decode(scanner.Bytes()); decodeErr == nil {
 					id = msg.ID
 				}
-				if rejectErr := p.rejectToAgent(id, -32603, auditBeforeForwardError); rejectErr != nil {
+				if rejectErr := p.rejectToAgent(id, -32603, AuditBeforeForwardError); rejectErr != nil {
 					return rejectErr
 				}
 				continue
@@ -634,7 +635,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 					id = msg.ID
 				}
 			}
-			if err := p.rejectToAgent(id, -32603, auditBeforeForwardError); err != nil {
+			if err := p.rejectToAgent(id, -32603, AuditBeforeForwardError); err != nil {
 				return err
 			}
 			continue
@@ -649,7 +650,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 		if d.reject {
 			p.resolveAudit(seq)
 			if p.requiredAudit && p.auditor.RequiredError() != nil {
-				d.rejectCode, d.rejectMsg = -32603, auditBeforeForwardError
+				d.rejectCode, d.rejectMsg = -32603, AuditBeforeForwardError
 			}
 			// A denied REQUEST returns a JSON-RPC error; a denied NOTIFICATION
 			// (rejectID nil) is dropped — rejectToAgent no-ops on a nil id.
@@ -664,7 +665,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				p.audit(d.tool, "dispatch", "required-audit-before-forward", d.refsForAudit)
 				if p.auditor.RequiredError() != nil {
 					p.resolveAudit(seq)
-					if err := p.rejectToAgent(request.ID, -32603, auditBeforeForwardError); err != nil {
+					if err := p.rejectToAgent(request.ID, -32603, AuditBeforeForwardError); err != nil {
 						return err
 					}
 					continue

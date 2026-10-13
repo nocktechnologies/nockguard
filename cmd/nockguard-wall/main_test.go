@@ -24,7 +24,7 @@ import (
 
 func TestVerifyReportsAuditFailureForWall(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent.audit.jsonl")
-	if err := os.WriteFile(path+".audit-failing", []byte("audit failing: calls refused\n"), 0600); err != nil {
+	if err := os.Mkdir(path+".audit-failing", 0700); err != nil {
 		t.Fatal(err)
 	}
 	b := newBroker()
@@ -37,6 +37,13 @@ func TestVerifyReportsAuditFailureForWall(t *testing.T) {
 	}
 	if !rep.AuditFailing {
 		t.Fatalf("/verify did not report audit failure: %s", w.Body.String())
+	}
+	page, err := indexFS.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(page), "last required audit write failed") || strings.Contains(string(page), "audit failing: calls refused") {
+		t.Fatal("Wall failure label claims an unobservable call refusal")
 	}
 	if err := os.Remove(path + ".audit-failing"); err != nil {
 		t.Fatal(err)

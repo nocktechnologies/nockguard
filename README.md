@@ -216,13 +216,17 @@ Each decision is one JSON object per line (JSON Lines):
 `decision` is one of `allow`, `deny`, `would-deny` (shadow dry-run miss), `block` (input validation), `ratelimit`, `approval-granted`, `approval-denied`, `state-write`, `hide` (filtered from `tools/list`), or `dispatch` (required-audit permission to forward).
 
 When auditing is enabled, `proxy`, `mcp-http`, and `mcp-listen` persist a decision
-before forwarding a tool call. A write failure refuses the call and later calls
-until the writer is repaired and reopened. `proxy` and `mcp-listen` write a
-`dispatch` row before forwarding and deferred decisions before releasing the
-response. `mcp-http` writes its observe decision before forwarding. Use
+before forwarding a tool call. A pre-forward write failure refuses that call;
+a required-writer failure refuses later calls until repair and reopen. `proxy`
+and `mcp-listen` write a
+`dispatch` row durably before forwarding. Deferred decisions are written in
+request order, so a response that arrives ahead of an earlier pending call can
+be released before its decision row is written. If that later write fails, the
+writer latch refuses every later call and status reports the failure. `mcp-http`
+writes its observe decision before forwarding. Use
 `--audit-best-effort` on one of these local commands only if you explicitly
 want the old behavior; startup prints a warning. `nockguard status --agent <name>`
-(or `doctor`) and the Live Wall show `audit failing: calls refused`
+(or `doctor`) and the Live Wall show `last required audit write failed`
 when a required write fails. The status command accepts `--audit <path>` for
 custom trail paths. `mcp-gateway` requires auditing and also blocks later
 requests across its sessions until storage is repaired and the process restarted.

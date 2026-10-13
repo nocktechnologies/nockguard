@@ -14,7 +14,27 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/nocktechnologies/nockguard/internal/audit"
 )
+
+func TestBestEffortAuditClearsStaleFailureMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	marker := path + ".audit-failing"
+	if err := os.Mkdir(marker, 0700); err != nil {
+		t.Fatal(err)
+	}
+	auditor, err := audit.New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer auditor.Close()
+	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate.WithBestEffortAudit()
+	if audit.FailureStatus(path) {
+		t.Fatal("best-effort mode retained stale required-writer marker")
+	}
+}
 
 func TestProxyAuditBestEffortFlag(t *testing.T) {
 	binary := buildBinary(t)
@@ -54,7 +74,7 @@ func TestProxyAuditBestEffortFlag(t *testing.T) {
 				if strings.Count(string(out), `"result"`) != 2 || !strings.Contains(string(out), "WARNING: --audit-best-effort enabled") {
 					t.Fatalf("best-effort flag did not forward both calls and warn: %s", out)
 				}
-			} else if strings.Count(string(out), auditBeforeForwardError) != 2 || strings.Contains(string(out), `"result"`) {
+			} else if strings.Count(string(out), AuditBeforeForwardError) != 2 || strings.Contains(string(out), `"result"`) {
 				t.Fatalf("required mode forwarded a call or hid failure: %s", out)
 			}
 		})
@@ -89,7 +109,7 @@ func TestLocalAuditCheckpointFailure(t *testing.T) {
 				if forwarded != bestEffort {
 					t.Fatalf("call %d forwarded=%v, want %v; reply=%s", i+1, forwarded, bestEffort, reply)
 				}
-				if !bestEffort && !strings.Contains(string(reply), auditBeforeForwardError) {
+				if !bestEffort && !strings.Contains(string(reply), AuditBeforeForwardError) {
 					t.Fatalf("call %d did not report audit failure: %s", i+1, reply)
 				}
 			}
@@ -119,7 +139,7 @@ func TestLocalAuditCheckpointFailure(t *testing.T) {
 				if got := calls.Load(); got != int32((i+1)*map[bool]int{true: 1, false: 0}[bestEffort]) {
 					t.Fatalf("after call %d upstream calls=%d; response=%s", i+1, got, body)
 				}
-				if !bestEffort && !strings.Contains(body, auditBeforeForwardError) {
+				if !bestEffort && !strings.Contains(body, AuditBeforeForwardError) {
 					t.Fatalf("call %d did not report audit failure: %s", i+1, body)
 				}
 			}

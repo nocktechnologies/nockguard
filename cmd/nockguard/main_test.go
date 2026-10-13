@@ -461,18 +461,18 @@ func TestMCPListenSubcommandForwardsAuditsAndShutsDown(t *testing.T) {
 
 func TestStatusShowsAuditFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent.audit.jsonl")
-	if err := os.WriteFile(path+".audit-failing", []byte("audit failing: calls refused\n"), 0600); err != nil {
+	if err := os.Mkdir(path+".audit-failing", 0700); err != nil {
 		t.Fatal(err)
 	}
 	code, out, _ := runCommandForTest(t, "status", "--agent", "mira", "--audit", path)
-	if code != 2 || !strings.Contains(out, "audit failing: calls refused") {
+	if code != 2 || !strings.Contains(out, "last required audit write failed") || strings.Contains(out, "calls refused") {
 		t.Fatalf("status = (%d, %q), want visible degraded state", code, out)
 	}
 	if err := os.Remove(path + ".audit-failing"); err != nil {
 		t.Fatal(err)
 	}
 	code, out, _ = runCommandForTest(t, "doctor", "--agent", "mira", "--audit", path)
-	if code != 0 || strings.Contains(out, "calls refused") {
+	if code != 0 || strings.Contains(out, "last required audit write failed") {
 		t.Fatalf("doctor after recovery = (%d, %q)", code, out)
 	}
 }

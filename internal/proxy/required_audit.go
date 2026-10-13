@@ -12,7 +12,7 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/proxy/forwardhttp"
 )
 
-const auditBeforeForwardError = "nockguard: audit unavailable; request was not forwarded"
+const AuditBeforeForwardError = "nockguard: audit unavailable; request was not forwarded"
 const auditAfterForwardError = "nockguard: audit failed after forwarding; tool may have executed; do not retry automatically"
 const unverifiedToolResponseError = "nockguard: upstream response could not be verified; tool may have executed; do not retry automatically"
 
@@ -78,7 +78,7 @@ func (l *HTTPListener) auditError() error {
 }
 
 func (l *HTTPListener) writeAuditError(w http.ResponseWriter, request []byte, forwarded bool) {
-	reason := auditBeforeForwardError
+	reason := AuditBeforeForwardError
 	if forwarded {
 		reason = auditAfterForwardError
 	}

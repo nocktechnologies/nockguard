@@ -193,6 +193,11 @@ func New(path string, opts ...Option) (*Auditor, error) {
 		return nil, err
 	}
 	if a.signing() {
+		if FailureStatus(path) {
+			if _, err := os.Stat(path); err != nil {
+				return nil, fmt.Errorf("cannot verify failed audit trail on reopen: %w", err)
+			}
+		}
 		// Verify the existing chain BEFORE the auditor starts appending. Without
 		// this, a trail tampered or truncated mid-chain during downtime would be
 		// silently accepted: the next append chains onto the broken tail, baking
@@ -211,6 +216,10 @@ func New(path string, opts ...Option) (*Auditor, error) {
 	}
 	a.f = f
 	a.path = path
+	if a.signing() {
+		// A verified reopen is the required writer's recovery boundary.
+		_ = os.Remove(path + ".audit-failing")
+	}
 	return a, nil
 }
 
@@ -267,10 +276,18 @@ func (a *Auditor) RecordRequired(ev Event) error {
 }
 
 // FailureStatus reports the last required-audit write failure for a trail.
-// A successful required write clears the signal after recovery.
+// Only a verified reopen or an explicit best-effort choice clears the signal.
 func FailureStatus(path string) bool {
 	_, err := os.Stat(path + ".audit-failing")
-	return err == nil
+	return !os.IsNotExist(err)
+}
+
+// ClearFailureStatus removes the required-writer marker when a caller explicitly
+// switches this trail to best-effort audit. It does not reset a latched writer.
+func (a *Auditor) ClearFailureStatus() {
+	if a != nil && a.path != "" {
+		_ = os.Remove(a.path + ".audit-failing")
+	}
 }
 
 // RequiredError reports known writer failures. A nil result means the writer is
@@ -315,8 +332,6 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 				if a.path != "" {
 					_ = os.Mkdir(a.path+".audit-failing", 0o700)
 				}
-			} else if a.path != "" {
-				_ = os.Remove(a.path + ".audit-failing")
 			}
 		}()
 	}

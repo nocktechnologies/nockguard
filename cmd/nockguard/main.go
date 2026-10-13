@@ -1321,7 +1321,7 @@ func runStatus(args []string) int {
 		path = policy.AgentAuditPath(filepath.Join(home, policy.DefaultAuditPath), agent)
 	}
 	if audit.FailureStatus(path) {
-		fmt.Printf("agent: %s\naudit: audit failing: calls refused\n", agent)
+		fmt.Printf("agent: %s\naudit: last required audit write failed\n", agent)
 		return 2
 	}
 	fmt.Printf("agent: %s\naudit: no failure reported\n", agent)
