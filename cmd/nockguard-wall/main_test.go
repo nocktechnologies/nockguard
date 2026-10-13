@@ -90,17 +90,20 @@ func TestComputePulse(t *testing.T) {
 
 	// No filters: every event counted, bucketed by decision.
 	p := computePulse(evs, "", "", "", nil, nil)
+	if p.Hidden != 2 {
+		t.Fatalf("hidden: got %d want 2", p.Hidden)
+	}
 	if p.Total != 8 {
 		t.Fatalf("total: got %d want 8", p.Total)
 	}
-	if p.Approved != 3 || p.Pending != 0 || p.Blocked != 5 {
-		t.Fatalf("buckets: approved=%d pending=%d blocked=%d want 3/0/5", p.Approved, p.Pending, p.Blocked)
+	if p.Approved != 3 || p.Pending != 0 || p.Blocked != 3 {
+		t.Fatalf("buckets: approved=%d pending=%d blocked=%d want 3/0/3", p.Approved, p.Pending, p.Blocked)
 	}
 	// Threat tiers, derived from (decision, reason): the "rm -rf" block is
-	// critical, the reasonless deny is high, and the ratelimit + two hides are
-	// low; the three allows are none (not counted as caught).
-	if p.Threats != 5 || p.Critical != 1 || p.High != 1 || p.Low != 3 {
-		t.Fatalf("threats: threats=%d crit=%d high=%d low=%d want 5/1/1/3",
+	// critical, the reasonless deny is high, and the ratelimit is low; the
+	// two hides and three allows are none (not counted as caught).
+	if p.Threats != 3 || p.Critical != 1 || p.High != 1 || p.Low != 1 {
+		t.Fatalf("threats: threats=%d crit=%d high=%d low=%d want 3/1/1/1",
 			p.Threats, p.Critical, p.High, p.Low)
 	}
 	// Top agents by volume; the tie at 2 (bob, kit) breaks by name, and the cap
@@ -128,21 +131,21 @@ func TestComputePulse(t *testing.T) {
 	}
 
 	// Severity filter respected. "threat" = any live catch (crit+high+low): the 3
-	// allows drop, leaving the 5 caught events.
-	if pt := computePulse(evs, "", "", "threat", nil, nil); pt.Total != 5 || pt.Approved != 0 || pt.Threats != 5 {
-		t.Fatalf("threat severity filter: got %+v want total 5, approved 0, threats 5", pt)
+	// allows and 2 hides drop, leaving the 3 tiered records.
+	if pt := computePulse(evs, "", "", "threat", nil, nil); pt.Total != 3 || pt.Approved != 0 || pt.Threats != 3 {
+		t.Fatalf("threat severity filter: got %+v want total 3, approved 0, threats 3", pt)
 	}
 	// Exact tier: only the critical "rm -rf" block.
 	if pcrit := computePulse(evs, "", "", "critical", nil, nil); pcrit.Total != 1 || pcrit.Critical != 1 || pcrit.Blocked != 1 {
 		t.Fatalf("critical severity filter: got %+v want total 1, critical 1, blocked 1", pcrit)
 	}
-	// "none" is a real severity (allows only), NOT the same as no filter.
-	if pn := computePulse(evs, "", "", "none", nil, nil); pn.Total != 3 || pn.Approved != 3 || pn.Threats != 0 {
-		t.Fatalf("none severity filter: got %+v want total 3, approved 3, threats 0", pn)
+	// "none" is a real severity (allows and hides), NOT the same as no filter.
+	if pn := computePulse(evs, "", "", "none", nil, nil); pn.Total != 5 || pn.Approved != 3 || pn.Hidden != 2 || pn.Threats != 0 {
+		t.Fatalf("none severity filter: got %+v want total 5, approved 3, hidden 2, threats 0", pn)
 	}
-	// "low" = ratelimit + two hides.
-	if pl := computePulse(evs, "", "", "low", nil, nil); pl.Total != 3 || pl.Low != 3 {
-		t.Fatalf("low severity filter: got %+v want total 3, low 3", pl)
+	// "low" = the ratelimit only; hides are not threats.
+	if pl := computePulse(evs, "", "", "low", nil, nil); pl.Total != 1 || pl.Low != 1 {
+		t.Fatalf("low severity filter: got %+v want total 1, low 1", pl)
 	}
 
 	// Combined filters intersect (text ∩ decision).

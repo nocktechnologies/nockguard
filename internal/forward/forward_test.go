@@ -177,13 +177,13 @@ func TestSeverityThreatTiers(t *testing.T) {
 		{"deny", "deny-rule \"nockcc_kill_switch_set\"", ThreatHigh},
 		{"deny", "", ThreatHigh}, // reasonless deny: surface rather than downgrade
 
-		// low: routine allowlist denies, rate-limit holds, hidden tools.
+		// low: routine allowlist denies, rate-limit holds.
 		{"deny", "no allow-rule matched", ThreatLow},
 		{"deny", "default-deny (no allow list)", ThreatLow},
 		{"deny", "tool not in agent allowlist", ThreatLow},
 		{"ratelimit", "rate limit: 60/min exceeded", ThreatLow},
 		{"ratelimit", "session spend cap reached", ThreatLow},
-		{"hide", "tool hidden from this agent", ThreatLow},
+		{"hide", "tool hidden from this agent", ThreatNone}, // discovery filtering, not an attack
 		{"approval-denied", "denied by approver", ThreatHigh},
 
 		// Unknown decisions stay visible as high-severity signals.
@@ -213,7 +213,7 @@ func TestEmittedDecisionCensus(t *testing.T) {
 		{"deny", "policy.go:verdictName; stdio.go:appendAudit; forwardhttp.go", "blocked"},
 		{"block", "stdio.go:appendAudit; inject.go:appendAudit; lock.go", "blocked"},
 		{"ratelimit", "stdio.go:appendAudit", "blocked"},
-		{"hide", "stdio.go:appendAudit", "blocked"},
+		{"hide", "stdio.go:appendAudit", "hidden"},
 		{"approval-denied", "stdio.go:appendAudit", "blocked"},
 		{"inject", "inject.go:appendAudit", "other"},
 		{"budget-ask", "budget.go:enqueueBudgetEvent", "other"},

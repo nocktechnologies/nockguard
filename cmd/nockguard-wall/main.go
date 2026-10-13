@@ -286,12 +286,14 @@ type pulse struct {
 	Approved    int `json:"approved"`    // routine decisions
 	Blocked     int `json:"blocked"`     // explicit rejections only
 	Other       int `json:"other"`       // unfamiliar decisions
+	Hidden      int `json:"hidden"`      // tools/list hides; discovery filtering, not refused calls
 	Pending     int `json:"pending"`     // held calls (none of the current decisions)
 	RateLimited int `json:"rateLimited"` // rejected by rate or spend limit; subset of Blocked
 	Total       int `json:"total"`
-	// Threat breakdown by severity (forward.Severity). Threats is every non-allow
-	// catch (critical+high+low); Critical/High are broken out so the wall's hero
-	// counter and critical/high pane don't have to re-classify in the browser.
+	// Threat breakdown by severity (forward.Severity). Threats counts audit
+	// records with a live tier (critical+high+low), not calls; hides are excluded.
+	// Critical/High are broken out so the wall's hero counter and critical/high
+	// pane don't have to re-classify in the browser.
 	Threats   int          `json:"threats"`
 	Critical  int          `json:"critical"`
 	High      int          `json:"high"`
@@ -401,6 +403,8 @@ func computePulse(evs []event, q, decision, severity string, since, until *time.
 			p.Approved++
 		case "blocked":
 			p.Blocked++
+		case "hidden":
+			p.Hidden++
 		case "unreadable":
 			// Unreadable evidence has no decision count.
 		default:

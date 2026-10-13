@@ -78,7 +78,7 @@
   .ptile.critical { border-left-color:var(--block); } .ptile.critical .pn{ color:var(--block); }
   .ptile.high     { border-left-color:var(--deny); }  .ptile.high .pn{ color:var(--deny); }
 
-  /* "threats caught" hero + dedicated critical/high pane */
+  /* "threat records" hero + dedicated critical/high pane */
   .hero { display:flex; flex-direction:column; align-items:flex-start; justify-content:center;
           padding:4px 22px 4px 0; margin-right:6px; border-right:1px solid var(--line); }
   .hero .hn { font-size:38px; font-weight:800; line-height:1; color:var(--block);
@@ -230,13 +230,14 @@
       <div class="scope">Counts and pulse cover the same filtered view of the newest <span id="window-size">500</span> decisions. A blank source or unverified trail is not a zero-violation finding.</div>
     </section>
     <div class="stats">
-      <div class="pill"><span class="n" id="c-total">—</span><span class="l">in view</span></div>
-      <div class="pill allowed"><span class="n" id="c-allow">—</span><span class="l">allowed</span></div>
-      <div class="pill blocked"><span class="n" id="c-block">—</span><span class="l">rejected</span></div>
+      <div class="pill"><span class="n" id="c-total">—</span><span class="l">records in view</span></div>
+      <div class="pill allowed"><span class="n" id="c-allow">—</span><span class="l">allowed records</span></div>
+      <div class="pill blocked"><span class="n" id="c-block">—</span><span class="l">rejected records</span></div>
+      <div class="pill other"><span class="n" id="c-hidden">—</span><span class="l">tools hidden (discovery)</span></div>
       <div class="pill other"><span class="n" id="c-other">—</span><span class="l">other</span></div>
       <div class="pill limited"><span class="n" id="c-rate">—</span><span class="l">rate limited</span></div>
       <div class="pill unreadable"><span class="n" id="c-unreadable">—</span><span class="l">unreadable</span></div>
-      <div class="pill caught"><span class="n" id="c-caught">—</span><span class="l">catch rate</span></div>
+      <div class="pill caught"><span class="n" id="c-caught">—</span><span class="l">rejected share of records</span></div>
       <button class="toggle snd" id="t-sound" title="beep when something is blocked">🔊 SOUND</button>
     </div>
     <div class="filters">
@@ -271,9 +272,9 @@
     </div>
   </header>
   <div id="pulse" class="pulse" title="live aggregate of what's on the wall — respects the active filters">
-    <div class="hero" title="non-allow catches (critical + high + low) in view">
+    <div class="hero" title="audit records with a threat tier (critical + high + low) in view; one call can write several records, and tools/list hides are not counted">
       <span class="hn" id="p-threats">—</span>
-      <span class="hl">threats caught</span>
+      <span class="hl">threat records</span>
     </div>
     <div class="pgroup sev" title="threats broken out by severity — a secret-exfil block is not a routine deny">
       <div class="ptile critical"><span class="pn" id="p-critical">—</span><span class="pl">critical</span></div>
@@ -282,6 +283,7 @@
     <div class="pgroup">
       <div class="ptile approved"><span class="pn" id="p-approved">—</span><span class="pl">approved</span></div>
       <div class="ptile blocked"><span class="pn" id="p-blocked">—</span><span class="pl">rejected</span></div>
+      <div class="ptile other"><span class="pn" id="p-hidden">—</span><span class="pl">tools hidden</span></div>
       <div class="ptile other"><span class="pn" id="p-other">—</span><span class="pl">other</span></div>
       <div class="ptile limited"><span class="pn" id="p-limited">—</span><span class="pl">rate limited</span></div>
       <div class="ptile unreadable"><span class="pn" id="p-unreadable">—</span><span class="pl">unreadable</span></div>
@@ -438,6 +440,7 @@
   const pApproved = document.getElementById('p-approved');
   const pBlocked = document.getElementById('p-blocked');
   const pOther = document.getElementById('p-other');
+  const pHidden = document.getElementById('p-hidden');
   const pLimited = document.getElementById('p-limited');
   const pUnreadable = document.getElementById('p-unreadable');
   const pThreats = document.getElementById('p-threats');
@@ -445,7 +448,7 @@
   const pHigh = document.getElementById('p-high');
   const pAgents = document.getElementById('p-agents');
   function renderPulse() {
-    let approved = 0, blocked = 0, other = 0, limited = 0, threats = 0, critical = 0, high = 0;
+    let approved = 0, blocked = 0, hidden = 0, other = 0, limited = 0, threats = 0, critical = 0, high = 0;
     let totalRows = 0, unreadable = 0, hasEvidence = false;
     const byAgent = new Map();
     for (const row of feed.children) {
@@ -456,6 +459,7 @@
       const b = row.dataset.bucket;
       if (b === 'approved') approved++;
       else if (b === 'blocked') blocked++;
+      else if (b === 'hidden') hidden++;
       else if (b === 'unreadable') unreadable++;
       else other++;
       if (row.dataset.decision === 'ratelimit') limited++;
@@ -471,6 +475,8 @@
     const shown = n => hasEvidence ? n : '—';
     pApproved.textContent = shown(approved);
     pBlocked.textContent = shown(blocked);
+    pHidden.textContent = shown(hidden);
+    document.getElementById('c-hidden').textContent = shown(hidden);
     pOther.textContent = shown(other);
     pLimited.textContent = shown(limited);
     pUnreadable.textContent = shown(unreadable);
