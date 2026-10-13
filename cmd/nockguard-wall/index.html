@@ -257,7 +257,7 @@
         <option value="critical">critical</option>
         <option value="high">high</option>
         <option value="low">low</option>
-        <option value="none">none (non-catch)</option>
+        <option value="none">none (allows, hides, observe)</option>
       </select>
       <select id="f-timerange" class="finput" title="filter by time range">
         <option value="">all time</option>
@@ -388,7 +388,7 @@
   // Mirrors the server's matches() severity leg: "threat" = any live catch
   // (critical|high|low, i.e. not none); any other value is an exact tier match.
   // Empty means no severity filter (distinct from "none", which is the
-  // non-catch bucket: allows, dry-run shadow would-denies, and observe audits).
+  // non-catch bucket: allows, tools/list hides, dry-run shadow would-denies, and observe audits).
   function sevMatches(sev) {
     if (!fsev) return true;
     if (fsev === 'threat') return sev !== 'none';
