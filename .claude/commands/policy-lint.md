@@ -38,12 +38,15 @@ if isinstance(audit, dict):
 with open(sys.argv[2], "w") as f:
     yaml.safe_dump(doc, f)
 PY
+TIMEOUT=$(command -v timeout || command -v gtimeout) || { echo "ERROR: neither timeout nor gtimeout is installed (macOS: brew install coreutils); cannot run the parse probe" >&2; exit 1; }
+command -v nockguard >/dev/null || { echo "ERROR: nockguard is not on PATH; cannot run the parse probe" >&2; exit 1; }
 STATUS=0
-HOME="$PROBE_DIR" timeout 10 nockguard proxy --upstream echo --agent lint-probe --policy "$PROBE_DIR/policy.yaml" >"$PROBE_DIR/out" 2>&1 </dev/null || STATUS=$?
+HOME="$PROBE_DIR" "$TIMEOUT" 10 nockguard proxy --upstream echo --agent lint-probe --policy "$PROBE_DIR/policy.yaml" >"$PROBE_DIR/out" 2>&1 </dev/null || STATUS=$?
 head -5 "$PROBE_DIR/out"
 echo "proxy exit status: $STATUS"
 case "$STATUS" in
   0) ;;
+  126|127) echo "ERROR: the parse probe could not be launched (exit $STATUS); this says nothing about the policy" >&2; exit 1 ;;
   124) echo "ERROR: the parse probe timed out after 10s; the policy was not confirmed loadable" >&2; exit 1 ;;
   *) echo "ERROR: nockguard could not load $POLICY (exit $STATUS)" >&2; exit 1 ;;
 esac
