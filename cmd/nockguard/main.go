@@ -21,6 +21,7 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/proxy"
 	"github.com/nocktechnologies/nockguard/internal/proxy/forwardhttp"
 	"github.com/nocktechnologies/nockguard/internal/proxy/mcphttp"
+	"github.com/nocktechnologies/nockguard/internal/sessionverify"
 	"github.com/nocktechnologies/nockguard/internal/trust"
 	"gopkg.in/yaml.v3"
 )
@@ -695,13 +696,14 @@ func parseCommand(cmd string) []string {
 //     with an optional `--audit <path>` override. Backward-compatible with
 //     the pre-Phase-5 flow.
 //
-// Exit 0 = chain intact, 2 = tampering detected, 1 = usage/setup error.
+// Exit 0 = a non-empty, fully checkpointed trail; 1 = setup error, NO_ROWS or
+// UNANCHORED; 2 = trail read or integrity failure after key selection.
 // verifyAllAgents verifies EVERY per-agent Ed25519 trail (<agent>.audit.jsonl)
 // in the audit dir — the "prove the whole fleet is accountable in one command"
 // path behind `nockguard verify --all`. Each trail is checked with that agent's
-// own public key (NOCKGUARD_AGENT_<NAME>_ED25519_PUB). Exit 0 = all intact,
-// 2 = any tampered, 1 = any trail it could not verify (missing/invalid key) or
-// no trails found at all (verdict NO_TRAILS: nothing to verify is not protected).
+// own public key (NOCKGUARD_AGENT_<NAME>_ED25519_PUB). Exit 0 = all non-empty
+// and fully checkpointed, 2 = any tampered, 1 = any empty, unanchored or
+// unverifiable trail, or no trails found (NO_TRAILS is not protected).
 type verifyResult struct {
 	Verdict         string `json:"verdict"`
 	AuditPath       string `json:"audit_path,omitempty"`
@@ -725,7 +727,7 @@ type verifyTrailResult struct {
 	Path            string `json:"path"`
 	Status          string `json:"status"`
 	PubKeySource    string `json:"public_key_source,omitempty"`
-	EntriesVerified int    `json:"entries_verified,omitempty"`
+	EntriesVerified int    `json:"entries_verified"`
 	Error           string `json:"error,omitempty"`
 }
 
@@ -795,13 +797,28 @@ func verifyAllAgents(auditDir string, jsonOutput bool) int {
 			unverifiable++
 			continue
 		}
-		n, verr := audit.VerifyEd25519(path, pub)
+		n, checkpointCount, verr := audit.VerifyEd25519WithCheckpoint(path, pub)
 		if verr != nil {
 			if !jsonOutput {
 				fmt.Printf("  [TAMPER] %-18s %v\n", agent, verr)
 			}
 			results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: "TAMPERED", PubKeySource: keySource, EntriesVerified: n, Error: verr.Error()})
 			tampered++
+			continue
+		}
+		trailVerdict := sessionverify.GuardVerdict(n, checkpointCount == n)
+		if trailVerdict != sessionverify.VerdictProtected {
+			detail := "audit trail is empty; there are no entries to verify"
+			label := "[NO ROWS]"
+			if trailVerdict == sessionverify.VerdictUnanchored {
+				detail = fmt.Sprintf("%d entries beyond the signed checkpoint (count %d); re-run once the writer is idle", n-checkpointCount, checkpointCount)
+				label = "[UNANCHORED]"
+			}
+			if !jsonOutput {
+				fmt.Printf("  %-12s %-18s %s\n", label, agent, detail)
+			}
+			results = append(results, verifyTrailResult{Agent: agent, Path: path, Status: trailVerdict, PubKeySource: keySource, EntriesVerified: n, Error: detail})
+			unverifiable++
 			continue
 		}
 		if !jsonOutput {
@@ -969,9 +986,10 @@ func runAudit(args []string) int {
 	}
 
 	var (
-		n         int
-		err       error
-		keySource string
+		n               int
+		checkpointCount int
+		err             error
+		keySource       string
 	)
 	if pubEnv != "" {
 		pubHex, src, kerr := requirePubHex(pubEnv, agentName)
@@ -985,14 +1003,14 @@ func runAudit(args []string) int {
 			fmt.Fprintf(os.Stderr, "error: %v\n", perr)
 			return 1
 		}
-		n, err = audit.VerifyEd25519(auditPath, pub)
+		n, checkpointCount, err = audit.VerifyEd25519WithCheckpoint(auditPath, pub)
 	} else {
 		key := os.Getenv(keyEnv)
 		if key == "" {
 			fmt.Fprintf(os.Stderr, "error: %s is not set in the environment\n", keyEnv)
 			return 1
 		}
-		n, err = audit.Verify(auditPath, []byte(key))
+		n, checkpointCount, err = audit.VerifyWithCheckpoint(auditPath, []byte(key))
 	}
 
 	if err != nil {
@@ -1002,6 +1020,23 @@ func runAudit(args []string) int {
 			fmt.Fprintf(os.Stderr, "TAMPER DETECTED — %s (verified %d before the break): %v\n", auditPath, n, err)
 		}
 		return 2
+	}
+	verdict := sessionverify.GuardVerdict(n, checkpointCount == n)
+	if verdict != sessionverify.VerdictProtected {
+		detail := "audit trail is empty; there are no entries to verify"
+		if verdict == sessionverify.VerdictUnanchored {
+			detail = fmt.Sprintf("%d entries beyond the signed checkpoint (count %d); re-run once the writer is idle", n-checkpointCount, checkpointCount)
+		}
+		if jsonOutput {
+			writeJSON(verifyResult{Verdict: verdict, AuditPath: auditPath, PubKeySource: keySource, EntriesVerified: n, Error: detail})
+		} else {
+			fmt.Printf("NOT PROTECTED — %s: %s\n", verdict, detail)
+			if keySource != "" {
+				fmt.Printf("public key: %s\n", keySource)
+			}
+			fmt.Printf("VERDICT: %s\n", verdict)
+		}
+		return 1
 	}
 	if jsonOutput {
 		writeJSON(verifyResult{Verdict: "PROTECTED", AuditPath: auditPath, PubKeySource: keySource, EntriesVerified: n})
@@ -1547,7 +1582,7 @@ Examples:
   nockguard verify --agent coder                        # prove coder's trail is intact + non-repudiable (exit 0 = clean, 2 = tampered)
   nockguard selftest --policy policy.yaml               # prove the firewall BLOCKS a denied tool + catches a secret (exit 0 = proven, 2 = gap)
   nockguard verify --session "$NOCKLOCK_SESSION_ID" --lock-db <nocklock.db> --guard-trail ~/.nockguard/logs/coder.audit.jsonl --lock-pub-env LOCK_PUB --guard-pub-env GUARD_PUB   # one verdict across both chains (exit 0 = PROTECTED, 2 = TAMPERED, 1 = anything else)
-  nockguard verify --all                                # prove EVERY per-agent trail in ~/.nockguard/logs in one command (exit 0 = all intact, 2 = tampered, 1 = unverifiable or no trails found)
+  nockguard verify --all                                # prove EVERY per-agent trail in ~/.nockguard/logs (exit 0 = all protected, 2 = tampered, 1 = NO_ROWS, UNANCHORED, unverifiable or no trails)
   nockguard policy propose --agent coder                 # derive a shadow allowlist from coder's observed allowed tools
   nockguard policy shadow-report --agent coder           # count shadow would-deny misses by tool
   nockguard evidence --framework soc2 --agent coder -o coder-soc2.html   # SOC2 pack for coder's signed trail
