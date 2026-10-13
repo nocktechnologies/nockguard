@@ -621,8 +621,8 @@ func (p *StdioProxy) Run() error {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return fmt.Errorf("proxy received %s", sig)
 	}
-	// Linux waitid leaves the leader unreaped until this kill, so the PGID
-	// cannot have been reused. The output-error and signal paths also kill
+	// Linux and macOS waitid leave the leader unreaped until this kill, so
+	// the PGID cannot have been reused. Output errors and signals also kill
 	// the group before waiting for the leader.
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	waitErr := reapLeader(cmd, observed)
