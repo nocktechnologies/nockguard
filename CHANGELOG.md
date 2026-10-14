@@ -11,7 +11,7 @@ All notable changes to NockGuard are documented here.
 
 ### Fixed
 - `mcp-gateway` releases an SSE initialize session before delivering its matching result, so an immediate follow-up does not receive a spurious `429 gateway busy`.
-- N11738: `mcp-gateway` also installs and releases a validated JSON initialize session before delivering its result, so an immediate follow-up does not receive a spurious `429 gateway busy`.
+- `mcp-gateway` also installs and releases a validated JSON initialize session before delivering its result, so an immediate follow-up does not receive a spurious `429 gateway busy`.
 - The vuln-scan helper (`.claude/commands/vuln-scan.md` and the Warden template copy) shows the `verify --all` command again and rates a `[SKIP]` line (invalid agent name) as HIGH.
 
 ## [0.7.0] - 2026-10-14
