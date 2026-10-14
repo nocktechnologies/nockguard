@@ -1259,6 +1259,205 @@ func TestSSEInitializeFollowupAtFlush(t *testing.T) {
 	}
 }
 
+func TestSSEInitializeRefreshesIdleTimeAfterFlush(t *testing.T) {
+	c := testConfig(t)
+	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Mcp-Session-Id", "upstream-session-id")
+			fmt.Fprint(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n")
+		})
+	})
+	flushing := make(chan struct{})
+	resume := make(chan struct{})
+	var resumeOnce sync.Once
+	release := func() { resumeOnce.Do(func() { close(resume) }) }
+	defer release()
+	w := &flushObserver{ResponseRecorder: httptest.NewRecorder()}
+	w.onFlush = func() {
+		close(flushing)
+		<-resume
+	}
+	r := httptest.NewRequest(http.MethodPost, "https://guard.example/mcp", strings.NewReader(initialize))
+	r.Header.Set("Authorization", "Bearer connector-test-token")
+	done := make(chan struct{})
+	go func() {
+		g.ServeHTTP(w, r)
+		close(done)
+	}()
+	select {
+	case <-flushing:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initialize result did not reach flush")
+	}
+	sid := w.Header().Get("Mcp-Session-Id")
+	g.mu.Lock()
+	s := g.sessions[sid]
+	if s == nil || s.busy {
+		g.mu.Unlock()
+		t.Fatalf("session not released before result flush: %+v", s)
+	}
+	s.lastUsed = time.Now().Add(-sessionTTL)
+	g.mu.Unlock()
+	release()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initialize handler did not return after flush resumed")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if s.lastUsed.Before(time.Now().Add(-time.Minute)) {
+		t.Fatalf("lastUsed was not refreshed after the initialize flush: %v", s.lastUsed)
+	}
+}
+
+type writeBarrier struct {
+	http.ResponseWriter
+	started chan struct{}
+	resume  <-chan struct{}
+	once    sync.Once
+}
+
+func (w *writeBarrier) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
+	<-w.resume
+	return w.ResponseWriter.Write(p)
+}
+
+func TestJSONInitializeRefreshesIdleTimeAfterWrite(t *testing.T) {
+	c := testConfig(t)
+	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Mcp-Session-Id", "upstream-session-id")
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		})
+	})
+	started := make(chan struct{})
+	resume := make(chan struct{})
+	w := &writeBarrier{ResponseWriter: httptest.NewRecorder(), started: started, resume: resume}
+	r := httptest.NewRequest(http.MethodPost, "https://guard.example/mcp", strings.NewReader(initialize))
+	r.Header.Set("Authorization", "Bearer connector-test-token")
+	done := make(chan struct{})
+	go func() {
+		g.ServeHTTP(w, r)
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		close(resume)
+		t.Fatal("JSON initialize did not reach response write")
+	}
+	sid := w.Header().Get("Mcp-Session-Id")
+	g.mu.Lock()
+	s := g.sessions[sid]
+	if s == nil || s.busy {
+		g.mu.Unlock()
+		close(resume)
+		t.Fatalf("JSON session was not installed before result write: %+v", s)
+	}
+	s.lastUsed = time.Now().Add(-sessionTTL)
+	g.mu.Unlock()
+	close(resume)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("JSON initialize handler did not return after write resumed")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if s.lastUsed.Before(time.Now().Add(-time.Minute)) {
+		t.Fatalf("JSON lastUsed was not refreshed after response write: %v", s.lastUsed)
+	}
+}
+
+func TestSSEInitializeDoesNotRefreshBusyFollowup(t *testing.T) {
+	c := testConfig(t)
+	followupStarted := make(chan struct{})
+	resumeFollowup := make(chan struct{})
+	resumeFlush := make(chan struct{})
+	var resumeFlushOnce sync.Once
+	var resumeFollowupOnce sync.Once
+	defer resumeFlushOnce.Do(func() { close(resumeFlush) })
+	defer resumeFollowupOnce.Do(func() { close(resumeFollowup) })
+	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Mcp-Session-Id") != "" {
+				close(followupStarted)
+				<-resumeFollowup
+				fmt.Fprint(w, `{"jsonrpc":"2.0","id":2,"result":{}}`)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Mcp-Session-Id", "upstream-session-id")
+			fmt.Fprint(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n")
+		})
+	})
+	w := &flushObserver{ResponseRecorder: httptest.NewRecorder()}
+	flushing := make(chan struct{})
+	w.onFlush = func() {
+		close(flushing)
+		<-resumeFlush
+	}
+	r := httptest.NewRequest(http.MethodPost, "https://guard.example/mcp", strings.NewReader(initialize))
+	r.Header.Set("Authorization", "Bearer connector-test-token")
+	initDone := make(chan struct{})
+	go func() {
+		g.ServeHTTP(w, r)
+		close(initDone)
+	}()
+	select {
+	case <-flushing:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SSE initialize did not reach response flush")
+	}
+	sid := w.Header().Get("Mcp-Session-Id")
+	followDone := make(chan struct{})
+	go func() {
+		request(g, list, sid, nil)
+		close(followDone)
+	}()
+	select {
+	case <-followupStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("follow-up did not acquire the released session")
+	}
+	sentinel := time.Now().Add(-sessionTTL)
+	g.mu.Lock()
+	s := g.sessions[sid]
+	if s == nil || !s.busy {
+		g.mu.Unlock()
+		t.Fatal("follow-up was not active while initialize flush was held")
+	}
+	s.lastUsed = sentinel
+	g.mu.Unlock()
+	resumeFlushOnce.Do(func() { close(resumeFlush) })
+	select {
+	case <-initDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initialize handler did not return after flush resumed")
+	}
+	g.mu.Lock()
+	if !s.busy || !s.lastUsed.Equal(sentinel) {
+		g.mu.Unlock()
+		t.Fatalf("initialize defer changed active follow-up state: busy=%t lastUsed=%v", s.busy, s.lastUsed)
+	}
+	g.mu.Unlock()
+	resumeFollowupOnce.Do(func() { close(resumeFollowup) })
+	select {
+	case <-followDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("follow-up did not return after resume")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if s.busy || !s.lastUsed.After(sentinel) {
+		t.Fatalf("follow-up did not refresh idle state: busy=%t lastUsed=%v", s.busy, s.lastUsed)
+	}
+}
+
 func TestSSEInitializeIncompleteEventAtEOFHasNoSession(t *testing.T) {
 	c := testConfig(t)
 	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {

@@ -31,7 +31,8 @@ type session struct {
 }
 
 // Gateway owns session gates; newHandler must return a fresh gate, with shared
-// agent quotas and audit writer. Only the configured subject/client can enter.
+// agent quotas and audit writer. Session handlers must honor request cancellation.
+// Only the configured subject/client can enter.
 type Gateway struct {
 	config             Config
 	host               string
@@ -157,6 +158,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	released := false
 	defer func() {
 		if released {
+			// The initialize result may take time to flush after the session is
+			// released. Refresh idle time only if no follow-up has acquired it in
+			// the meantime; the follow-up owns lastUsed while it is busy.
+			g.mu.Lock()
+			if current, ok := g.sessions[id]; ok && current == s && !s.busy {
+				s.lastUsed = time.Now()
+			}
+			g.mu.Unlock()
 			return
 		}
 		g.mu.Lock()
