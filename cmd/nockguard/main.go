@@ -1538,7 +1538,7 @@ func printUsage() {
 
 Usage:
   nockguard init [--policy <path>] [--force]
-  nockguard proxy --upstream <command> [--agent <name>] [--policy <path>] [--audit-best-effort]
+  nockguard proxy --upstream <command> --agent <name> [--policy <path>] [--audit-best-effort]
   nockguard mcp-http --upstream <url> --agent <name> [--policy <path>] [--auth-env <ENV>] [--audit-best-effort]
   nockguard mcp-listen --listen 127.0.0.1:<port> --upstream <url> --agent <name> [--policy <path>] [--audit <path>] [--audit-best-effort]
   nockguard mcp-gateway --config <path>  (OAuth resource behind a loopback HTTPS ingress)
@@ -1600,7 +1600,7 @@ Evidence packs:
 
 Examples:
   nockguard init                                        # scaffold a default-deny starter policy
-  nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project"   # zero-config: OBSERVE mode + signed audit trail, no policy file needed
+  nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project"   # zero-config observe: --agent omitted only when no policy file exists
   nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project" --agent coder --policy policy.yaml
   nockguard mcp-http --upstream https://mcp.example.com/mcp --agent coder --auth-env MCP_AUTH
   nockguard mcp-listen --listen 127.0.0.1:8790 --upstream https://mcp.example.com/mcp --agent coder --policy policy.yaml

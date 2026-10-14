@@ -6,7 +6,7 @@ dispatches commands and lists their flags in `printUsage`.
 | Command | Purpose |
 | --- | --- |
 | `init [--policy PATH] [--force]` | Write the starter policy. |
-| `proxy --upstream CMD [--agent NAME] [--policy PATH] [--audit-best-effort]` | Gate one stdio MCP server; without an explicit policy or default file, starts observe mode. |
+| `proxy --upstream CMD --agent NAME [--policy PATH] [--audit-best-effort]` | Gate one stdio MCP server; `--agent` is required when a policy is loaded. |
 | `mcp-http --upstream URL --agent NAME [--policy PATH] [--auth-env ENV] [--audit-best-effort]` | Observe-only stdio-to-HTTP bridge. |
 | `mcp-listen --listen 127.0.0.1:PORT --upstream URL --agent NAME [--policy PATH] [--audit PATH] [--audit-best-effort]` | Local HTTP enforcement listener. |
 | `mcp-gateway --config PATH` | Single-agent OAuth resource gateway; see [gateway contract](../design/hosted-gateway.md). |
@@ -26,6 +26,11 @@ dispatches commands and lists their flags in `printUsage`.
 `mcp-listen`; it allows calls through after local audit-write failures,
 weakening fail-closed audit enforcement. `mcp-gateway` has no such option and
 requires auditing to be enabled.
+
+Only zero-config observe mode permits omitting `proxy --agent`: this applies
+when no `--policy` flag is supplied and the default
+`~/.nockguard/policy.yaml` file does not exist. If an explicit policy or the
+default policy file is loaded, `--agent` is required.
 
 Default policy: `~/.nockguard/policy.yaml`; default audit root:
 `~/.nockguard/logs/`. `verify --agent NAME` uses the per-agent trail and
