@@ -35,6 +35,10 @@ agents:
     mode: allow
 ```
 
+Incident context for `mode: allow`: No verified reference found. This is an
+illustrative misconfiguration for diagnosis; it does not assert that an
+incident occurred.
+
 Fix: replace it with an explicit allow list, or set `mode: deny`.
 
 ### 2b. Missing default agent (HIGH)

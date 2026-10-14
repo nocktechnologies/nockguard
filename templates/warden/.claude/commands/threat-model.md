@@ -73,6 +73,12 @@ spend_cap:
   max_calls: 2000
 ```
 
+Incident context for `rate_limit`: No verified reference found. This example is
+an illustrative starting point, not an incident-derived limit.
+
+Incident context for `spend_cap`: No verified reference found. This example is
+an illustrative starting point, not an incident-derived limit.
+
 ## Step 6 — Identify approval gates
 
 Ask: "Are there any tools in the allow list that you want a human to approve each time, even if policy allows them?" These go in `ask` (the legacy `require_approval` key still loads). An `ask` tool is held for a human verdict even if it is not in the allow list, and is denied outright unless an approver is configured (Telegram bot or `NOCKGUARD_APPROVER=local`).
@@ -89,7 +95,7 @@ Ask the user what level of accountability they need:
 |------|--------|
 | Local record for debugging | `audit.enabled: true` (no signing) |
 | Tamper-evident trail (e.g., compliance) | Add `sign_key_env: NOCKGUARD_AUDIT_KEY` |
-| Non-repudiable trail (court-grade) | Run `nockguard keygen`; use `sign_ed25519_key_env` |
+| Public-key verifiable trail | Run `nockguard keygen --agent <name>` to create the agent's signing keypair |
 | Real-time visibility across the fleet | Add `forward.enabled: true` pointing at NockCC |
 
 ## Step 8 — Produce the policy draft
