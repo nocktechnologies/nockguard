@@ -24,14 +24,16 @@ Verify NockGuard can parse it. `nockguard policy check` runs the loader the prox
 ```bash
 POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 command -v nockguard >/dev/null || { echo "ERROR: nockguard is not on PATH; cannot run the parse check" >&2; exit 1; }
-# An older binary has no `policy check`; say so instead of calling the policy invalid.
-nockguard policy 2>&1 | grep -q 'check --policy' || { echo "ERROR: this nockguard is too old for \`policy check\`; upgrade it. This says nothing about the policy" >&2; exit 1; }
 STATUS=0
-nockguard policy check --policy "$POLICY" || STATUS=$?
+OUT=$(nockguard policy check --policy "$POLICY" 2>&1) || STATUS=$?
 case "$STATUS" in
-  0) ;;
+  0) if [ -n "$OUT" ]; then printf '%s\n' "$OUT"; fi ;;
   126|127) echo "ERROR: the parse check could not be launched (exit $STATUS); this says nothing about the policy" >&2; exit 1 ;;
-  *) echo "ERROR: nockguard could not load $POLICY (exit $STATUS)" >&2; exit 1 ;;
+  *) case "$OUT" in
+       *"unknown policy command: check"*) echo "ERROR: this nockguard is too old for \`policy check\`; upgrade it. This says nothing about the policy" >&2 ;;
+       *) printf '%s\n' "$OUT" >&2; echo "ERROR: nockguard could not load $POLICY (exit $STATUS)" >&2 ;;
+     esac
+     exit 1 ;;
 esac
 ```
 
