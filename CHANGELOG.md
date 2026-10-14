@@ -4,6 +4,8 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-14
+
 ### Fixed
 - `verify` and `verify --all` report empty signed trails as `NO_ROWS` and trails beyond their signed checkpoint as `UNANCHORED`; only non-empty, fully checkpointed trails report `PROTECTED`.
 - Evidence packs now mark empty trails `NO_ROWS` and trails beyond their signed checkpoint `UNANCHORED`, matching CLI and Wall verification.
@@ -15,9 +17,6 @@ All notable changes to NockGuard are documented here.
 - The Wall no longer scrolls horizontally on narrow screens (390 px): filters and tiles wrap, feed rows stack, and the evidence scope notes sit behind an "Evidence details" toggle on narrow screens (open by default on wide ones).
 - `tools/list` now keeps tools with an `Ask` verdict visible while holding their calls for local or Telegram approval; denied tools stay hidden. Approved calls record their final `allow` audit row before dispatch.
 - The Wall counts audit records, not calls, and says so: the header reads "records in view" and "threat records". `tools/list` hides now show as a separate "tools hidden" count and no longer count as rejected records, threats or toward the rejected share, so one rejected call no longer reads as 13 threats caught.
-
-### Fixed
-- The stdio proxy registers response correlation before writing a request upstream, and clears pending state and resolves its audit sequence when the write fails.
 
 ### Documentation
 - Correct Wall installation guidance and replace source line references with file links.
