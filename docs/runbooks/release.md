@@ -10,8 +10,13 @@ Re-run checks and review after every new commit. The `ci` workflow runs Linux
 and macOS checks on pushes to both `next` and `main`.
 
 Prepare the version and changelog on `next`, or on a short-lived
-`release/vX.Y.Z` branch cut from `next` that carries only the changelog heading
-and version bump. Promote the prepared branch with a squash PR to `main`.
+`release/vX.Y.Z` branch cut from `next` that carries only the release metadata
+listed in step 1. Freeze `next` from the release-branch cut through the
+post-release `main`-to-`next` back-sync. During the freeze, only Mira-gated
+release-fix card PRs may merge into `next`; a maintainer must incorporate each
+fix into the release candidate and rerun its exact-head review and checks before
+promotion. No builder merges into `next` during the freeze. Promote the prepared
+branch with a squash PR to `main`.
 Require the same exact-head reviews and checks on that PR, then wait for the checks on the
 resulting `main` head before tagging. Branch rules are maintained separately;
 do not weaken existing protections to make promotion pass.
@@ -52,9 +57,12 @@ rather than replacing it with the release tree.
 
 From a clean checkout, fetch both branches and create a temporary branch from
 `origin/next`. Merge `origin/main` with `git merge --no-ff --no-commit origin/main`.
-Resolve every conflict to main's version with `git checkout origin/main -- .`;
-also stage any deletions needed to match main. Commit the result as a normal
-merge commit. Never reset or force-push `next`.
+Resolve every conflict to main's version from the repository root with
+`git checkout origin/main -- :/`; also stage any deletions needed to match
+main. Commit the result as a normal merge commit. Never reset or force-push
+`next`. If unreleased work has arrived on `next`, stop without pushing or
+replacing its tree; resume only after a maintainer reconciles it through a
+reviewed path.
 
 Before pushing, compare `git rev-parse 'origin/main^{tree}'` with
 `git rev-parse 'HEAD^{tree}'`. They must be equal. Confirm `origin/next` has not
