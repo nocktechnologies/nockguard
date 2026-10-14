@@ -18,7 +18,8 @@ release-fix card PRs may merge into `next`; a maintainer must incorporate each
 fix into the release candidate and rerun its exact-head review and checks before
 promotion. No builder merges into `next` during the freeze. Promote the prepared
 branch with a squash PR to `main`. Before promotion, record in the release PR
-body the exact `next` commit included in the final candidate. Update that record
+body the full `next` commit SHA (from `git rev-parse next`) included in the
+final candidate. Update that record
 after every incorporated release fix (and after metadata changes made on
 `next`). Call this recorded commit `release_next_head` in the steps below.
 Require the same exact-head reviews and checks on that PR, then wait for the checks on the
@@ -60,7 +61,8 @@ work arrives on `next`; if it has already arrived, stop and reconcile that work
 rather than replacing it with the release tree.
 
 From a clean checkout, fetch both branches. Set `release_next_head` to the
-recorded commit from the gated release PR. **Before creating the merge or
+recorded full SHA from the gated release PR, not an abbreviation. **Before
+creating the merge or
 replacing any files**, check:
 
 ```bash
