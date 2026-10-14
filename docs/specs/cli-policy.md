@@ -14,6 +14,7 @@ dispatches commands and lists their flags in `printUsage`.
 | `egress-proxy --listen ADDR --agent NAME --policy PATH [--audit PATH] [--enforce]` | Explicit HTTP/CONNECT proxy; policy observe-only without `--enforce`. |
 | `verify` / `audit verify` | Verify one trail via `--agent`, `--key-env`, or `--ed25519-pub-env`; `--all`, `--session` and `--export` select their own modes. |
 | `selftest [--policy PATH] [--json]` | Synthetic positive-control enforcement check. |
+| `policy check --policy PATH` | Load the file with the proxy's loader and nothing else; exit 0 loaded (warnings go to stderr), 1 not. |
 | `policy propose`, `policy shadow-report` | Build and inspect observe-to-enforce candidates from a trail. |
 | `trust show --agent NAME` | Read the opt-in trust score. |
 | `evidence --framework soc2 ...` | Create local evidence pack; HTML or JSON. |

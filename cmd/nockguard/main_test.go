@@ -829,3 +829,46 @@ func tamperAuditFile(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 }
+
+func TestPolicyCheckLoadOnly(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cases := []struct {
+		name, body string
+		want       int
+	}{
+		{"valid", "agents:\n  default:\n    mode: deny\n", 0},
+		{"unknown-key", "agents:\n  default:\n    mod: deny\n", 1},
+		{"malformed-glob", "agents:\n  default:\n    allow: [\"[\"]\n", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := runCommandForTest(t, "policy", "check", "--policy", write(tc.name+".yaml", tc.body))
+			if code != tc.want {
+				t.Fatalf("exit = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, tc.want, stdout, stderr)
+			}
+			if tc.want == 1 && !strings.Contains(stderr, "error:") {
+				t.Fatalf("load error not printed, stderr:\n%s", stderr)
+			}
+		})
+	}
+	dup := "agents:\n  test:\n    mode: allow\n    inject:\n" +
+		"      - tools: [\"github_create_issue\", \"github_list_issues\"]\n        ref: \"env:T1\"\n        arg: \"headers.a\"\n" +
+		"      - tools: [\"github_create_issue\"]\n        ref: \"env:T2\"\n        arg: \"headers.b\"\n"
+	code, _, stderr := runCommandForTest(t, "policy", "check", "--policy", write("dup-inject.yaml", dup))
+	if code != 0 || !strings.Contains(stderr, "warning policy:") || !strings.Contains(stderr, "github_create_issue") {
+		t.Fatalf("duplicate inject tool: exit = %d, want 0 with a warning, stderr:\n%s", code, stderr)
+	}
+	if code, _, _ := runCommandForTest(t, "policy", "check", "--policy", filepath.Join(dir, "missing.yaml")); code != 1 {
+		t.Fatalf("missing file exit = %d, want 1", code)
+	}
+	if code, _, _ := runCommandForTest(t, "policy", "check"); code != 1 {
+		t.Fatalf("no --policy exit = %d, want 1", code)
+	}
+}

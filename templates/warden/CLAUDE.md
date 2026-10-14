@@ -20,7 +20,7 @@ file before you read. You read it, you understand it, you flag what matters.
 Every line is a policy
 decision — `allow`, `deny`, `block`, `ratelimit`, `hide`, `approval-granted`,
 `approval-denied`, `would-deny`, or the routine `dispatch` row that precedes a
-forwarded call when audit is required (`internal/proxy/stdio.go:665`). Treat
+forwarded call when audit is required (`agentToUpstream` in `internal/proxy/stdio.go`). Treat
 `dispatch` rows as expected. The interesting ones are decisions other than
 routine `allow` and `dispatch`.
 
@@ -88,31 +88,30 @@ cat ~/.nockguard/logs/*.audit.jsonl | \
 
 ### Verifying the audit chain
 
+Pick ONE verifier from the policy's signing settings; never run them in turn,
+because a verifier for the wrong scheme exits 2 and reads as tampering. The
+`/vuln-scan` command holds the full snippet (Step 4).
+
 ```bash
-# In a fresh shell, set these to the trail under review and its signing agent.
-: "${TRAIL:?Set TRAIL to the exact trail under review}"
-: "${AGENT:?Set AGENT to that trail's signing agent}"
-# One agent's trail, using its keygen public key (~/.nockguard/keys/<agent>.pub):
+# Per-agent key (NOCKGUARD_AGENT_<NAME>_ED25519_PUB or ~/.nockguard/keys/<agent>.pub), for the trail named <agent>.<audit.path basename>:
 nockguard verify --agent "$AGENT" --audit "$TRAIL"
-
-# Every per-agent trail in the audit directory:
-nockguard verify --all
-
-# Explicit key, Ed25519 or HMAC:
-nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB --audit "$TRAIL"
-nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY --audit "$TRAIL"
+# Policy audit.sign_ed25519_key_env (public key in an env var):
+nockguard verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB --audit "$TRAIL"
+# Policy audit.sign_key_env only (HMAC):
+nockguard verify --key-env "$SIGN_KEY_ENV" --audit "$TRAIL"
 ```
 
-If verification fails (exit 2), the trail could not be read or its chain is
-broken — someone edited, deleted, or reordered entries. A deleted or unopenable
-trail file exits 2 (`audit.VerifyEd25519` returns the open error, then
-`runAudit` in `cmd/nockguard/main.go` reports it as tampering). A missing public
-key or unset key variable exits 1 (`requirePubHex`), and `verify --all` exits 1
-when it finds no trails or cannot verify a key. Exit 1 reads as a setup issue
-only when auditing was never configured. When the policy has auditing enabled,
-a missing trail or missing public key is HIGH, possible deletion: report it and
-find out who removed the file. Treat exit 2 as a security event and flag it
-immediately.
+Test that the trail file exists first. Once the key is chosen, a deleted or
+unopenable trail exits 2 exactly like a broken chain (`audit.VerifyEd25519`
+returns the open error, then `runAudit` in `cmd/nockguard/main.go` reports it as
+tampering), so exit 2 alone cannot tell the two apart. With the file present:
+exit 0 is PROTECTED, exit 2 is a CRITICAL security event (flag it immediately),
+and exit 1 (missing public key or key variable, `requirePubHex`) means the trail
+is unverified, which is HIGH, not tampering. With the file missing: a fresh
+install (no keys, no other trails, no `.hwm` file) is setup; otherwise HIGH,
+possible deletion. `nockguard verify --all` exits 2 if any trail is tampered and
+1 if any is unverifiable or none are found (`NO_TRAILS`); it cannot see a trail
+that was deleted.
 
 ### Watching the Live Wall
 
