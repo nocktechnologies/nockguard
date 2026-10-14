@@ -39,10 +39,6 @@ The generated policy allows `coder` to call the filesystem server's `read_file` 
 }
 ```
 
-The Live Wall after the steps below, with the stub-backed quickstart's signed trail: two reads allowed, the `write_file` canary denied, and the `write_file` tool hidden from discovery. Verification reads `verified` against `coder.pub`.
-
-![NockGuard Live Wall showing allowed reads, a denied write_file and a verified signed trail](docs/screenshots/wall-signed-trail.png)
-
 Ask your MCP client to call `read_file` with `{"path":"<QS>/hello.txt"}`: it should return `NockGuard read succeeded`. Each `tools/call` routed through this proxy is policy-checked; with auditing enabled and the per-agent key available, its decision is recorded in a signed audit trail. After the call, run:
 
 ```bash
@@ -51,6 +47,10 @@ nockguard wall --agent coder          # open the Live Wall for coder's signed tr
 ```
 
 To exercise the blocked canary as well, run `python3 scripts/quickstart-acceptance.py` from a source checkout. This Linux CI test runs the commands above in an empty home with a local MCP stub using the filesystem server's tool names. It confirms both reads succeed, a direct `write_file` call is denied without creating a file, `verify` exits 0 with `PROTECTED`, and the signed trail records both allow and deny decisions. Denied tools are hidden from normal MCP tool discovery, so the test sends the canary call directly.
+
+The Live Wall over the trail that script writes (local stub upstream, `coder` agent): 6 records in view, 4 allowed (two `allow` and two `dispatch`), 1 rejected (the denied `write_file`) and 1 tool hidden (`write_file` in discovery). The header reads "Verification: verified" against `coder.pub`.
+
+![NockGuard Live Wall showing allowed reads, a denied write_file, a hidden write_file and a verified signed trail](docs/screenshots/wall-signed-trail.png)
 
 ### Observe first, then enforce
 
