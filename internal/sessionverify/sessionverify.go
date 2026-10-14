@@ -271,11 +271,40 @@ type GuardCheck struct {
 	base  ChainResult // Verdict is non-empty when the whole-trail check already failed
 }
 
+// GuardVerdict is the shared evidence verdict for a cryptographically verified
+// Guard trail or session. Callers must handle verification errors before using
+// it. A Guard trail is PROTECTED only when it has rows and the signed checkpoint
+// covers the entire trail.
+func GuardVerdict(rows int, tailVerified bool) string {
+	switch {
+	case rows == 0:
+		return VerdictNoRows
+	case !tailVerified:
+		return VerdictUnanchored
+	default:
+		return VerdictProtected
+	}
+}
+
 // CheckGuard verifies the WHOLE trail snapshot with audit.VerifyEd25519Bytes
 // (every line's signature, the chain, and the signed .hwm tail check; hwm is
 // nil when the sidecar is absent).
 func CheckGuard(trail, hwm []byte, pub ed25519.PublicKey) *GuardCheck {
-	return &GuardCheck{trail: trail, base: checkGuardWhole(trail, hwm, pub)}
+	return checkGuard(trail, hwm, KeyFingerprint(pub), func(trail, hwm []byte) (int, error) {
+		return audit.VerifyEd25519Bytes(trail, hwm, pub)
+	})
+}
+
+// CheckGuardHMAC verifies one HMAC-signed Guard trail snapshot. It shares the
+// whole-trail verdict with Ed25519 checks and is used by the CLI and Wall.
+func CheckGuardHMAC(trail, hwm, key []byte) *GuardCheck {
+	return checkGuard(trail, hwm, "", func(trail, hwm []byte) (int, error) {
+		return audit.VerifyBytes(trail, hwm, key)
+	})
+}
+
+func checkGuard(trail, hwm []byte, keyID string, verify func([]byte, []byte) (int, error)) *GuardCheck {
+	return &GuardCheck{trail: trail, base: checkGuardWhole(trail, hwm, keyID, verify)}
 }
 
 // VerifyGuardSnapshot is CheckGuard followed by Session for one session.
@@ -283,14 +312,18 @@ func VerifyGuardSnapshot(trail, hwm []byte, pub ed25519.PublicKey, session strin
 	return CheckGuard(trail, hwm, pub).Session(session)
 }
 
-func checkGuardWhole(trail, hwm []byte, pub ed25519.PublicKey) ChainResult {
-	c := ChainResult{KeyID: KeyFingerprint(pub)}
-	n, verr := audit.VerifyEd25519Bytes(trail, hwm, pub)
+func checkGuardWhole(trail, hwm []byte, keyID string, verify func([]byte, []byte) (int, error)) ChainResult {
+	c := ChainResult{KeyID: keyID}
+	n, verr := verify(trail, hwm)
 	c.EntriesVerified = n
 	if verr != nil {
 		c.Reason = verr.Error()
 		if errors.Is(verr, audit.ErrTamper) {
 			c.Verdict = VerdictTampered
+			var tamper *audit.TamperError
+			if errors.As(verr, &tamper) {
+				c.FirstBadRow = int64(tamper.Line)
+			}
 		} else {
 			c.Verdict = VerdictUnverifiable
 		}
@@ -323,6 +356,23 @@ func checkGuardWhole(trail, hwm []byte, pub ed25519.PublicKey) ChainResult {
 			c.Verdict, c.Reason = VerdictTampered, fmt.Sprintf("signed checkpoint count %d exceeds the %d entries in the trail", mark.Count, n)
 			return c
 		}
+	}
+	return c
+}
+
+// Trail returns the verdict for every entry in this Guard snapshot.
+func (g *GuardCheck) Trail() ChainResult {
+	c := g.base
+	if c.Verdict != "" {
+		return c
+	}
+	c.Rows = c.EntriesVerified
+	c.Verdict = GuardVerdict(c.Rows, c.TailVerified)
+	switch c.Verdict {
+	case VerdictNoRows:
+		c.Reason = "audit trail is empty; there are no entries to verify"
+	case VerdictUnanchored:
+		c.Reason = c.TailReason
 	}
 	return c
 }
@@ -370,10 +420,10 @@ func (g *GuardCheck) Session(session string) ChainResult {
 		c.Verdict, c.Reason = VerdictUnverifiable, fmt.Sprintf("scan guard snapshot: %v", err)
 		return c
 	}
-	switch {
-	case c.Rows == 0:
+	switch GuardVerdict(c.Rows, c.TailVerified) {
+	case VerdictNoRows:
 		c.Verdict, c.Reason = VerdictNoRows, fmt.Sprintf("no lines for session %q", session)
-	case !c.TailVerified:
+	case VerdictUnanchored:
 		c.Verdict, c.Reason = VerdictUnanchored, c.TailReason
 	default:
 		c.Verdict = ChainVerdictIntact

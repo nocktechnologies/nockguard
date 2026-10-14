@@ -5,6 +5,8 @@ All notable changes to NockGuard are documented here.
 ## [Unreleased]
 
 ### Fixed
+- `verify` and `verify --all` report empty signed trails as `NO_ROWS` and trails beyond their signed checkpoint as `UNANCHORED`; only non-empty, fully checkpointed trails report `PROTECTED`.
+- Evidence packs now mark empty trails `NO_ROWS` and trails beyond their signed checkpoint `UNANCHORED`, matching CLI and Wall verification.
 - Build CI and release archives with Go 1.26.9 and gate source and release binaries with `govulncheck`.
 - `nockguard proxy` now starts a one-second shutdown deadline when the upstream dies, even while the client holds stdin open or stops reading stdout. It sends JSON-RPC `-32603` errors for in-flight requests when the client can receive them, then stops the upstream process group and exits nonzero.
 - `verify --agent` now verifies an explicitly supplied `--audit` file instead of silently checking the agent's default trail.

@@ -186,6 +186,54 @@ func TestBuildPackCleanEd25519Verifies(t *testing.T) {
 	}
 }
 
+func TestBuildPackUnanchoredEd25519TrailFailsAttestation(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	a, err := audit.New(path, audit.WithEd25519Key(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Record(audit.Event{Agent: "kit", Tool: "Read", Decision: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := os.ReadFile(path + ".hwm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Record(audit.Event{Agent: "kit", Tool: "Write", Decision: "deny"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".hwm", checkpoint, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	pack, err := BuildPack(PackOptions{
+		Framework:     FrameworkSOC2,
+		AuditFiles:    []string{path},
+		Ed25519PubHex: hex.EncodeToString(pub),
+		Now:           fixedNow(),
+	})
+	if err != nil {
+		t.Fatalf("BuildPack: %v", err)
+	}
+	if pack.Verification.ChainIntact {
+		t.Fatal("signed entries beyond the checkpoint must fail the integrity attestation")
+	}
+	if len(pack.Verification.FileResults) != 1 {
+		t.Fatalf("FileResults = %d, want 1", len(pack.Verification.FileResults))
+	}
+	file := pack.Verification.FileResults[0]
+	if file.Intact || file.EntriesVerified != 2 || !strings.Contains(file.Error, "UNANCHORED") {
+		t.Errorf("FileResults[0] = %+v, want two verified entries with an UNANCHORED reason", file)
+	}
+	if !strings.Contains(pack.Verification.Detail, "UNANCHORED") {
+		t.Errorf("Detail = %q, want an UNANCHORED reason", pack.Verification.Detail)
+	}
+}
+
 func TestBuildPackControlBucketing(t *testing.T) {
 	path := writeSignedTrail(t, sampleEvents())
 

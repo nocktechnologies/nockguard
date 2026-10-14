@@ -1018,16 +1018,29 @@ var scanBufferCap = MaxTrailLineBytes
 // (errors.Is(err, ErrTamper)); a read/scan failure that stopped the walk early is
 // a *ScanError (errors.Is(err, ErrScan)). Messages are unchanged.
 func Verify(path string, key []byte) (int, error) {
+	n, _, err := VerifyWithCheckpoint(path, key)
+	return n, err
+}
+
+// VerifyWithCheckpoint is Verify and also returns the checkpoint count that
+// was loaded for that verification. A checkpoint behind the verified trail
+// tail remains a successful prefix verification; callers that need a verdict
+// for the whole trail can compare the returned count with n.
+func VerifyWithCheckpoint(path string, key []byte) (n, checkpointCount int, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer f.Close()
 	hwm, herr := readHighWaterMark(path + hwmSuffix)
 	if herr != nil {
-		return 0, herr
+		return 0, 0, herr
 	}
-	return verifyHMACStream(f, hwm, key)
+	n, err = verifyHMACStream(f, hwm, key)
+	if hwm != nil {
+		checkpointCount = hwm.Count
+	}
+	return n, checkpointCount, err
 }
 
 // VerifyBytes is Verify over an immutable in-memory snapshot. trail holds the
@@ -1107,16 +1120,29 @@ func verifyHMACStream(r io.Reader, hwm *highWaterMark, key []byte) (int, error) 
 // public key cannot produce signatures, a passing verification is proof the
 // holder of the matching private key signed every entry: non-repudiation.
 func VerifyEd25519(path string, pub ed25519.PublicKey) (int, error) {
+	n, _, err := VerifyEd25519WithCheckpoint(path, pub)
+	return n, err
+}
+
+// VerifyEd25519WithCheckpoint is VerifyEd25519 and also returns the checkpoint
+// count that was loaded for that verification. Prefix semantics are unchanged:
+// signatures beyond a valid checkpoint are still verified and returned in n,
+// with no error, so writer recovery can inspect them.
+func VerifyEd25519WithCheckpoint(path string, pub ed25519.PublicKey) (n, checkpointCount int, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer f.Close()
 	hwm, herr := readHighWaterMark(path + hwmSuffix)
 	if herr != nil {
-		return 0, herr
+		return 0, 0, herr
 	}
-	return verifyEd25519Stream(f, hwm, pub)
+	n, err = verifyEd25519Stream(f, hwm, pub)
+	if hwm != nil {
+		checkpointCount = hwm.Count
+	}
+	return n, checkpointCount, err
 }
 
 // VerifyEd25519Bytes is VerifyEd25519 over an in-memory snapshot: trail holds
