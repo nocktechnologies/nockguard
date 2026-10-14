@@ -97,7 +97,7 @@ because a verifier for the wrong scheme exits 2 and reads as tampering. The
 nockguard verify --agent "$AGENT" --audit "$TRAIL"
 # Policy audit.sign_ed25519_key_env (public key in an env var):
 nockguard verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB --audit "$TRAIL"
-# Policy audit.sign_key_env only (HMAC):
+# Policy audit.sign_key_env only (HMAC); SIGN_KEY_ENV is that policy value:
 nockguard verify --key-env "$SIGN_KEY_ENV" --audit "$TRAIL"
 ```
 
@@ -106,8 +106,9 @@ unopenable trail exits 2 exactly like a broken chain (`audit.VerifyEd25519`
 returns the open error, then `runAudit` in `cmd/nockguard/main.go` reports it as
 tampering), so exit 2 alone cannot tell the two apart. With the file present:
 exit 0 is PROTECTED, exit 2 is a CRITICAL security event (flag it immediately),
-and exit 1 (missing public key or key variable, `requirePubHex`) means the trail
-is unverified, which is HIGH, not tampering. With the file missing: a fresh
+and exit 1 means the trail is not protected, not tampering: `VERDICT: NO_ROWS`
+(empty) or `VERDICT: UNANCHORED` (past its signed checkpoint) are MEDIUM, and
+anything else (missing public key or key variable, `requirePubHex`) is HIGH. With the file missing: a fresh
 install (no keys, no other trails, no `.hwm` file) is setup; otherwise HIGH,
 possible deletion. `nockguard verify --all` exits 2 if any trail is tampered and
 1 if any is unverifiable or none are found (`NO_TRAILS`); it cannot see a trail
