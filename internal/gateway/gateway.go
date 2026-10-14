@@ -196,25 +196,25 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			header:   make(http.Header),
 			mode:     "undecided",
 			onCommit: fcancel,
+			onReady: func(upstreamID string) {
+				// Install the successful session before exposing the initialize
+				// result. A client may send its next POST as soon as those bytes
+				// arrive, while this handler is still returning from Write/Flush.
+				g.mu.Lock()
+				s.upstreamID = upstreamID
+				s.busy = false
+				s.lastUsed = time.Now()
+				g.mu.Unlock()
+				success = true
+				released = true
+			},
 		}
 		s.handler.ServeHTTP(iw, forward)
 
 		if iw.committed {
-			// The handler's gate and audit lock are free. Release the session
-			// before exposing the result, so a client can follow it immediately.
-			g.mu.Lock()
-			s.upstreamID = iw.upstreamID
-			s.busy = false
-			s.lastUsed = time.Now()
-			g.mu.Unlock()
-			released = true
 			iw.commitSSE()
 		} else {
 			iw.finalize()
-			if iw.committed {
-				s.upstreamID = iw.upstreamID
-				success = true
-			}
 		}
 	} else {
 		// Non-initialize requests stream normally
@@ -329,6 +329,7 @@ type initWriter struct {
 	id            json.RawMessage
 	sid           string
 	onCommit      func() // ends the upstream initialize stream after commit
+	onReady       func(string)
 	header        http.Header
 	status        int
 	mode          string // "undecided", "buffer", or "sse"
@@ -608,7 +609,17 @@ func (w *initWriter) commit() {
 	w.committed = true
 }
 
+func (w *initWriter) ready() {
+	if w.onReady == nil {
+		return
+	}
+	onReady := w.onReady
+	w.onReady = nil
+	onReady(w.upstreamID)
+}
+
 func (w *initWriter) commitSSE() {
+	w.ready()
 	w.writeHeaders()
 	w.real.WriteHeader(w.status)
 	_, _ = w.real.Write(w.held.Bytes())
@@ -628,12 +639,13 @@ func (w *initWriter) finalize() {
 		body := w.held.Bytes()
 
 		if validateInitializeResponse(w.status, contentType, body, w.id) {
+			w.commit()
+			w.ready()
 			w.writeHeaders()
 			w.real.WriteHeader(w.status)
 			if len(body) > 0 {
 				_, _ = w.real.Write(body)
 			}
-			w.commit()
 		} else {
 			// Validation failed, write as-is without session id
 			w.writeHeadersNoSession()
