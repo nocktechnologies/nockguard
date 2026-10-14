@@ -122,6 +122,16 @@ func request(g *Gateway, body, sid string, tweak func(*http.Request)) *httptest.
 	return w
 }
 
+type flushObserver struct {
+	*httptest.ResponseRecorder
+	onFlush func()
+}
+
+func (w *flushObserver) Flush() {
+	w.ResponseRecorder.Flush()
+	w.onFlush()
+}
+
 func TestAuthenticationFailsClosed(t *testing.T) {
 	c := testConfig(t)
 	cases := map[string]func(map[string]interface{}){
@@ -1155,8 +1165,6 @@ func TestSSEParserCRLFSplitMidEventNoPhantomBlankLine(t *testing.T) {
 // without the upstream ever closing the initialize stream on its own.
 func TestSSEInitializeKeepOpenReleasesSession(t *testing.T) {
 	c := testConfig(t)
-	finished := make(chan struct{})
-	defer close(finished)
 	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Mcp-Session-Id") != "" {
@@ -1167,10 +1175,7 @@ func TestSSEInitializeKeepOpenReleasesSession(t *testing.T) {
 			w.Header().Set("Mcp-Session-Id", "upstream-session-id")
 			fmt.Fprint(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n")
 			w.(http.Flusher).Flush()
-			select { // keep-open upstream: only a cancelled request ends this
-			case <-finished:
-			case <-r.Context().Done():
-			}
+			<-r.Context().Done()
 		})
 	})
 	server := httptest.NewServer(g)
@@ -1215,5 +1220,41 @@ func TestSSEInitializeKeepOpenReleasesSession(t *testing.T) {
 	g.mu.Unlock()
 	if s == nil || s.upstreamID != "upstream-session-id" {
 		t.Fatalf("upstream session id not installed after initialize: %+v", s)
+	}
+}
+
+// A client can send its next request as soon as the initialize result flushes.
+// Probe that exact handoff instead of relying on HTTP scheduling to expose it.
+func TestSSEInitializeFollowupAtFlush(t *testing.T) {
+	c := testConfig(t)
+	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Mcp-Session-Id") != "" {
+				fmt.Fprint(w, `{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}`)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Mcp-Session-Id", "upstream-session-id")
+			fmt.Fprint(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n")
+			<-r.Context().Done()
+		})
+	})
+	w := &flushObserver{ResponseRecorder: httptest.NewRecorder()}
+	flushed := false
+	w.onFlush = func() {
+		flushed = true
+		sid := w.Header().Get("Mcp-Session-Id")
+		if sid == "" {
+			t.Fatal("initialize result flushed without a session id")
+		}
+		if got := request(g, list, sid, nil).Code; got != http.StatusOK {
+			t.Fatalf("follow-up at initialize flush got %d, want 200", got)
+		}
+	}
+	r := httptest.NewRequest(http.MethodPost, "https://guard.example/mcp", strings.NewReader(initialize))
+	r.Header.Set("Authorization", "Bearer connector-test-token")
+	g.ServeHTTP(w, r)
+	if !flushed {
+		t.Fatal("initialize result was not flushed")
 	}
 }
