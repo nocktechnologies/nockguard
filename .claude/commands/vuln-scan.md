@@ -247,7 +247,13 @@ Exit codes (`runAudit` and `verifyAllAgents` in `cmd/nockguard/main.go`). The ve
 | Trail missing, and no keys, other trails or `<trail>.hwm` file | SETUP: auditing appears never to have run (a fresh install). Not a finding. A deletion that also wipes every one of those leaves the same picture; check `audit.enabled` and when the policy was deployed. |
 | Trail missing, but keys, other trails or a `.hwm` file exist | HIGH: possible deletion. Never CRITICAL, because the code reports no tamper for an absent file. Look for who removed it; if the agent has genuinely never run since `keygen`, treat it as setup. |
 
-`nockguard verify --all` checks every per-agent trail in the audit directory. It exits 2 if any trail is tampered, 1 if any trail is empty (`NO_ROWS`), past its signed checkpoint (`UNANCHORED`) or unverifiable, or if none are found (`NO_TRAILS`; none of these is protection), and 0 only when all are intact. It cannot see a trail that was deleted: that trail is not in the glob. It prints one labeled line per agent, not a bare `VERDICT:` line, so classify each trail from its own line and not from the exit status: `[NO ROWS]` and `[UNANCHORED]` are MEDIUM as in the table, `[NO KEY]` is HIGH (unverifiable), `[TAMPER]` is CRITICAL, and `[OK]` is clean. The exit status only says whether any trail needs attention. `VERDICT: NO_TRAILS` appears only when no trails exist.
+`nockguard verify --all` checks every per-agent trail in the audit directory. It exits 2 if any trail is tampered, 1 if any trail is empty (`NO_ROWS`), past its signed checkpoint (`UNANCHORED`) or unverifiable, or if none are found (`NO_TRAILS`; none of these is protection), and 0 only when all are intact. It cannot see a trail that was deleted: that trail is not in the glob. It prints one labeled line per agent, not a bare `VERDICT:` line, so run it as below and classify each trail from its own line, not from the exit status:
+
+```bash
+STATUS=0; nockguard verify --all || STATUS=$?
+```
+
+Classify: `[NO ROWS]` and `[UNANCHORED]` are MEDIUM as in the table, `[NO KEY]` is HIGH (unverifiable), `[SKIP]` is HIGH (the file's agent name is invalid, so it was not verified; find out who created it), `[TAMPER]` is CRITICAL, and `[OK]` is clean. The exit status only says whether any trail needs attention. `VERDICT: NO_TRAILS` appears only when no trails exist.
 
 ## Step 5 — Report
 
