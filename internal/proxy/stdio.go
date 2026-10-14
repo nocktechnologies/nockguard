@@ -643,6 +643,14 @@ func (p *StdioProxy) Run() error {
 				return fmt.Errorf("proxy received %s", sig)
 			}
 		}
+		// If EOF and a deadline became ready together, the completed drain wins.
+		if drainLimit != "" {
+			select {
+			case <-upstreamDone:
+				drainLimit = ""
+			default:
+			}
+		}
 		if drainLimit != "" {
 			outputTimedOut, shutdownTimedOut = true, true
 			p.logger.Printf("upstream exited: output drain deadline reached (%s); dropping remaining output", drainLimit)
