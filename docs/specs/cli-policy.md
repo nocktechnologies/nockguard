@@ -14,6 +14,7 @@ dispatches commands and lists their flags in `printUsage`.
 | `egress-proxy --listen ADDR --agent NAME --policy PATH [--audit PATH] [--enforce]` | Explicit HTTP/CONNECT proxy; policy observe-only without `--enforce`. |
 | `verify` / `audit verify` | Verify one trail via `--agent`, `--key-env`, or `--ed25519-pub-env`; `--all`, `--session` and `--export` select their own modes. |
 | `selftest [--policy PATH] [--json]` | Synthetic positive-control enforcement check. |
+| `policy check --policy PATH` | Load the file with the proxy's loader and nothing else; exit 0 loaded (warnings go to stderr), 1 not. |
 | `policy propose`, `policy shadow-report` | Build and inspect observe-to-enforce candidates from a trail. |
 | `trust show --agent NAME` | Read the opt-in trust score. |
 | `evidence --framework soc2 ...` | Create local evidence pack; HTML or JSON. |
@@ -56,7 +57,8 @@ invalid policy values must not silently grant access.
 
 | Command | `0` | `1` | `2` |
 | --- | --- | --- | --- |
-| `verify --agent` / `--all` | Requested trails verified | Setup/key error, unverifiable trail or no trails | Trail read or integrity failure after key selection |
+| `verify --agent` / `--key-env` / `--ed25519-pub-env` | Trail is non-empty and fully checkpointed | Setup/key error, `NO_ROWS` or `UNANCHORED` | Trail read or integrity failure after key selection |
+| `verify --all` | Every requested trail is non-empty and fully checkpointed | Setup/key error, any `NO_ROWS`, `UNANCHORED` or unverifiable trail, or no trails | Any trail read or integrity failure after key selection |
 | `verify --export` | Export proof verified (completeness stated separately) | Setup, key or file-read error | Invalid signed proof |
 | `verify --session` | `PROTECTED` | `UNVERIFIABLE`, `UNSIGNED`, `NO_ROWS`, `UNANCHORED` or setup error | `TAMPERED` |
 | `selftest` | At least one check passed, none failed | Inconclusive setup or all checks skipped | Enforcement gap |

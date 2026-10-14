@@ -116,23 +116,25 @@ Flag LOW if `audit.enabled: true` but no signing is configured. For compliance c
 If the audit trail exists, read it for high-signal events. An agent signed with a per-agent `keygen --agent` key writes `~/.nockguard/logs/<agent>.audit.jsonl` (`policy.AgentAuditPath`); otherwise the trail is the policy-wide `audit.path` (default `~/.nockguard/logs/audit.jsonl`), and `--audit` overrides both. Set `TRAIL` to the one under review; `ls ~/.nockguard/logs/` lists them:
 
 ```bash
+set -o pipefail   # a failing jq or tail on the left of a pipe fails the whole pipeline
 TRAIL=~/.nockguard/logs/coder.audit.jsonl
 
+# A missing trail is classified in Step 4; a tail or jq failure below is an error, not a clean result.
 # Tail recent events
-tail -n 100 "$TRAIL" 2>/dev/null || echo "No audit log found at $TRAIL"
+tail -n 100 "$TRAIL"
 
 # Block events — always HIGH-signal (injection / secret-exfil attempts)
-jq 'select(.decision == "block")' "$TRAIL" 2>/dev/null
+jq 'select(.decision == "block")' "$TRAIL"
 
 # Deny volume by agent and tool
-jq -r 'select(.decision == "deny") | "\(.agent) \(.tool)"' "$TRAIL" 2>/dev/null | \
+jq -r 'select(.decision == "deny") | "\(.agent) \(.tool)"' "$TRAIL" | \
   sort | uniq -c | sort -rn | head -20
 
 # Ratelimit events — potential runaway indicator
-jq 'select(.decision == "ratelimit")' "$TRAIL" 2>/dev/null
+jq 'select(.decision == "ratelimit")' "$TRAIL"
 
 # Spend-cap hits (recorded as decision ratelimit, reason spend-cap)
-jq 'select(.decision == "ratelimit" and .reason == "spend-cap")' "$TRAIL" 2>/dev/null
+jq 'select(.decision == "ratelimit" and .reason == "spend-cap")' "$TRAIL"
 ```
 
 Interpret what you find:
@@ -148,24 +150,104 @@ Interpret what you find:
 
 ## Step 4 — Verify the audit chain
 
-If signing is configured, verify chain integrity:
+Pick the verifier from the policy's signing settings. Do not run the verifiers in turn: a verifier for the wrong scheme can exit 2 and read as tampering. The snippet reads the settings, classifies a missing trail before it calls any verifier, then maps the verifier's own exit status. Run it as its own bash invocation, because it `exit`s and sets `set -e`. Set `TRAIL` to the trail selected in Step 3 and `AGENT` to its signing agent; set `PER_AGENT=1` or `0` when `--audit` gave the trail a name that does not follow `<agent>.<audit.path basename>` (1: signed with the agent's own key; 0: signed with the policy key), and `PUB_ENV` if the Ed25519 public key is not in `NOCKGUARD_AUDIT_ED25519_PUB`:
 
 ```bash
-# In a fresh shell, set these to the same trail selected in Step 3 and its signing agent.
+set -e
 : "${TRAIL:?Set TRAIL to the exact trail under review in Step 3}"
-: "${AGENT:?Set AGENT to that trail's signing agent}"
-# Per-agent key written by `nockguard keygen --agent <name>` (reads ~/.nockguard/keys/<name>.pub)
-nockguard verify --agent "$AGENT" --audit "$TRAIL"
+: "${AGENT:?Set AGENT to the signing agent of that trail}"
+POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 
-# Every per-agent trail in the audit directory
-nockguard verify --all
+# Which verifier applies is a property of the policy's signing settings
+# (Ed25519 takes precedence over HMAC), not something to try in turn.
+OUT=$(python3 - "$POLICY" <<'PY'
+import os, sys, yaml
+with open(sys.argv[1]) as f:
+    audit = (yaml.safe_load(f) or {}).get("audit") or {}
+base = os.path.basename(str(audit.get("path") or "audit.jsonl"))
+if audit.get("sign_ed25519_key_env"):
+    print("ed25519 -", base)
+elif audit.get("sign_key_env"):
+    print("hmac", audit["sign_key_env"], base)
+else:
+    print("none -", base)
+PY
+) || { echo "ERROR: could not read the signing settings from $POLICY (invalid YAML, or PyYAML missing)" >&2; exit 1; }
+read -r SIGN HMAC_ENV BASE <<<"$OUT"
 
-# Ed25519 with an explicit public key, or HMAC
-nockguard audit verify --ed25519-pub-env NOCKGUARD_AUDIT_ED25519_PUB --audit "$TRAIL"
-nockguard audit verify --key-env NOCKGUARD_AUDIT_KEY --audit "$TRAIL"
+KEYS=$(compgen -G "$HOME/.nockguard/keys/*.pub" || true)
+LOGS=$(compgen -G "$HOME/.nockguard/logs/*audit.jsonl" || true)
+if [ ! -e "$TRAIL" ]; then
+  # The .hwm file beside a trail outlives the trail, so it counts as evidence too.
+  if [ -z "$KEYS$LOGS" ] && [ ! -e "$TRAIL.hwm" ]; then
+    echo "SETUP: no trail at $TRAIL and no keys, other trails or .hwm file; auditing appears never to have run. Run the agent through nockguard, then scan again."
+  else
+    echo "HIGH: possible deletion. No trail at $TRAIL, but keys, other trails or a .hwm file exist. Find who removed it."
+  fi
+  exit 0
+fi
+
+# A per-agent trail is <agent>.<basename of audit.path> (AgentAuditPath) and is
+# signed with that agent's own Ed25519 key. The name is only a guess when
+# --audit chose the path: PER_AGENT=1 forces the per-agent verifier, PER_AGENT=0
+# forces the policy verifier.
+if [ "${PER_AGENT:-}" = 1 ] || { [ -z "${PER_AGENT:-}" ] && [ "$(basename "$TRAIL")" = "$AGENT.$BASE" ]; }; then
+  SIGN=agent
+fi
+
+case "$SIGN" in
+  agent) VERIFY=(nockguard verify --agent "$AGENT" --audit "$TRAIL") ;;
+  ed25519) VERIFY=(nockguard verify --ed25519-pub-env "${PUB_ENV:-NOCKGUARD_AUDIT_ED25519_PUB}" --audit "$TRAIL") ;;
+  hmac) VERIFY=(nockguard verify --key-env "$HMAC_ENV" --audit "$TRAIL") ;;
+  *)
+    echo "LOW: $TRAIL exists but the policy configures no signing and it is not a per-agent trail; nothing to verify; see finding 2h."
+    exit 0 ;;
+esac
+
+# The verifier prints its verdict on stdout; exit 1 covers more than a missing key.
+STATUS=0
+RESULT=$("${VERIFY[@]}") || STATUS=$?
+printf '%s\n' "$RESULT"
+case "$STATUS" in
+  0) echo "PROTECTED: chain intact" ;;
+  1)
+    # Match the verdict as a whole line, not as text inside another line.
+    if printf '%s\n' "$RESULT" | grep -qx 'VERDICT: NO_ROWS'; then
+      echo "MEDIUM: $TRAIL is empty (NO_ROWS); nothing is verified yet. Run the agent through nockguard, then scan again."
+    elif printf '%s\n' "$RESULT" | grep -qx 'VERDICT: UNANCHORED'; then
+      echo "MEDIUM: $TRAIL runs past its signed checkpoint (UNANCHORED); re-run once the writer is idle, and treat it as HIGH if it persists."
+    else
+      echo "HIGH: $TRAIL exists but could not be verified (missing public key or key env, or bad arguments); treat it as unverified"
+    fi ;;
+  2) echo "CRITICAL: tamper detected (chain broken, or the trail could not be opened)" ;;
+  *) echo "ERROR: verifier exited $STATUS" >&2; exit 1 ;;
+esac
 ```
 
-Exit codes (`runAudit`, `verifyAllAgents` in `cmd/nockguard/main.go`): a trail file that was deleted or cannot be opened exits 2 (`audit.VerifyEd25519` returns the open error, `main.go:988`, reported as TAMPER at `main.go:1004`), and a broken chain exits 2. A missing public key or unset key env var exits 1 (`requirePubHex`, `main.go:977-981`), and `verify --all` exits 1 for an unverifiable key or when it finds no trails (`NO_TRAILS`). Exit 1 reads as a setup issue only when auditing was never configured (no `audit.enabled: true`, no `keygen` keys, no earlier trail). When the policy has auditing enabled, a missing trail or missing public key is **HIGH: possible deletion**, not a setup issue; report it and look for who removed the file. Exit 2 is trail read or integrity failure after key selection; assume tampering. **Exit 2 is a CRITICAL security event.** Do not proceed — escalate immediately and treat the chain as forensic evidence.
+Which verifier applies (Ed25519 takes precedence over HMAC, as in `AuditorForAgent` in `internal/policy/policy.go`):
+
+| Trail and policy | Verifier |
+|---|---|
+| trail is `<agent>.<basename of audit.path>` (default `<agent>.audit.jsonl`), or `PER_AGENT=1`; `PER_AGENT=0` turns the name match off | `verify --agent` (public key from `NOCKGUARD_AGENT_<NAME>_ED25519_PUB` or `~/.nockguard/keys/<agent>.pub`) |
+| `audit.sign_ed25519_key_env` set | `verify --ed25519-pub-env` |
+| only `audit.sign_key_env` set | `verify --key-env <that name>` (HMAC) |
+| none of the above | unsigned; nothing to verify (finding 2h) |
+
+The trail's name decides the first row, because the per-agent path is only used when a per-agent key signs (`AuditorForAgent`): a key from `NOCKGUARD_AGENT_<NAME>_ED25519_KEY` always wins; a policy signing key wins over a `keygen` key file; otherwise the key file signs a per-agent trail. A per-agent key supplied only through the environment leaves no `.pub` file; set `NOCKGUARD_AGENT_<NAME>_ED25519_PUB` before verifying.
+
+Exit codes (`runAudit` and `verifyAllAgents` in `cmd/nockguard/main.go`). The verifier selects the key before it opens the trail, so a missing public key or unset key env var exits 1 whether or not the trail exists (`requirePubHex` in `cmd/nockguard/keygen.go`). A trail that opens and verifies but is empty (`NO_ROWS`) or runs past its signed checkpoint (`UNANCHORED`) also exits 1 and prints `VERDICT: NO_ROWS` or `VERDICT: UNANCHORED` (`runAudit`), which is why the snippet reads the whole-line verdict before it labels an exit 1. Once the key is chosen, a trail that cannot be opened exits 2, the same as a broken chain (`audit.VerifyEd25519` returns the open error, and `runAudit` reports every error from it as TAMPER). That is why the snippet tests for the file first: exit 2 alone cannot tell a deleted trail from a forged one.
+
+| Case | Severity |
+|---|---|
+| Trail present, verifier exits 0 | PROTECTED |
+| Trail present, verifier exits 2 | **CRITICAL**: tamper detected. Check the file is readable by you (an unreadable file also exits 2), then escalate immediately and treat the chain as forensic evidence. |
+| Trail present, verifier exits 1 with `VERDICT: NO_ROWS` | MEDIUM: the trail is empty, so nothing is verified. Not tampering; run the agent through nockguard and re-run. |
+| Trail present, verifier exits 1 with `VERDICT: UNANCHORED` | MEDIUM: entries run past the signed checkpoint, usually a writer still active. Re-run once idle; HIGH if it persists. |
+| Trail present, verifier exits 1 with no verdict line | HIGH: the trail cannot be verified (public key or key env missing). It is not tampering; supply the key and re-run. |
+| Trail missing, and no keys, other trails or `<trail>.hwm` file | SETUP: auditing appears never to have run (a fresh install). Not a finding. A deletion that also wipes every one of those leaves the same picture; check `audit.enabled` and when the policy was deployed. |
+| Trail missing, but keys, other trails or a `.hwm` file exist | HIGH: possible deletion. Never CRITICAL, because the code reports no tamper for an absent file. Look for who removed it; if the agent has genuinely never run since `keygen`, treat it as setup. |
+
+`nockguard verify --all` checks every per-agent trail in the audit directory. It exits 2 if any trail is tampered, 1 if any trail is empty (`NO_ROWS`), past its signed checkpoint (`UNANCHORED`) or unverifiable, or if none are found (`NO_TRAILS`; none of these is protection), and 0 only when all are intact. It cannot see a trail that was deleted: that trail is not in the glob. It prints one labeled line per agent, not a bare `VERDICT:` line, so classify each trail from its own line and not from the exit status: `[NO ROWS]` and `[UNANCHORED]` are MEDIUM as in the table, `[NO KEY]` is HIGH (unverifiable), `[TAMPER]` is CRITICAL, and `[OK]` is clean. The exit status only says whether any trail needs attention. `VERDICT: NO_TRAILS` appears only when no trails exist.
 
 ## Step 5 — Report
 

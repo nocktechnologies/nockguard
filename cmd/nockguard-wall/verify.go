@@ -139,52 +139,73 @@ func (v *verifier) verify(path string) verifyReport {
 }
 
 func (v *verifier) verifySnapshot(trail, hwm []byte, now string) verifyReport {
+	rep, _ := v.verifySnapshotWithCheck(trail, hwm, now)
+	return rep
+}
+
+func (v *verifier) verifySnapshotWithCheck(trail, hwm []byte, now string) (verifyReport, *sessionverify.GuardCheck) {
 	if !v.enabled() {
 		return verifyReport{
 			LastVerifiedAt: now,
 			Status:         statusUnconfigured,
 			Verdict:        "UNCONFIGURED",
 			Detail:         strptr("audit signing not configured — chain not verified (set --verify-ed25519-pub-env or --verify-key-env)"),
-		}
+		}, nil
 	}
-	var (
-		n   int
-		err error
-	)
+	var check *sessionverify.GuardCheck
 	switch v.mode {
 	case modeEd25519:
-		n, err = audit.VerifyEd25519Bytes(trail, hwm, v.pub)
+		check = sessionverify.CheckGuard(trail, hwm, v.pub)
 	default:
-		n, err = audit.VerifyBytes(trail, hwm, v.key)
+		check = sessionverify.CheckGuardHMAC(trail, hwm, v.key)
 	}
-	rep := classifyVerifyResult(n, err, now)
-	if err == nil {
-		switch {
-		case n == 0:
-			rep.Status = statusNoRows
-			rep.Verdict = "NO_ROWS"
-			rep.Detail = strptr("audit trail is empty; there are no entries to verify")
-		default:
-			var mark struct {
-				Count int `json:"count"`
-			}
-			if len(hwm) == 0 || json.Unmarshal(hwm, &mark) != nil || mark.Count != n {
-				rep.Status = statusUnanchored
-				rep.Verdict = "UNANCHORED"
-				rep.Detail = strptr("signed checkpoint does not cover the full audit trail; retry once the writer is idle")
-			} else {
-				rep.Verdict = "PROTECTED"
-			}
-		}
-	}
+	rep := guardReport(check.Trail(), now)
 	rep.PublicKeySource = v.pubSource
-	return rep
+	if v.mode != modeEd25519 {
+		check = nil
+	}
+	return rep, check
 }
 
 // verifyBytes verifies one immutable trail/checkpoint snapshot, so callers can
 // decode exactly the bytes whose signatures were checked.
 func (v *verifier) verifyBytes(trail, hwm []byte) verifyReport {
 	return v.verifySnapshot(trail, hwm, time.Now().Format(time.RFC3339))
+}
+
+func guardReport(c sessionverify.ChainResult, now string) verifyReport {
+	rep := verifyReport{LastVerifiedAt: now, EntriesVerified: c.EntriesVerified}
+	switch c.Verdict {
+	case sessionverify.VerdictProtected:
+		rep.ChainIntact = boolptr(true)
+		rep.Status = statusVerified
+		rep.Verdict = sessionverify.VerdictProtected
+	case sessionverify.VerdictNoRows:
+		rep.ChainIntact = boolptr(true)
+		rep.Status = statusNoRows
+		rep.Verdict = sessionverify.VerdictNoRows
+		rep.Detail = strptr(c.Reason)
+	case sessionverify.VerdictUnanchored:
+		rep.ChainIntact = boolptr(true)
+		rep.Status = statusUnanchored
+		rep.Verdict = sessionverify.VerdictUnanchored
+		rep.Detail = strptr(c.Reason)
+	case sessionverify.VerdictTampered:
+		rep.ChainIntact = boolptr(false)
+		rep.Status = statusTampered
+		rep.Verdict = sessionverify.VerdictTampered
+		rep.Detail = strptr(c.Reason)
+		if c.FirstBadRow > 0 {
+			rep.EntriesVerified = int(c.FirstBadRow) - 1
+			badRow := int(c.FirstBadRow)
+			rep.BreakAt = &badRow
+		}
+	default:
+		rep.Status = statusUnavailable
+		rep.Verdict = "UNAVAILABLE"
+		rep.Detail = strptr(c.Reason)
+	}
+	return rep
 }
 
 // classifyVerifyResult folds internal/audit's (entries, err) contract into a

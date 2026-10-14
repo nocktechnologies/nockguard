@@ -22,6 +22,7 @@ import (
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/policy"
+	"github.com/nocktechnologies/nockguard/internal/sessionverify"
 )
 
 func TestVerifyCommandCleanTrailProtected(t *testing.T) {
@@ -51,6 +52,87 @@ func TestVerifyCommandCleanTrailProtected(t *testing.T) {
 	}
 	if got.Verdict != "PROTECTED" || got.Entries != 3 || got.Path != path {
 		t.Fatalf("json verdict = %+v, want PROTECTED/3/%s", got, path)
+	}
+}
+
+func TestVerifyCommandRequiresRowsAndCompleteCheckpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		rows           int
+		checkpointRows int
+		wantVerdict    string
+		wantExit       int
+	}{
+		{name: "empty", wantVerdict: sessionverify.VerdictNoRows, wantExit: 1},
+		{name: "checkpoint behind tail", rows: 21, checkpointRows: 19, wantVerdict: sessionverify.VerdictUnanchored, wantExit: 1},
+		{name: "fully checkpointed", rows: 3, checkpointRows: 3, wantVerdict: sessionverify.VerdictProtected, wantExit: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path, pubHex := writeEd25519TrailWithCheckpoint(t, dir, "kit", tc.rows, tc.checkpointRows)
+			t.Setenv(policy.AgentPubKeyEnvName("kit"), pubHex)
+
+			if tc.wantVerdict == sessionverify.VerdictUnanchored {
+				pub, err := audit.PublicKeyFromHex(pubHex)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if n, err := audit.VerifyEd25519(path, pub); err != nil || n != tc.rows {
+					t.Fatalf("low-level prefix verification = (%d, %v), want (%d, nil)", n, err, tc.rows)
+				}
+			}
+
+			code, stdout, stderr := runCommandForTest(t, "verify", "--agent", "kit", "--audit-dir", dir, "--json")
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, tc.wantExit, stdout, stderr)
+			}
+			var got verifyResult
+			if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+				t.Fatalf("verify --json emitted invalid JSON: %v\n%s", err, stdout)
+			}
+			if got.Verdict != tc.wantVerdict || got.EntriesVerified != tc.rows || got.AuditPath != path {
+				t.Fatalf("verify result = %+v, want verdict %s, rows %d, path %s", got, tc.wantVerdict, tc.rows, path)
+			}
+		})
+	}
+}
+
+func TestVerifyAllReportsEmptyUnanchoredAndProtectedTrails(t *testing.T) {
+	dir := t.TempDir()
+	_, emptyPub := writeEd25519TrailWithCheckpoint(t, dir, "empty", 0, 0)
+	_, partialPub := writeEd25519TrailWithCheckpoint(t, dir, "partial", 21, 19)
+	_, fullPub := writeEd25519TrailWithCheckpoint(t, dir, "full", 3, 3)
+	t.Setenv(policy.AgentPubKeyEnvName("empty"), emptyPub)
+	t.Setenv(policy.AgentPubKeyEnvName("partial"), partialPub)
+	t.Setenv(policy.AgentPubKeyEnvName("full"), fullPub)
+
+	code, stdout, stderr := runCommandForTest(t, "verify", "--all", "--audit-dir", dir, "--json")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	var got verifyAllResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("verify --all --json emitted invalid JSON: %v\n%s", err, stdout)
+	}
+	if got.Verdict != "UNVERIFIABLE" || got.Intact != 1 || got.Unverifiable != 2 || got.Total != 3 {
+		t.Fatalf("aggregate result = %+v, want one protected and two incomplete trails", got)
+	}
+	statuses := make(map[string]verifyTrailResult, len(got.Trails))
+	for _, trail := range got.Trails {
+		statuses[trail.Agent] = trail
+	}
+	for agent, want := range map[string]struct {
+		status string
+		rows   int
+	}{
+		"empty":   {status: sessionverify.VerdictNoRows, rows: 0},
+		"partial": {status: sessionverify.VerdictUnanchored, rows: 21},
+		"full":    {status: sessionverify.VerdictProtected, rows: 3},
+	} {
+		got, ok := statuses[agent]
+		if !ok || got.Status != want.status || got.EntriesVerified != want.rows {
+			t.Errorf("trail %q = %+v, want status %s and entries_verified %d", agent, got, want.status, want.rows)
+		}
 	}
 }
 
@@ -699,6 +781,40 @@ func writeEd25519Trail(t *testing.T, dir, agent string) (string, string) {
 	return path, hex.EncodeToString(pub)
 }
 
+func writeEd25519TrailWithCheckpoint(t *testing.T, dir, agent string, rows, checkpointRows int) (string, string) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := policy.AgentAuditPath(filepath.Join(dir, filepath.Base(policy.DefaultAuditPath)), agent)
+	a, err := audit.New(path, audit.WithEd25519Key(priv))
+	if err != nil {
+		t.Fatalf("audit.New: %v", err)
+	}
+	var checkpoint []byte
+	for i := 0; i < rows; i++ {
+		if err := a.Record(audit.Event{Agent: agent, Tool: "Read", Decision: "allow"}); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+		if i+1 == checkpointRows {
+			checkpoint, err = os.ReadFile(path + ".hwm")
+			if err != nil {
+				t.Fatalf("read checkpoint after row %d: %v", i+1, err)
+			}
+		}
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if checkpointRows < rows {
+		if err := os.WriteFile(path+".hwm", checkpoint, 0o600); err != nil {
+			t.Fatalf("restore checkpoint at row %d: %v", checkpointRows, err)
+		}
+	}
+	return path, hex.EncodeToString(pub)
+}
+
 func tamperAuditFile(t *testing.T, path string) {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -711,5 +827,48 @@ func tamperAuditFile(t *testing.T, path string) {
 	}
 	if err := os.WriteFile(path, []byte(tampered), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPolicyCheckLoadOnly(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cases := []struct {
+		name, body string
+		want       int
+	}{
+		{"valid", "agents:\n  default:\n    mode: deny\n", 0},
+		{"unknown-key", "agents:\n  default:\n    mod: deny\n", 1},
+		{"malformed-glob", "agents:\n  default:\n    allow: [\"[\"]\n", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := runCommandForTest(t, "policy", "check", "--policy", write(tc.name+".yaml", tc.body))
+			if code != tc.want {
+				t.Fatalf("exit = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, tc.want, stdout, stderr)
+			}
+			if tc.want == 1 && !strings.Contains(stderr, "error:") {
+				t.Fatalf("load error not printed, stderr:\n%s", stderr)
+			}
+		})
+	}
+	dup := "agents:\n  test:\n    mode: allow\n    inject:\n" +
+		"      - tools: [\"github_create_issue\", \"github_list_issues\"]\n        ref: \"env:T1\"\n        arg: \"headers.a\"\n" +
+		"      - tools: [\"github_create_issue\"]\n        ref: \"env:T2\"\n        arg: \"headers.b\"\n"
+	code, _, stderr := runCommandForTest(t, "policy", "check", "--policy", write("dup-inject.yaml", dup))
+	if code != 0 || !strings.Contains(stderr, "warning policy:") || !strings.Contains(stderr, "github_create_issue") {
+		t.Fatalf("duplicate inject tool: exit = %d, want 0 with a warning, stderr:\n%s", code, stderr)
+	}
+	if code, _, _ := runCommandForTest(t, "policy", "check", "--policy", filepath.Join(dir, "missing.yaml")); code != 1 {
+		t.Fatalf("missing file exit = %d, want 1", code)
+	}
+	if code, _, _ := runCommandForTest(t, "policy", "check"); code != 1 {
+		t.Fatalf("no --policy exit = %d, want 1", code)
 	}
 }

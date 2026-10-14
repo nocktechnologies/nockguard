@@ -4,23 +4,28 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-14
+
 ### Fixed
+- `verify` and `verify --all` report empty signed trails as `NO_ROWS` and trails beyond their signed checkpoint as `UNANCHORED`; only non-empty, fully checkpointed trails report `PROTECTED`.
+- Evidence packs now mark empty trails `NO_ROWS` and trails beyond their signed checkpoint `UNANCHORED`, matching CLI and Wall verification.
 - Build CI and release archives with Go 1.26.9 and gate source and release binaries with `govulncheck`.
+- `nockguard proxy` now starts a one-second shutdown deadline when the upstream dies, even while the client holds stdin open or stops reading stdout. It sends JSON-RPC `-32603` errors for in-flight requests when the client can receive them, then stops the upstream process group and exits nonzero.
 - `verify --agent` now verifies an explicitly supplied `--audit` file instead of silently checking the agent's default trail.
+- The stdio proxy registers response correlation before writing a request upstream, and clears pending state and resolves its audit sequence when the write fails.
+- `nockguard proxy` keeps delivering output the upstream wrote before it exited while the client is still reading. Shutdown waits for the client to go idle for one second, up to a ten-second cap.
 
 ### Changed
 - The Wall no longer scrolls horizontally on narrow screens (390 px): filters and tiles wrap, feed rows stack, and the evidence scope notes sit behind an "Evidence details" toggle on narrow screens (open by default on wide ones).
 - `tools/list` now keeps tools with an `Ask` verdict visible while holding their calls for local or Telegram approval; denied tools stay hidden. Approved calls record their final `allow` audit row before dispatch.
 - The Wall counts audit records, not calls, and says so: the header reads "records in view" and "threat records". `tools/list` hides now show as a separate "tools hidden" count and no longer count as rejected records, threats or toward the rejected share, so one rejected call no longer reads as 13 threats caught.
 
-### Fixed
-- The stdio proxy registers response correlation before writing a request upstream, and clears pending state and resolves its audit sequence when the write fails.
-
 ### Documentation
 - Correct Wall installation guidance and replace source line references with file links.
 - Correct the `/policy-lint`, `/vuln-scan` and `/threat-model` helper commands, the Warden `CLAUDE.md` and README, and the model-API egress template against the engine: unknown keys fail the load, `mode` defaults to deny, the full agent key list, per-agent audit trails and `keygen --agent`, `egress-proxy --enforce`, and the SSRF guard. A test now keeps the Warden command copies identical to `.claude/commands/` and the lint key list in step with `AgentPolicy`.
 - Document Homebrew and Linux archive installation, including the Live Wall.
 - Linux install verifies the release archive against SHA256SUMS before installing.
+- The `/vuln-scan` helper and the Warden `CLAUDE.md` read the `verify` verdict line before labeling an exit 1, so an empty trail (`NO_ROWS`) and a trail past its signed checkpoint (`UNANCHORED`) are no longer reported as a missing key.
 
 ## [0.6.0] - 2026-10-13
 

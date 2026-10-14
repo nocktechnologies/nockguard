@@ -14,12 +14,13 @@ func TestCheckpointLagRecovery(t *testing.T) {
 	}
 	key := []byte("checkpoint-recovery-test")
 	for _, tc := range []struct {
-		name   string
-		opt    Option
-		verify func(string) (int, error)
+		name                 string
+		opt                  Option
+		verify               func(string) (int, error)
+		verifyWithCheckpoint func(string) (int, int, error)
 	}{
-		{"hmac", WithSigningKey(key), func(path string) (int, error) { return Verify(path, key) }},
-		{"ed25519", WithEd25519Key(priv), func(path string) (int, error) { return VerifyEd25519(path, pub) }},
+		{"hmac", WithSigningKey(key), func(path string) (int, error) { return Verify(path, key) }, func(path string) (int, int, error) { return VerifyWithCheckpoint(path, key) }},
+		{"ed25519", WithEd25519Key(priv), func(path string) (int, error) { return VerifyEd25519(path, pub) }, func(path string) (int, int, error) { return VerifyEd25519WithCheckpoint(path, pub) }},
 	} {
 		for _, restart := range []bool{false, true} {
 			t.Run(tc.name+map[bool]string{false: "/live-writer", true: "/restart"}[restart], func(t *testing.T) {
@@ -48,6 +49,9 @@ func TestCheckpointLagRecovery(t *testing.T) {
 				}
 				if n, err := tc.verify(path); err != nil || n != 3 {
 					t.Fatalf("lagged trail: n=%d err=%v", n, err)
+				}
+				if n, checkpointCount, err := tc.verifyWithCheckpoint(path); err != nil || n != 3 || checkpointCount != 1 {
+					t.Fatalf("lagged prefix verification: n=%d checkpoint=%d err=%v, want n=3 checkpoint=1 nil error", n, checkpointCount, err)
 				}
 				if restart {
 					if err := a.Close(); err != nil {

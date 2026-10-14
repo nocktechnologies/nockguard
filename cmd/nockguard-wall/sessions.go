@@ -243,10 +243,7 @@ func (b *broker) buildView(g guardRead) *wallView {
 		v.rep = b.verifier.verifyBytes(nil, nil) // unconfigured: nothing to verify
 	default:
 		v.guardEvs = loadEventsFromBytes(g.trail)
-		v.rep = b.verifier.verifyBytes(g.trail, g.hwm)
-		if pub := b.guardPub(); len(pub) != 0 && g.trail != nil {
-			gc = sessionverify.CheckGuard(g.trail, g.hwm, pub)
-		}
+		v.rep, gc = b.verifier.verifySnapshotWithCheck(g.trail, g.hwm, time.Now().Format(time.RFC3339))
 	}
 	if b.lockDB != "" {
 		v.lock = b.buildLockView(v.guardEvs, gc, g.err)

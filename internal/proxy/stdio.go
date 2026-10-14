@@ -3,16 +3,21 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
+	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
@@ -472,6 +477,15 @@ func (p *StdioProxy) drainAudits() {
 	p.flushAuditsLocked()
 }
 
+// The leader wait and idle output drain use this shutdown bound. After the
+// leader exits, progress can renew the output drain up to its absolute cap.
+// Audit draining gets another 500ms after the group is killed and reaped, so
+// a forced shutdown has time to record unanswered calls. Forced kills return
+// a nonzero upstream exit. Unread output is dropped at the idle deadline.
+const upstreamShutdownBound = time.Second
+const upstreamOutputDrainCap = 10 * time.Second
+const auditDrainBound = 500 * time.Millisecond
+
 func (p *StdioProxy) Run() error {
 
 	cmd := exec.Command(p.upstream[0], p.upstream[1:]...)
@@ -494,54 +508,227 @@ func (p *StdioProxy) Run() error {
 	strip = append(strip, p.engine.InjectEnvNames()...)
 	strip = append(strip, "NOCKCC_BASE_URL", "NOCKGUARD_VAULT_AGENT_TOKEN")
 	cmd.Env = sanitizedEnv(strip)
+	// Own process group, so a cutoff can kill grandchildren that inherited stdout.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	upstreamIn, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("stdin pipe: %w", err)
 	}
-	upstreamOut, err := cmd.StdoutPipe()
+	// An *os.File stdout (not StdoutPipe) so cmd.Wait neither closes the read
+	// end nor waits on a grandchild that inherited it.
+	upstreamOut, upstreamOutW, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
+	defer upstreamOut.Close()
+	cmd.Stdout = upstreamOutW
+	// A closed client stdout must surface as EPIPE so Run can clean up the
+	// upstream group instead of exiting immediately on SIGPIPE. Notify installs
+	// a caught handler, which exec resets in the upstream child.
+	brokenPipeSignals := make(chan os.Signal, 1)
+	if !signal.Ignored(syscall.SIGPIPE) {
+		signal.Notify(brokenPipeSignals, syscall.SIGPIPE)
+		defer signal.Stop(brokenPipeSignals)
+	}
+	signals := make(chan os.Signal, 1)
+	for _, sig := range []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT} {
+		if !signal.Ignored(sig) {
+			signal.Notify(signals, sig)
+		}
+	}
+	defer signal.Stop(signals)
 
-	if err := cmd.Start(); err != nil {
+	err = cmd.Start()
+	upstreamOutW.Close()
+	if err != nil {
 		return fmt.Errorf("start upstream: %w", err)
 	}
+	defer upstreamIn.Close()
+	waitCh := observeLeaderExit(cmd)
 
-	var wg sync.WaitGroup
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 1)
+	var agentEOF atomic.Bool
+	var outputFailed atomic.Bool
+	outputErrCh := make(chan error, 1)
+	upstreamDone := make(chan struct{})
+	outputProgress := make(chan struct{}, 1)
 
 	pendingCalls := &sync.Map{}
 
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
 		if err := p.agentToUpstream(os.Stdin, upstreamIn, pendingCalls); err != nil {
 			errCh <- fmt.Errorf("agent->upstream: %w", err)
+		} else {
+			agentEOF.Store(true)
 		}
 		upstreamIn.Close()
 	}()
 
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
-		if err := p.upstreamToAgent(upstreamOut, os.Stdout, pendingCalls); err != nil {
-			errCh <- fmt.Errorf("upstream->agent: %w", err)
+		defer close(upstreamDone)
+		if err := p.upstreamToAgent(upstreamOut, os.Stdout, pendingCalls, outputProgress); err != nil {
+			outputFailed.Store(true)
+			outputErrCh <- fmt.Errorf("upstream->agent: %w", err)
 		}
 	}()
 
-	wg.Wait()
-	close(errCh)
-
-	// Drain any unresolved audits before checking upstream exit
-	p.drainAudits()
-
-	if waitErr := cmd.Wait(); waitErr != nil {
+	var observed error
+	outputComplete := false
+	select {
+	case <-upstreamDone:
+		outputComplete = true
+	case observed = <-waitCh:
+	case sig := <-signals:
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return fmt.Errorf("proxy received %s", sig)
+	}
+	// Clean output EOF bounds the leader wait to one second. When the leader
+	// exits first, let a reading client receive output while it keeps flowing,
+	// subject to a ten-second absolute cap from that exit.
+	shutdownBound := upstreamShutdownBound
+	if !outputComplete {
+		shutdownBound = upstreamOutputDrainCap
+	}
+	shutdown, cancel := context.WithTimeout(context.Background(), shutdownBound)
+	defer cancel()
+	outputTimedOut, shutdownTimedOut := false, false
+	var idle *time.Timer
+	var idleDeadline <-chan time.Time
+	if outputComplete {
+		// A clean client EOF may let the leader finish on its own, but that
+		// grace must end at the same deadline as every later shutdown wait.
+		if outputFailed.Load() || !agentEOF.Load() {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		select {
+		case observed = <-waitCh:
+		case <-shutdown.Done():
+			shutdownTimedOut = true
+			p.logger.Print("upstream exited: leader wait deadline reached")
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			observed = <-waitCh
+		case sig := <-signals:
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return fmt.Errorf("proxy received %s", sig)
+		}
+	} else {
+		idle = time.NewTimer(upstreamShutdownBound)
+		defer idle.Stop()
+		idleDeadline = idle.C
+		var drainLimit string
+	drainOutput:
+		for {
+			select {
+			case <-upstreamDone:
+				break drainOutput
+			case <-outputProgress:
+				idle.Reset(upstreamShutdownBound)
+			case <-idleDeadline:
+				// A completed write can race the timer. Drain its notification
+				// before treating the client as idle.
+				select {
+				case <-outputProgress:
+					idle.Reset(upstreamShutdownBound)
+					continue
+				default:
+				}
+				drainLimit = "idle"
+				break drainOutput
+			case <-shutdown.Done():
+				drainLimit = "absolute cap"
+				break drainOutput
+			case sig := <-signals:
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				return fmt.Errorf("proxy received %s", sig)
+			}
+		}
+		// If EOF and a deadline became ready together, the completed drain wins.
+		if drainLimit != "" {
+			select {
+			case <-upstreamDone:
+				drainLimit = ""
+			default:
+			}
+		}
+		if drainLimit != "" {
+			outputTimedOut, shutdownTimedOut = true, true
+			p.logger.Printf("upstream exited: output drain deadline reached (%s); dropping remaining output", drainLimit)
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = upstreamOut.Close()
+		}
+		// Pending replies can block on a client that stops reading after the
+		// output loop finishes. Give them only the same idle grace.
+		idle.Reset(upstreamShutdownBound)
+	}
+	if !agentEOF.Load() && !outputTimedOut {
+		replied := make(chan struct{})
+		go func() {
+			defer close(replied)
+			pendingCalls.Range(func(key, _ any) bool {
+				if err := p.rejectToAgent(json.RawMessage(key.(string)), -32603, "upstream exited"); err != nil {
+					p.logger.Printf("upstream exited: reply for in-flight request failed: %v", err)
+				}
+				return true
+			})
+		}()
+		select {
+		case <-replied:
+		case <-idleDeadline:
+			shutdownTimedOut = true
+			p.logger.Print("upstream exited: client reply deadline reached; abandoning remaining replies")
+		case <-shutdown.Done():
+			shutdownTimedOut = true
+			p.logger.Print("upstream exited: client reply deadline reached; abandoning remaining replies")
+		case sig := <-signals:
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return fmt.Errorf("proxy received %s", sig)
+		}
+	}
+	// Linux and macOS waitid leave the leader unreaped until this kill, so
+	// the PGID cannot have been reused. Output errors and signals also kill
+	// the group before waiting for the leader.
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	waitErr := reapLeader(cmd, observed)
+	// A leader that used the whole shutdown bound must not consume the time
+	// reserved for deferred audits from unanswered forwarded calls.
+	auditShutdown, cancelAudit := context.WithTimeout(context.Background(), auditDrainBound)
+	defer cancelAudit()
+	audited := make(chan struct{})
+	go func() { p.drainAudits(); close(audited) }()
+	select {
+	case <-audited:
+	case <-auditShutdown.Done():
+		shutdownTimedOut = true
+		p.logger.Print("upstream exited: audit drain deadline reached")
+	case sig := <-signals:
+		return fmt.Errorf("proxy received %s", sig)
+	}
+	if !outputTimedOut {
+		select {
+		case e := <-outputErrCh:
+			return e
+		default:
+		}
+	}
+	if waitErr != nil {
 		return fmt.Errorf("upstream exit: %w", waitErr)
 	}
-
-	for e := range errCh {
+	if !agentEOF.Load() {
+		select {
+		case e := <-errCh:
+			return e
+		default:
+		}
+		return errors.New("upstream exited before the client closed stdin")
+	}
+	if shutdownTimedOut {
+		return errors.New("upstream shutdown deadline reached")
+	}
+	select {
+	case e := <-errCh:
 		return e
+	default:
 	}
 	return nil
 }
@@ -589,8 +776,8 @@ type mcpDecision struct {
 	// a tools/call (informational; empty otherwise).
 	toolsListID json.RawMessage
 	tool        string
-	// forwardID is the JSON-RPC request id (for requests only). Set for tool calls
-	// that forward, so upstreamToAgent can correlate the response.
+	// forwardID is the JSON-RPC request id for a forwarded request other than
+	// tools/list, so upstreamToAgent can correlate its response.
 	forwardID json.RawMessage
 	// cardStateUpdate stores tool name and extracted refs for updateCardState()
 	// after the JSON-RPC response is verified as successful. nil means no state update needed.
@@ -773,8 +960,12 @@ func (p *StdioProxy) decide(line []byte, seq uint64) mcpDecision {
 	// (not the raw line) so duplicate-key collapsing reaches upstream — a shadow
 	// "method" can't differ between the proxy's view and upstream's.
 	d := mcpDecision{forward: canonicalLine}
-	if msg.IsRequest() && msg.Method == "tools/list" {
-		d.toolsListID = msg.ID
+	if msg.IsRequest() {
+		if msg.Method == "tools/list" {
+			d.toolsListID = msg.ID
+		} else {
+			d.forwardID = msg.ID
+		}
 	}
 	return d
 }
@@ -972,20 +1163,13 @@ func (p *StdioProxy) rejectToAgent(id json.RawMessage, code int, message string)
 	return p.writeAgentLine(p.agentWriter(), errResp)
 }
 
-func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map) error {
+func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map, progress chan<- struct{}) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		msg, err := jsonrpc.Decode(line)
-		if err != nil {
-			if writeErr := p.writeAgentLine(w, line); writeErr != nil {
-				return writeErr
-			}
-			continue
-		}
-
-		if msg.IsResponse() && msg.ID != nil {
+		if err == nil && msg.IsResponse() && msg.ID != nil {
 			val, loaded := pending.LoadAndDelete(string(msg.ID))
 			if loaded {
 				// Check if this is a tools/list filter or a pending card state update.
@@ -1030,6 +1214,10 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 
 		if writeErr := p.writeAgentLine(w, line); writeErr != nil {
 			return writeErr
+		}
+		select {
+		case progress <- struct{}{}:
+		default:
 		}
 	}
 	return scanner.Err()
