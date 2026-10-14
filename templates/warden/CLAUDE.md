@@ -111,8 +111,10 @@ and exit 1 means the trail is not protected, not tampering: `VERDICT: NO_ROWS`
 anything else (missing public key or key variable, `requirePubHex`) is HIGH. With the file missing: a fresh
 install (no keys, no other trails, no `.hwm` file) is setup; otherwise HIGH,
 possible deletion. `nockguard verify --all` exits 2 if any trail is tampered and
-1 if any is unverifiable or none are found (`NO_TRAILS`); it cannot see a trail
-that was deleted.
+1 if any is empty (`NO_ROWS`), past its signed checkpoint (`UNANCHORED`) or
+unverifiable, or if none are found (`NO_TRAILS`). Read the per-agent lines
+(`[NO ROWS]`, `[UNANCHORED]`, `[NO KEY]`, `[TAMPER]`) before calling an exit 1
+MEDIUM or HIGH. It cannot see a trail that was deleted.
 
 ### Watching the Live Wall
 
