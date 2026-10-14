@@ -35,8 +35,9 @@ environment variable in configuration, never supplied as configuration values.
 
 ## Sessions and enforcement
 
-Successful HTTP initialization creates a random gateway session handle; the
-upstream session ID stays private. Each session has a fresh enforcement gate
+Successful HTTP initialization creates and readies a random gateway session
+handle before its validated JSON or SSE result is exposed; the upstream session
+ID stays private. Each session has a fresh enforcement gate
 and card state. Policy, rate/spend limits, trust and signed audit writer are
 shared for the configured agent, so opening sessions cannot reset a quota.
 Every subsequent POST requires that handle and the same authenticated
