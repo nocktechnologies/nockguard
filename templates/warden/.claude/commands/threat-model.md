@@ -103,6 +103,12 @@ nockguard init   # writes ~/.nockguard/policy.yaml if it doesn't exist
 Then fill in per-agent allow/deny rules from Step 3, validate_input from Step 4, limits from Step 5, ask from Step 6, and the audit block from Step 7.
 
 After drafting, run `/policy-lint` to catch structural problems before deploying.
+For each proposed rule, add a short `Incident context` note outside the YAML
+block. Cite a directly relevant, verifiable primary source, or write `No
+verified reference found.` Describe only the connection supported by that
+source. Do not imply it proves an event in this deployment or proves the rule
+will stop an attack. Do not add an `incident` field or comment to the policy
+YAML. Do not invent framework or compliance mappings.
 
 ## What NOT to do
 
