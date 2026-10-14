@@ -268,7 +268,10 @@ For each finding:
 Agent: my-agent
 Pattern: allow "*_list" shadows intent of deny "nockcc_list_private"
 Fix: deny always wins — if this is intentional, no change needed; otherwise rename the allow pattern.
+Incident context: <verified primary-source link and narrow connection, or "No verified reference found.">
 ```
+
+Only include an incident note when a fix proposes or changes a policy rule. Put it outside YAML. Cite a directly relevant, verifiable primary source, or write `No verified reference found.` It is context, not evidence about this deployment or proof that a rule works. Do not add incident fields or comments to policy YAML, and do not invent framework or compliance mappings.
 
 End with a pass/fail summary: "X errors, Y warnings, Z info. Policy is [READY TO DEPLOY / NOT READY — fix errors first]."
 

@@ -35,6 +35,10 @@ agents:
     mode: allow
 ```
 
+Incident context for `mode: allow`: No verified reference found. This is an
+illustrative misconfiguration for diagnosis; it does not assert that an
+incident occurred.
+
 Fix: replace it with an explicit allow list, or set `mode: deny`.
 
 ### 2b. Missing default agent (HIGH)
@@ -264,7 +268,10 @@ Summarize findings as a numbered list, most-severe first. For each finding:
 What was found: ...
 Why it matters: ...
 Fix: <exact YAML diff or command>
+Incident context: <verified primary-source link and narrow connection, or "No verified reference found.">
 ```
+
+Only include an incident note when the finding proposes a policy rule change. Keep each note outside the YAML diff. Cite a directly relevant, verifiable primary source, or write `No verified reference found.` The reference is context only. Do not imply it documents an event in this deployment or proves the proposed rule is effective. Do not add incident fields or comments to YAML, and do not invent framework or compliance mappings.
 
 After the list, give a risk score (count of CRITICAL + HIGH findings) and a recommended next step.
 

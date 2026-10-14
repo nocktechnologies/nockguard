@@ -23,6 +23,22 @@ claude
 - Explains what you see on the Live Wall (`nockguard wall --agent <name>`)
 - Verifies audit chain integrity
 
+## Example policy suggestion
+
+```yaml
+agents:
+  coder:
+    allow:
+      - "read_file"
+```
+
+Incident context for `read_file`: No verified reference found. This illustrative
+single-tool grant is not a response to a particular incident.
+
+Warden keeps incident context outside policy YAML. NockGuard's strict loader
+rejects unsupported policy keys. When a real primary source supports a proposed
+rule, Warden cites it and describes only the documented connection.
+
 ## Security skills (slash commands)
 
 This template ships three beginner-facing slash commands. Deploy them alongside `CLAUDE.md`:
