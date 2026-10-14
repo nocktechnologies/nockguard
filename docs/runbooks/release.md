@@ -19,8 +19,16 @@ fix into the release candidate and rerun its exact-head review and checks before
 promotion. No builder merges into `next` during the freeze. Promote the prepared
 branch with a squash PR to `main`. Before promotion, record in the release PR
 body the full `origin/next` commit SHA included in the final candidate. Fetch
-with `git fetch origin`, confirm that fetched commit is included in the gated
-candidate, then obtain its full SHA with `git rev-parse origin/next`. Update that record
+with `git fetch origin`. Set `release_candidate_head` to the full head SHA of
+the gated release PR, then require this check to exit zero:
+
+```bash
+git merge-base --is-ancestor origin/next "$release_candidate_head"
+```
+
+Stop on a nonzero exit; merge any missing release fixes into the candidate and
+repeat its gate before proceeding. After this check, record the full SHA from
+`git rev-parse origin/next`. Update that record
 after every incorporated release fix (and after metadata changes made on
 `next`). Call this recorded commit `release_next_head` in the steps below.
 Require the same exact-head reviews and checks on that PR, then wait for the checks on the
