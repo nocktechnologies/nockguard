@@ -183,7 +183,8 @@ func TestTamperedSessionIDBreaksEd25519Verify(t *testing.T) {
 }
 
 // TestOldTrailWithoutNewFieldsStillVerifies covers point 5: a trail written
-// entirely by pre-change code (no session_id/key_id ever set on any Event)
+// entirely by pre-change code (no session_id/key_id/approval_actor ever set on
+// any Event)
 // must still verify under today's VerifyEd25519. Fixture captured by running
 // the pre-change Record()/Close() against a fixed clock and a fixed seed, so
 // it is a real prior-code artifact, including its .hwm sidecar (checkHighWaterMark

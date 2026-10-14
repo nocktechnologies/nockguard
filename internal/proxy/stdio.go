@@ -199,16 +199,24 @@ func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, valid
 // The event is queued but NOT stamped with currentCard yet; stamping happens
 // at flush time to ensure deferred audits see card state from a preceding claim.
 func (p *StdioProxy) appendAudit(seq uint64, tool, decision, reason string, refs *extract.References) {
+	p.appendAuditWithApprovalActor(seq, tool, decision, reason, refs, "")
+}
+
+// appendAuditWithApprovalActor adds an approver identity only when a local
+// approver supplied it from Unix peer credentials. Other approval backends and
+// normal tool-call audit rows leave the field absent.
+func (p *StdioProxy) appendAuditWithApprovalActor(seq uint64, tool, decision, reason string, refs *extract.References, approvalActor string) {
 	p.auditMutex.Lock()
 	defer p.auditMutex.Unlock()
 
 	// Build the audit event (no card stamp yet — that happens at flush time).
 	// Allocate on the heap so the pointer remains valid after this function returns
 	ev := &audit.Event{
-		Agent:    p.agent,
-		Tool:     tool,
-		Decision: decision,
-		Reason:   reason,
+		Agent:         p.agent,
+		Tool:          tool,
+		Decision:      decision,
+		Reason:        reason,
+		ApprovalActor: approvalActor,
 	}
 
 	// Set extracted references if provided.
@@ -1122,12 +1130,12 @@ func (p *StdioProxy) approveAsk(tool string, params json.RawMessage, refs *extra
 	v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: tool, Params: params, Reason: dec.Reason})
 	if !v.Approved {
 		p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)
-		p.appendAudit(seq, tool, "approval-denied", v.Reason, refs)
+		p.appendAuditWithApprovalActor(seq, tool, "approval-denied", v.Reason, refs, v.ApprovalActor)
 		p.resolveAudit(seq)
 		return false
 	}
 	p.logger.Printf("APPROVAL-GRANTED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)
-	p.appendAudit(seq, tool, "approval-granted", v.Reason, refs)
+	p.appendAuditWithApprovalActor(seq, tool, "approval-granted", v.Reason, refs, v.ApprovalActor)
 	p.applyWithheld(tool, dec.Withheld, seq)
 	return true
 }

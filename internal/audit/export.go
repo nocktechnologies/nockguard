@@ -259,9 +259,19 @@ func VerifyExport(data []byte, pub ed25519.PublicKey, expectedAgent string) (int
 		if row.Index < 1 || row.Index > mark.Count || (i > 0 && row.Index <= proof.Rows[i-1].Index) {
 			return 0, false, fmt.Errorf("export row index invalid")
 		}
-		var ev Event
-		if err := json.Unmarshal([]byte(row.Raw), &ev); err != nil {
+		raw := []byte(row.Raw)
+		if err := rejectDuplicateTopLevelKeys(raw); err != nil {
 			return 0, false, fmt.Errorf("row %d: %w", i, err)
+		}
+		if err := rejectNonStringApprovalActor(raw); err != nil {
+			return 0, false, fmt.Errorf("row %d: %w", i, err)
+		}
+		var ev Event
+		if err := json.Unmarshal(raw, &ev); err != nil {
+			return 0, false, fmt.Errorf("row %d: %w", i, err)
+		}
+		if err := validateApprovalActor(ev); err != nil {
+			return 0, false, fmt.Errorf("row %d: invalid approval_actor: %w", i, err)
 		}
 		canonical, err := json.Marshal(ev)
 		if err != nil || !bytes.Equal([]byte(row.Raw), canonical) {

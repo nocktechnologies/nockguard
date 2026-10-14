@@ -72,6 +72,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -101,6 +102,7 @@ type Event struct {
 	Tool           string `json:"tool"`
 	Decision       string `json:"decision"` // dispatch | allow | deny | block | ratelimit | hide
 	Reason         string `json:"reason,omitempty"`
+	ApprovalActor  string `json:"approval_actor,omitempty"`   // local approver's kernel-authenticated uid; never a tool caller
 	NockID         int    `json:"nock_id,omitempty"`          // NockCC card id, extracted from nockcc_nock_* tools or set by session stamp
 	PR             string `json:"pr,omitempty"`               // GitHub PR reference owner/repo#n, extracted from gh_* tools
 	ReviewID       string `json:"review_id,omitempty"`        // NockCC review id, extracted from known tools
@@ -350,6 +352,9 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 		}
 		return nil
 	}
+	if err := validateApprovalActor(ev); err != nil {
+		return err
+	}
 	if required {
 		if err = a.checkPathIdentity(); err != nil {
 			return err
@@ -441,6 +446,27 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 	// detectable (N8154). ev.Sig is this entry's signature.
 	if a.signing() {
 		return a.updateHighWaterMark(checkpointCount+1, ev.Sig, required)
+	}
+	return nil
+}
+
+// validateApprovalActor keeps this attribution field constrained to the
+// kernel-derived local-approver namespace and to approval decision rows.
+func validateApprovalActor(ev Event) error {
+	if ev.ApprovalActor == "" {
+		return nil
+	}
+	if ev.Decision != "approval-granted" && ev.Decision != "approval-denied" {
+		return fmt.Errorf("approval_actor is only valid on approval decision rows")
+	}
+	const prefix = "local:uid:"
+	if !strings.HasPrefix(ev.ApprovalActor, prefix) {
+		return fmt.Errorf("approval_actor must use the local:uid:<decimal> form")
+	}
+	decimal := strings.TrimPrefix(ev.ApprovalActor, prefix)
+	uid, err := strconv.ParseUint(decimal, 10, 32)
+	if err != nil || strconv.FormatUint(uid, 10) != decimal {
+		return fmt.Errorf("approval_actor must use a canonical uint32 decimal uid")
 	}
 	return nil
 }
@@ -826,7 +852,8 @@ func checkHighWaterMark(hwm *highWaterMark, n int, sigAtCount string, verifySig 
 }
 
 // rejectDuplicateTopLevelKeys returns an error if raw is not a single JSON
-// object or contains a duplicate top-level key. This closes a forgery the typed
+// object, contains a duplicate top-level key, or uses a case-alias spelling for
+// approval_actor. This closes a forgery the typed
 // unmarshal + re-marshal verification path is blind to (N8179): Go's
 // encoding/json is LAST-WINS on duplicate keys, so a line such as
 //
@@ -874,6 +901,9 @@ func rejectDuplicateTopLevelKeys(raw []byte) error {
 		// consumed under depth > 0, so a top-level string token here is a key.
 		if depth == 0 {
 			if key, isStr := t.(string); isStr {
+				if strings.EqualFold(key, "approval_actor") && key != "approval_actor" {
+					return fmt.Errorf("non-canonical approval_actor key %q — possible parser differential", key)
+				}
 				if _, dup := seen[key]; dup {
 					return fmt.Errorf("duplicate top-level key %q — non-canonical (possible forgery)", key)
 				}
@@ -882,6 +912,46 @@ func rejectDuplicateTopLevelKeys(raw []byte) error {
 				if err := consumeValue(dec, &depth); err != nil {
 					return err
 				}
+			}
+		}
+	}
+	return nil
+}
+
+// rejectNonStringApprovalActor prevents null or another JSON type from being
+// collapsed to Event.ApprovalActor's zero value by encoding/json.
+func rejectNonStringApprovalActor(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if tok != json.Delim('{') {
+		return nil // rejectDuplicateTopLevelKeys reports the more useful shape error.
+	}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return fmt.Errorf("invalid top-level JSON key")
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return err
+		}
+		if key == "approval_actor" && (len(value) == 0 || value[0] != '"') {
+			return fmt.Errorf("approval_actor must be a JSON string")
+		}
+		if key == "approval_actor" {
+			var actor string
+			if err := json.Unmarshal(value, &actor); err != nil {
+				return err
+			}
+			if actor == "" {
+				return fmt.Errorf("empty approval_actor must be omitted")
 			}
 		}
 	}
@@ -1072,9 +1142,15 @@ func verifyHMACStream(r io.Reader, hwm *highWaterMark, key []byte) (int, error) 
 		if err := rejectDuplicateTopLevelKeys(raw); err != nil {
 			return n, markTamper(n, fmt.Errorf("line %d: %w", n, err))
 		}
+		if err := rejectNonStringApprovalActor(raw); err != nil {
+			return n, markTamper(n, fmt.Errorf("line %d: %w", n, err))
+		}
 		var ev Event
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return n, markTamper(n, fmt.Errorf("line %d: invalid json: %w", n, err))
+		}
+		if err := validateApprovalActor(ev); err != nil {
+			return n, markTamper(n, fmt.Errorf("line %d: invalid approval_actor: %w", n, err))
 		}
 		got := ev.Sig
 		if got == "" {
@@ -1180,9 +1256,15 @@ func verifyEd25519Stream(r io.Reader, hwm *highWaterMark, pub ed25519.PublicKey)
 		if err := rejectDuplicateTopLevelKeys(raw); err != nil {
 			return n, markTamper(n, fmt.Errorf("line %d: %w", n, err))
 		}
+		if err := rejectNonStringApprovalActor(raw); err != nil {
+			return n, markTamper(n, fmt.Errorf("line %d: %w", n, err))
+		}
 		var ev Event
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return n, markTamper(n, fmt.Errorf("line %d: invalid json: %w", n, err))
+		}
+		if err := validateApprovalActor(ev); err != nil {
+			return n, markTamper(n, fmt.Errorf("line %d: invalid approval_actor: %w", n, err))
 		}
 		if ev.Sig == "" {
 			return n, markTamper(n, fmt.Errorf("line %d: entry is not signed", n))

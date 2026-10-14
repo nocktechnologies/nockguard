@@ -145,6 +145,68 @@ func TestExportProofWindowAndSeverity(t *testing.T) {
 	}
 }
 
+func signedProofForEvent(t *testing.T, ev Event, priv ed25519.PrivateKey) []byte {
+	t.Helper()
+	canonical, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.Sig = signLineEd25519(priv, canonical, "")
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mark := highWaterMark{Count: 1, LastSig: ev.Sig}
+	mark.Sig = signLineEd25519(priv, hwmSignedBytes(mark.Count, mark.LastSig), "")
+	head, err := json.Marshal(mark)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := ExportProof{
+		Schema:         "nockguard-export/v2",
+		Agent:          ev.Agent,
+		CapturedAt:     "2026-10-13T12:00:00Z",
+		Filters:        ExportFilters{},
+		CompleteWindow: true,
+		Rows:           []ExportRow{{Index: 1, Raw: string(raw)}},
+		Head:           head,
+	}
+	proof.ReceiptSig = hex.EncodeToString(ed25519.Sign(priv, proof.receiptMessage()))
+	data, err := json.Marshal(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestVerifyExportEnforcesApprovalActorSemantics(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name      string
+		ev        Event
+		wantValid bool
+	}{
+		{name: "valid approval attribution", ev: Event{Time: "2026-10-13T11:59:00Z", Agent: "kit", Tool: "deploy", Decision: "approval-granted", ApprovalActor: "local:uid:501"}, wantValid: true},
+		{name: "actor on non-approval row", ev: Event{Time: "2026-10-13T11:59:00Z", Agent: "kit", Tool: "deploy", Decision: "allow", ApprovalActor: "local:uid:501"}},
+		{name: "noncanonical uid", ev: Event{Time: "2026-10-13T11:59:00Z", Agent: "kit", Tool: "deploy", Decision: "approval-granted", ApprovalActor: "local:uid:0501"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data := signedProofForEvent(t, tc.ev, priv)
+			_, _, err := VerifyExport(data, pub, "kit")
+			if tc.wantValid && err != nil {
+				t.Fatalf("valid attributed approval proof rejected: %v", err)
+			}
+			if !tc.wantValid && err == nil {
+				t.Fatal("export proof accepted semantically invalid approval_actor")
+			}
+		})
+	}
+}
+
 func TestExportProofTimeRegression(t *testing.T) {
 	cases := []struct {
 		name     string
