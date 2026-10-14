@@ -211,11 +211,14 @@ printf '%s\n' "$RESULT"
 case "$STATUS" in
   0) echo "PROTECTED: chain intact" ;;
   1)
-    case "$RESULT" in
-      *"VERDICT: NO_ROWS"*) echo "MEDIUM: $TRAIL is empty (NO_ROWS); nothing is verified yet. Run the agent through nockguard, then scan again." ;;
-      *"VERDICT: UNANCHORED"*) echo "MEDIUM: $TRAIL runs past its signed checkpoint (UNANCHORED); re-run once the writer is idle, and treat it as HIGH if it persists." ;;
-      *) echo "HIGH: $TRAIL exists but could not be verified (missing public key or key env, or bad arguments); treat it as unverified" ;;
-    esac ;;
+    # Match the verdict as a whole line, not as text inside another line.
+    if printf '%s\n' "$RESULT" | grep -qx 'VERDICT: NO_ROWS'; then
+      echo "MEDIUM: $TRAIL is empty (NO_ROWS); nothing is verified yet. Run the agent through nockguard, then scan again."
+    elif printf '%s\n' "$RESULT" | grep -qx 'VERDICT: UNANCHORED'; then
+      echo "MEDIUM: $TRAIL runs past its signed checkpoint (UNANCHORED); re-run once the writer is idle, and treat it as HIGH if it persists."
+    else
+      echo "HIGH: $TRAIL exists but could not be verified (missing public key or key env, or bad arguments); treat it as unverified"
+    fi ;;
   2) echo "CRITICAL: tamper detected (chain broken, or the trail could not be opened)" ;;
   *) echo "ERROR: verifier exited $STATUS" >&2; exit 1 ;;
 esac
@@ -232,7 +235,7 @@ Which verifier applies (Ed25519 takes precedence over HMAC, as in `AuditorForAge
 
 The trail's name decides the first row, because the per-agent path is only used when a per-agent key signs (`AuditorForAgent`): a key from `NOCKGUARD_AGENT_<NAME>_ED25519_KEY` always wins; a policy signing key wins over a `keygen` key file; otherwise the key file signs a per-agent trail. A per-agent key supplied only through the environment leaves no `.pub` file; set `NOCKGUARD_AGENT_<NAME>_ED25519_PUB` before verifying.
 
-Exit codes (`runAudit` and `verifyAllAgents` in `cmd/nockguard/main.go`). The verifier selects the key before it opens the trail, so a missing public key or unset key env var exits 1 whether or not the trail exists (`requirePubHex` in `cmd/nockguard/keygen.go`). A trail that opens and verifies but is empty (`NO_ROWS`) or runs past its signed checkpoint (`UNANCHORED`) also exits 1 and prints `VERDICT: NO_ROWS` or `VERDICT: UNANCHORED` (`runAudit`), which is why the snippet reads the verdict line before it labels an exit 1. Once the key is chosen, a trail that cannot be opened exits 2, the same as a broken chain (`audit.VerifyEd25519` returns the open error, and `runAudit` reports every error from it as TAMPER). That is why the snippet tests for the file first: exit 2 alone cannot tell a deleted trail from a forged one.
+Exit codes (`runAudit` and `verifyAllAgents` in `cmd/nockguard/main.go`). The verifier selects the key before it opens the trail, so a missing public key or unset key env var exits 1 whether or not the trail exists (`requirePubHex` in `cmd/nockguard/keygen.go`). A trail that opens and verifies but is empty (`NO_ROWS`) or runs past its signed checkpoint (`UNANCHORED`) also exits 1 and prints `VERDICT: NO_ROWS` or `VERDICT: UNANCHORED` (`runAudit`), which is why the snippet reads the whole-line verdict before it labels an exit 1. Once the key is chosen, a trail that cannot be opened exits 2, the same as a broken chain (`audit.VerifyEd25519` returns the open error, and `runAudit` reports every error from it as TAMPER). That is why the snippet tests for the file first: exit 2 alone cannot tell a deleted trail from a forged one.
 
 | Case | Severity |
 |---|---|
