@@ -477,12 +477,13 @@ func (p *StdioProxy) drainAudits() {
 	p.flushAuditsLocked()
 }
 
-// The leader wait, output drain, and client replies share this shutdown bound.
+// The leader wait and idle output drain use this shutdown bound. After the
+// leader exits, progress can renew the output drain up to its absolute cap.
 // Audit draining gets another 500ms after the group is killed and reaped, so
-// the total shutdown bound is 1.5s plus kill/reap scheduling. Forced kills
-// intentionally return a nonzero upstream exit. Unread output is dropped at
-// the first deadline, including when the client stops reading stdout.
+// a forced shutdown has time to record unanswered calls. Forced kills return
+// a nonzero upstream exit. Unread output is dropped at the idle deadline.
 const upstreamShutdownBound = time.Second
+const upstreamOutputDrainCap = 10 * time.Second
 const auditDrainBound = 500 * time.Millisecond
 
 func (p *StdioProxy) Run() error {
@@ -551,6 +552,7 @@ func (p *StdioProxy) Run() error {
 	var outputFailed atomic.Bool
 	outputErrCh := make(chan error, 1)
 	upstreamDone := make(chan struct{})
+	outputProgress := make(chan struct{}, 1)
 
 	pendingCalls := &sync.Map{}
 
@@ -565,7 +567,7 @@ func (p *StdioProxy) Run() error {
 
 	go func() {
 		defer close(upstreamDone)
-		if err := p.upstreamToAgent(upstreamOut, os.Stdout, pendingCalls); err != nil {
+		if err := p.upstreamToAgent(upstreamOut, os.Stdout, pendingCalls, outputProgress); err != nil {
 			outputFailed.Store(true)
 			outputErrCh <- fmt.Errorf("upstream->agent: %w", err)
 		}
@@ -581,11 +583,18 @@ func (p *StdioProxy) Run() error {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return fmt.Errorf("proxy received %s", sig)
 	}
-	// One absolute deadline starts at the first shutdown event and covers the
-	// leader wait, output drain, and client replies.
-	shutdown, cancel := context.WithTimeout(context.Background(), upstreamShutdownBound)
+	// Clean output EOF bounds the leader wait to one second. When the leader
+	// exits first, let a reading client receive output while it keeps flowing,
+	// subject to a ten-second absolute cap from that exit.
+	shutdownBound := upstreamShutdownBound
+	if !outputComplete {
+		shutdownBound = upstreamOutputDrainCap
+	}
+	shutdown, cancel := context.WithTimeout(context.Background(), shutdownBound)
 	defer cancel()
 	outputTimedOut, shutdownTimedOut := false, false
+	var idle *time.Timer
+	var idleDeadline <-chan time.Time
 	if outputComplete {
 		// A clean client EOF may let the leader finish on its own, but that
 		// grace must end at the same deadline as every later shutdown wait.
@@ -604,17 +613,53 @@ func (p *StdioProxy) Run() error {
 			return fmt.Errorf("proxy received %s", sig)
 		}
 	} else {
-		select {
-		case <-upstreamDone:
-		case <-shutdown.Done():
+		idle = time.NewTimer(upstreamShutdownBound)
+		defer idle.Stop()
+		idleDeadline = idle.C
+		var drainLimit string
+	drainOutput:
+		for {
+			select {
+			case <-upstreamDone:
+				break drainOutput
+			case <-outputProgress:
+				idle.Reset(upstreamShutdownBound)
+			case <-idleDeadline:
+				// A completed write can race the timer. Drain its notification
+				// before treating the client as idle.
+				select {
+				case <-outputProgress:
+					idle.Reset(upstreamShutdownBound)
+					continue
+				default:
+				}
+				drainLimit = "idle"
+				break drainOutput
+			case <-shutdown.Done():
+				drainLimit = "absolute cap"
+				break drainOutput
+			case sig := <-signals:
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				return fmt.Errorf("proxy received %s", sig)
+			}
+		}
+		// If EOF and a deadline became ready together, the completed drain wins.
+		if drainLimit != "" {
+			select {
+			case <-upstreamDone:
+				drainLimit = ""
+			default:
+			}
+		}
+		if drainLimit != "" {
 			outputTimedOut, shutdownTimedOut = true, true
-			p.logger.Print("upstream exited: output drain deadline reached; dropping remaining output")
+			p.logger.Printf("upstream exited: output drain deadline reached (%s); dropping remaining output", drainLimit)
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			_ = upstreamOut.Close()
-		case sig := <-signals:
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			return fmt.Errorf("proxy received %s", sig)
 		}
+		// Pending replies can block on a client that stops reading after the
+		// output loop finishes. Give them only the same idle grace.
+		idle.Reset(upstreamShutdownBound)
 	}
 	if !agentEOF.Load() && !outputTimedOut {
 		replied := make(chan struct{})
@@ -629,6 +674,9 @@ func (p *StdioProxy) Run() error {
 		}()
 		select {
 		case <-replied:
+		case <-idleDeadline:
+			shutdownTimedOut = true
+			p.logger.Print("upstream exited: client reply deadline reached; abandoning remaining replies")
 		case <-shutdown.Done():
 			shutdownTimedOut = true
 			p.logger.Print("upstream exited: client reply deadline reached; abandoning remaining replies")
@@ -1115,20 +1163,13 @@ func (p *StdioProxy) rejectToAgent(id json.RawMessage, code int, message string)
 	return p.writeAgentLine(p.agentWriter(), errResp)
 }
 
-func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map) error {
+func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map, progress chan<- struct{}) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		msg, err := jsonrpc.Decode(line)
-		if err != nil {
-			if writeErr := p.writeAgentLine(w, line); writeErr != nil {
-				return writeErr
-			}
-			continue
-		}
-
-		if msg.IsResponse() && msg.ID != nil {
+		if err == nil && msg.IsResponse() && msg.ID != nil {
 			val, loaded := pending.LoadAndDelete(string(msg.ID))
 			if loaded {
 				// Check if this is a tools/list filter or a pending card state update.
@@ -1173,6 +1214,10 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 
 		if writeErr := p.writeAgentLine(w, line); writeErr != nil {
 			return writeErr
+		}
+		select {
+		case progress <- struct{}{}:
+		default:
 		}
 	}
 	return scanner.Err()

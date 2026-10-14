@@ -47,7 +47,7 @@ func TestStdioOutOfOrderResponseAuditLimit(t *testing.T) {
 	}
 	var agent bytes.Buffer
 	second := `{"jsonrpc":"2.0","id":2,"result":{}}` + "\n"
-	if err := gate.upstreamToAgent(strings.NewReader(second), &agent, pending); err != nil {
+	if err := gate.upstreamToAgent(strings.NewReader(second), &agent, pending, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(agent.String(), `"id":2`) || !strings.Contains(agent.String(), `"result"`) {
@@ -57,7 +57,7 @@ func TestStdioOutOfOrderResponseAuditLimit(t *testing.T) {
 		t.Fatalf("deferred decision overtook pending first call: %+v", rows)
 	}
 	first := `{"jsonrpc":"2.0","id":1,"result":{}}` + "\n"
-	if err := gate.upstreamToAgent(strings.NewReader(first), io.Discard, pending); err != nil {
+	if err := gate.upstreamToAgent(strings.NewReader(first), io.Discard, pending, nil); err != nil {
 		t.Fatal(err)
 	}
 	rows = readAuditEvents(t, path)
@@ -87,7 +87,7 @@ func TestStdioPendingRequestRegisteredBeforeWrite(t *testing.T) {
 					if _, ok := pending.Load("1"); !ok {
 						t.Error("pending request was not registered before upstream Write")
 					}
-					if err := gate.upstreamToAgent(strings.NewReader(response), &agent, pending); err != nil {
+					if err := gate.upstreamToAgent(strings.NewReader(response), &agent, pending, nil); err != nil {
 						return 0, err
 					}
 				}
@@ -99,7 +99,7 @@ func TestStdioPendingRequestRegisteredBeforeWrite(t *testing.T) {
 				t.Fatalf("agentToUpstream: %v", err)
 			}
 			if !tc.respondDuringWrite {
-				if err := gate.upstreamToAgent(strings.NewReader(response), &agent, pending); err != nil {
+				if err := gate.upstreamToAgent(strings.NewReader(response), &agent, pending, nil); err != nil {
 					t.Fatalf("upstreamToAgent: %v", err)
 				}
 			}
@@ -366,7 +366,7 @@ agents:
 
 	response := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}`
 	var agent bytes.Buffer
-	if err := proxy.upstreamToAgent(strings.NewReader(response+"\n"), &agent, pending); err != nil {
+	if err := proxy.upstreamToAgent(strings.NewReader(response+"\n"), &agent, pending, nil); err != nil {
 		t.Fatalf("upstreamToAgent: %v", err)
 	}
 	proxy.drainAudits()
