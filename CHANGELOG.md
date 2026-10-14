@@ -4,13 +4,17 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-14
+
 ### Documentation
 - README shows the Live Wall over a real signed trail, CONTRIBUTING lists the checks CI runs (`gofmt`, `go test -race`, the Wall browser test and the quickstart acceptance), and the approvals page links to the README policy rules section.
 
 ### Fixed
 - `mcp-gateway` releases an SSE initialize session before delivering its matching result, so an immediate follow-up does not receive a spurious `429 gateway busy`.
-- N11738: `mcp-gateway` also installs and releases a validated JSON initialize session before delivering its result, so an immediate follow-up does not receive a spurious `429 gateway busy`.
-- N11751: `mcp-gateway` refreshes the idle timeout after a JSON or SSE initialize result finishes writing, without overwriting the state of a follow-up already in progress.
+- `mcp-gateway` also installs and releases a validated JSON initialize session before delivering its result, so an immediate follow-up does not receive a spurious `429 gateway busy`.
+- The vuln-scan helper (`.claude/commands/vuln-scan.md` and the Warden template copy) shows the `verify --all` command again and rates a `[SKIP]` line (invalid agent name) as HIGH.
+- `mcp-gateway` refreshes the idle timeout after a JSON or SSE initialize result finishes writing, without overwriting the state of a follow-up already in progress.
+- Release builds ignore the local `dist/` directory, so release binaries no longer report a modified source tree (`+dirty`, `vcs.modified=true`).
 
 ## [0.7.0] - 2026-10-14
 
