@@ -430,6 +430,12 @@ be supplied separately; this command does not deploy or switch a live connector.
 NockGuard gates MCP messages through its stdio proxy or HTTP enforcement listeners.
 Its separate `egress-proxy` covers HTTP/HTTPS clients that use the forward proxy.
 
+If a stdio upstream exits, the proxy delivers output already in its pipe while
+the client keeps reading. It stops the drain after one second without a completed
+client write, or ten seconds after the upstream exit, whichever comes first. If
+upstream stdout closes while its leader remains alive, the proxy gives that
+leader one second to exit, then kills its process group and reaps it.
+
 **What NockGuard covers:**
 - Every `tools/list` and `tools/call` MCP message the agent sends through the proxy.
 - All policy decisions (allow, deny, ask, rate-limit, spend-cap) on those calls.

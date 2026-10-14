@@ -644,3 +644,37 @@ func TestProxyDeliversOutputWrittenBeforeUpstreamExit(t *testing.T) {
 		t.Fatal("proxy did not exit")
 	}
 }
+
+// A reader must keep receiving a descendant's output after the leader exits,
+// even when the drain takes longer than the one-second idle bound.
+func TestProxyDrainsOutputWhileClientReads(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "paced-output.sh")
+	body := "#!/bin/bash\n(sleep 0.2; for i in {1..16}; do echo aaaa; sleep 0.1; done; echo DONE) &\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+		t.Fatal(err)
+	}
+	in, out, exited := runWithOpenStdin(t, "bash "+script)
+	_ = in.Close()
+	started := time.Now()
+	var last string
+	for out.Scan() {
+		last = out.Text()
+	}
+	if err := out.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if last != "DONE" {
+		t.Fatalf("output truncated while client was reading; last line %q", last)
+	}
+	if elapsed := time.Since(started); elapsed < upstreamShutdownBound {
+		t.Fatalf("test did not exercise output beyond the idle bound: %s", elapsed)
+	}
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("proxy failed after complete output drain: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy did not exit after output EOF")
+	}
+}
