@@ -31,7 +31,8 @@ type session struct {
 }
 
 // Gateway owns session gates; newHandler must return a fresh gate, with shared
-// agent quotas and audit writer. Only the configured subject/client can enter.
+// agent quotas and audit writer. Session handlers must honor request cancellation.
+// Only the configured subject/client can enter.
 type Gateway struct {
 	config             Config
 	host               string
@@ -154,7 +155,19 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	success := !initializing
+	released := false
 	defer func() {
+		if released {
+			// The initialize result may take time to flush after the session is
+			// released. Refresh idle time only if no follow-up has acquired it in
+			// the meantime; the follow-up owns lastUsed while it is busy.
+			g.mu.Lock()
+			if current, ok := g.sessions[id]; ok && current == s && !s.busy {
+				s.lastUsed = time.Now()
+			}
+			g.mu.Unlock()
+			return
+		}
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		s.busy = false
@@ -166,7 +179,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Build an allowlist of transport headers. No caller credentials, cookies,
 	// forwarding/identity headers or upstream session IDs cross this boundary.
 	// The forwarded request gets its own cancel so an SSE initialize can end the
-	// upstream stream once its result commits (see initWriter.onCommit).
+	// upstream stream once its matching result is validated (see initWriter.onCommit).
 	fctx, fcancel := context.WithCancel(ctx)
 	defer fcancel()
 	forward := r.Clone(fctx)
@@ -192,18 +205,25 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			header:   make(http.Header),
 			mode:     "undecided",
 			onCommit: fcancel,
+			onReady: func(upstreamID string) {
+				// Install the successful session before exposing the initialize
+				// result. A client may send its next POST as soon as those bytes
+				// arrive, while this handler is still returning from Write/Flush.
+				g.mu.Lock()
+				s.upstreamID = upstreamID
+				s.busy = false
+				s.lastUsed = time.Now()
+				g.mu.Unlock()
+				success = true
+				released = true
+			},
 		}
 		s.handler.ServeHTTP(iw, forward)
 
 		if iw.committed {
-			s.upstreamID = iw.upstreamID
-			success = true
+			iw.commitSSE()
 		} else {
 			iw.finalize()
-			if iw.committed {
-				s.upstreamID = iw.upstreamID
-				success = true
-			}
 		}
 	} else {
 		// Non-initialize requests stream normally
@@ -318,6 +338,7 @@ type initWriter struct {
 	id            json.RawMessage
 	sid           string
 	onCommit      func() // ends the upstream initialize stream after commit
+	onReady       func(string)
 	header        http.Header
 	status        int
 	mode          string // "undecided", "buffer", or "sse"
@@ -360,12 +381,7 @@ func (w *initWriter) Write(p []byte) (int, error) {
 	}
 
 	if w.committed {
-		// Stream through with flushing
-		n, err := w.real.Write(p)
-		if err == nil {
-			_ = http.NewResponseController(w.real).Flush()
-		}
-		return n, err
+		return len(p), nil
 	}
 
 	// Still deciding: buffer and parse
@@ -394,10 +410,8 @@ func (w *initWriter) Write(p []byte) (int, error) {
 
 	// If decision made, commit
 	if w.committed {
-		w.commitSSE()
-		// The client has its result. End the initialize stream so the handler
-		// returns and the session leaves its busy state; a keep-open upstream
-		// would otherwise hold it until the request deadline.
+		// End the upstream stream now; the gateway flushes the result after
+		// this handler returns and releases the session.
 		if w.onCommit != nil {
 			w.onCommit()
 		}
@@ -411,10 +425,7 @@ func (w *initWriter) Write(p []byte) (int, error) {
 }
 
 func (w *initWriter) Flush() {
-	// Only flush if committed; buffer mode does no-op, SSE streaming handled in Write
-	if w.committed {
-		_ = http.NewResponseController(w.real).Flush()
-	}
+	// The gateway flushes after the upstream handler returns.
 }
 
 func (w *initWriter) parseSSEEvents() {
@@ -492,7 +503,7 @@ func (w *initWriter) parseSSEEvents() {
 				eventLines := bytes.Split(normalized, []byte("\n"))
 
 				if w.processSSEEvent(eventLines) {
-					w.committed = true
+					w.commit()
 					return
 				}
 			}
@@ -602,8 +613,22 @@ func (w *initWriter) reject() {
 	w.rejected = true
 }
 
-func (w *initWriter) commitSSE() {
+func (w *initWriter) commit() {
 	w.upstreamID = w.header.Get("Mcp-Session-Id")
+	w.committed = true
+}
+
+func (w *initWriter) ready() {
+	if w.onReady == nil {
+		return
+	}
+	onReady := w.onReady
+	w.onReady = nil
+	onReady(w.upstreamID)
+}
+
+func (w *initWriter) commitSSE() {
+	w.ready()
 	w.writeHeaders()
 	w.real.WriteHeader(w.status)
 	_, _ = w.real.Write(w.held.Bytes())
@@ -623,13 +648,13 @@ func (w *initWriter) finalize() {
 		body := w.held.Bytes()
 
 		if validateInitializeResponse(w.status, contentType, body, w.id) {
-			w.upstreamID = w.header.Get("Mcp-Session-Id")
+			w.commit()
+			w.ready()
 			w.writeHeaders()
 			w.real.WriteHeader(w.status)
 			if len(body) > 0 {
 				_, _ = w.real.Write(body)
 			}
-			w.committed = true
 		} else {
 			// Validation failed, write as-is without session id
 			w.writeHeadersNoSession()

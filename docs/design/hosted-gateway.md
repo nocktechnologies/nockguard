@@ -35,8 +35,9 @@ environment variable in configuration, never supplied as configuration values.
 
 ## Sessions and enforcement
 
-Successful HTTP initialization creates a random gateway session handle; the
-upstream session ID stays private. Each session has a fresh enforcement gate
+Successful HTTP initialization creates and readies a random gateway session
+handle before its validated JSON or SSE result is exposed; the upstream session
+ID stays private. Each session has a fresh enforcement gate
 and card state. Policy, rate/spend limits, trust and signed audit writer are
 shared for the configured agent, so opening sessions cannot reset a quota.
 Every subsequent POST requires that handle and the same authenticated
@@ -58,6 +59,20 @@ failures and unreadable, oversized or timed-out responses report that execution
 may have occurred and must not be retried automatically.
 Origins, when supplied, must be explicitly allowed. The configured public host
 must match; forwarded identity/host headers are not trusted.
+
+The production session handler is the required-audit `HTTPListener`. Initialize
+does not write an audit row; its gate sequence is resolved before the upstream
+response body is streamed. For SSE initialize, the gateway validates and holds
+the matching result, cancels the forwarded request context, and flushes the
+result after the listener handler returns and releases its request-scoped audit
+gate. The listener's upstream HTTP request uses that context, so its streaming
+body read ends when the matching result is accepted. A new `mcp-gateway` handler
+implementation must honor request cancellation and return after its validated
+initialize result. Handlers that ignore cancellation are outside the supported
+gateway contract and can delay the client's result. Required-audit health checks can delay a request before or
+during response setup while another write is in progress; once an initialize
+stream has passed its response audit check, committing its matching result does
+not write an audit row.
 
 ## Deployment boundary
 

@@ -1,7 +1,10 @@
 package policy
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -14,6 +17,21 @@ func TestMain(m *testing.M) {
 	}
 	os.Setenv("HOME", home)
 	code := m.Run()
-	os.RemoveAll(home)
+	if err := removeHome(home); err != nil {
+		fmt.Fprintln(os.Stderr, "test home cleanup failed:", err)
+		code = 1
+	}
 	os.Exit(code)
+}
+
+// removeHome makes read-only directories (such as 0500 key dirs) writable so
+// RemoveAll can delete them, and reports any failure.
+func removeHome(home string) error {
+	_ = filepath.WalkDir(home, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			_ = os.Chmod(path, 0o700)
+		}
+		return nil
+	})
+	return os.RemoveAll(home)
 }

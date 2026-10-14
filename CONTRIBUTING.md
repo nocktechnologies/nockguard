@@ -13,11 +13,14 @@ Thanks for looking. NockGuard is small on purpose: a single Go binary that sits 
 
 ```bash
 go build ./...
-go test ./...
 go vet ./...
+test -z "$(gofmt -l internal/ cmd/)"
+go test -race ./...
+node --test cmd/nockguard-wall/index.test.js   # Wall browser tests (Node 22)
+python3 scripts/quickstart-acceptance.py       # README quickstart end to end (Linux only; CI runs it on ubuntu-latest)
 ```
 
-Go version is pinned in `go.mod`. There are no generated files and no external services required for the test suite.
+These are the checks CI runs; it also runs the `gitleaks` secret scan and `govulncheck ./...`. Go version is pinned in `go.mod`. There are no generated files and no external services required for the test suite.
 
 Before opening a pull request, run the firewall's own proof against a policy that names your agent:
 

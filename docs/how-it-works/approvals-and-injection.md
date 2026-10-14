@@ -6,7 +6,7 @@ Unix socket; a dedicated Telegram bot is also implemented. The local socket
 checks ownership and modes, but a same-uid agent can approve its own call.
 Use a separate uid or filesystem fence where that matters. Source:
 [cmd/nockguard/main.go](../../cmd/nockguard/main.go), `internal/approval/local.go`,
-[README approval guide](../../README.md#roadmap).
+[README approval guide](../../README.md#policy-rules).
 
 `inject` resolves `env:`, protected `file:` or `nockcc:` references only for
 allowed `tools/call` requests, then overwrites a named JSON argument path.
