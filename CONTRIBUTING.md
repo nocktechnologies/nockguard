@@ -30,11 +30,11 @@ go run ./cmd/nockguard selftest --policy policy.yaml
 
 ## Pull requests
 
-- One change per PR, with the reason in the description — what a user could not do before, or what could go wrong before.
+- Keep each PR focused on one issue or internal tracking card and target `next`, with the reason in the description — what a user could not do before, or what could go wrong before.
 - Add or update a test for every behavior change. Policy-engine changes need a table-driven case in `internal/policy`; audit-format changes need a round-trip through `verify`.
 - Update `CHANGELOG.md` under the unreleased heading.
 - Do not commit keys, seeds, audit logs, or anything under `~/.nockguard`. `gitleaks` runs on every PR; the baseline is `.gitleaks-baseline.json`.
-- PRs are reviewed by maintainers and an automated two-model review; both must be clean at the exact head that merges.
+- Maintainers gate an automated two-model review and the `CodeRabbit`, `build-test`, `macos-test`, `claude-review`, and `scan` checks at the exact PR head. A passing or skipped check is not a substitute for reviewing the findings. A new commit needs fresh checks and review before merge. The `ci` workflow also runs the Linux and macOS checks on pushes to both `next` and `main`.
 
 ## Reporting security issues
 
