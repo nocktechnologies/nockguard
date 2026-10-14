@@ -3,6 +3,7 @@
 # `nockguard` matched that dir, silently ignoring new source files under it).
 /nockguard
 /bin/
+/dist/
 /nockguard.new
 /nockguard-wall
 /cmd/nockguard-wall/nockguard-wall
