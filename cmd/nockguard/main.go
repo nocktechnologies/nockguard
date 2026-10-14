@@ -1600,7 +1600,7 @@ Evidence packs:
 
 Examples:
   nockguard init                                        # scaffold a default-deny starter policy
-  nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project"   # zero-config observe: --agent omitted only when no policy file exists
+  nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project"   # zero-config observe: no --policy flag and no ~/.nockguard/policy.yaml
   nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project" --agent coder --policy policy.yaml
   nockguard mcp-http --upstream https://mcp.example.com/mcp --agent coder --auth-env MCP_AUTH
   nockguard mcp-listen --listen 127.0.0.1:8790 --upstream https://mcp.example.com/mcp --agent coder --policy policy.yaml
