@@ -48,6 +48,10 @@ nockguard wall --agent coder          # open the Live Wall for coder's signed tr
 
 To exercise the blocked canary as well, run `python3 scripts/quickstart-acceptance.py` from a source checkout. This Linux CI test runs the commands above in an empty home with a local MCP stub using the filesystem server's tool names. It confirms both reads succeed, a direct `write_file` call is denied without creating a file, `verify` exits 0 with `PROTECTED`, and the signed trail records both allow and deny decisions. Denied tools are hidden from normal MCP tool discovery, so the test sends the canary call directly.
 
+The Live Wall over the trail that script writes (local stub upstream, `coder` agent): 6 records in view, 4 allowed (two `allow` and two `dispatch`), 1 rejected (the denied `write_file`) and 1 tool hidden (`write_file` in discovery). The header reads "Verification: verified" against `coder.pub`.
+
+![NockGuard Live Wall showing allowed reads, a denied write_file, a hidden write_file and a verified signed trail](docs/screenshots/wall-signed-trail.png)
+
 ### Observe first, then enforce
 
 You do not have to write a policy up front. Run in `mode: allow` with the audit trail on, let the agent work, then `policy propose` gives you an allowlist made of the tools it really used, `policy shadow-report` shows what a stricter policy *would* have denied, and you flip to `mode: deny` when the shadow window is clean. The trail you built while observing is the same trail you audit later.
