@@ -247,7 +247,7 @@ Exit codes (`runAudit` and `verifyAllAgents` in `cmd/nockguard/main.go`). The ve
 | Trail missing, and no keys, other trails or `<trail>.hwm` file | SETUP: auditing appears never to have run (a fresh install). Not a finding. A deletion that also wipes every one of those leaves the same picture; check `audit.enabled` and when the policy was deployed. |
 | Trail missing, but keys, other trails or a `.hwm` file exist | HIGH: possible deletion. Never CRITICAL, because the code reports no tamper for an absent file. Look for who removed it; if the agent has genuinely never run since `keygen`, treat it as setup. |
 
-`nockguard verify --all` checks every per-agent trail in the audit directory. It exits 2 if any trail is tampered, 1 if any trail is unverifiable or none are found (`NO_TRAILS`, which is not protection), and 0 only when all are intact. It cannot see a trail that was deleted: that trail is not in the glob. Run it as `STATUS=0; nockguard verify --all || STATUS=$?` and map `$STATUS` the same way.
+`nockguard verify --all` checks every per-agent trail in the audit directory. It exits 2 if any trail is tampered, 1 if any trail is empty (`NO_ROWS`), past its signed checkpoint (`UNANCHORED`) or unverifiable, or if none are found (`NO_TRAILS`; none of these is protection), and 0 only when all are intact. It cannot see a trail that was deleted: that trail is not in the glob. Run it as `STATUS=0; nockguard verify --all || STATUS=$?` and map `$STATUS` the same way.
 
 ## Step 5 — Report
 
