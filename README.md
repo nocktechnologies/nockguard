@@ -39,6 +39,10 @@ The generated policy allows `coder` to call the filesystem server's `read_file` 
 }
 ```
 
+The Live Wall after the steps below, with the stub-backed quickstart's signed trail: two reads allowed, the `write_file` canary denied, and the `write_file` tool hidden from discovery. Verification reads `verified` against `coder.pub`.
+
+![NockGuard Live Wall showing allowed reads, a denied write_file and a verified signed trail](docs/screenshots/wall-signed-trail.png)
+
 Ask your MCP client to call `read_file` with `{"path":"<QS>/hello.txt"}`: it should return `NockGuard read succeeded`. Each `tools/call` routed through this proxy is policy-checked; with auditing enabled and the per-agent key available, its decision is recorded in a signed audit trail. After the call, run:
 
 ```bash

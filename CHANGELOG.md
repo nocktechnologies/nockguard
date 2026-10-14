@@ -4,6 +4,9 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Documentation
+- README shows the Live Wall over a real signed trail, CONTRIBUTING lists the checks CI runs (`gofmt`, `go test -race`, the Wall browser test and the quickstart acceptance), and the approvals page links to the README policy rules section.
+
 ### Fixed
 - `mcp-gateway` releases an SSE initialize session before delivering its matching result, so an immediate follow-up does not receive a spurious `429 gateway busy`.
 
