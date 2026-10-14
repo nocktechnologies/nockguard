@@ -28,9 +28,10 @@ git merge-base --is-ancestor origin/next "$release_candidate_head"
 
 Stop on a nonzero exit; merge any missing release fixes into the candidate and
 repeat its gate before proceeding. After this check, record the full SHA from
-`git rev-parse origin/next`. Update that record
-after every incorporated release fix (and after metadata changes made on
-`next`). Call this recorded commit `release_next_head` in the steps below.
+`git rev-parse origin/next`. After every incorporated release fix or metadata
+change on `next`, repeat the fetch, set `release_candidate_head` to the new
+gated release PR head, rerun the ancestry check, and then record the full SHA.
+Call this recorded commit `release_next_head` in the steps below.
 Require the same exact-head reviews and checks on that PR, then wait for the checks on the
 resulting `main` head before tagging. Branch rules are maintained separately;
 do not weaken existing protections to make promotion pass.
