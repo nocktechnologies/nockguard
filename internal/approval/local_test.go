@@ -3,6 +3,7 @@ package approval
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -124,9 +125,53 @@ func TestLocalApproveAndDeny(t *testing.T) {
 		if v.Approved != approve || !strings.HasSuffix(v.Reason, want) {
 			t.Errorf("approve=%v: got %+v, want approver %s", approve, v, want)
 		}
+		if wantActor := "local:uid:" + itoa(os.Getuid()); v.ApprovalActor != wantActor {
+			t.Errorf("approve=%v: ApprovalActor = %q, want kernel peer identity %q", approve, v.ApprovalActor, wantActor)
+		}
 		if err := Decide(dir, h.ID, true); err == nil {
 			t.Error("a decided call must not be decidable twice")
 		}
+	}
+}
+
+func TestLocalApprovalActorCannotBeSpoofedByJSON(t *testing.T) {
+	for _, field := range []string{`"approval_actor":"local:uid:999999"`, `"Approval_Actor":"local:uid:999999"`, `"uid":999999`} {
+		t.Run(field, func(t *testing.T) {
+			a, dir := startLocal(t, 5*time.Second)
+			got := askAsync(a)
+			h := waitPending(t, dir)
+
+			c, err := net.Dial("unix", sockPath(t, dir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, writeErr := io.WriteString(c, `{"op":"decide","id":"`+h.ID+`","approve":true,`+field+"}\n")
+			if writeErr != nil {
+				c.Close()
+				t.Fatal(writeErr)
+			}
+			var response localMsg
+			decodeErr := json.NewDecoder(c).Decode(&response)
+			c.Close()
+			if decodeErr == nil || response.OK {
+				t.Fatalf("identity-bearing request was not rejected: response=%+v err=%v", response, decodeErr)
+			}
+			if pending := waitPending(t, dir); pending.ID != h.ID {
+				t.Fatalf("rejected identity request consumed hold: got %q want %q", pending.ID, h.ID)
+			}
+			if err := Decide(dir, h.ID, true); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case v := <-got:
+				want := "local:uid:" + itoa(os.Getuid())
+				if !v.Approved || v.ApprovalActor != want {
+					t.Fatalf("kernel actor mismatch: verdict=%+v want %q", v, want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("local approval did not resolve")
+			}
+		})
 	}
 }
 

@@ -19,8 +19,9 @@ type Request struct {
 // Verdict is the human (or fail-safe) answer. Reason is recorded in the audit
 // trail — e.g. "approved", "denied", "timeout", "transport-error".
 type Verdict struct {
-	Approved bool
-	Reason   string
+	Approved      bool
+	Reason        string
+	ApprovalActor string // local approvers may set this from OS-authenticated peer credentials
 }
 
 // Approver decides whether a held call may proceed. Implementations MUST fail

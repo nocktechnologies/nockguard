@@ -3,10 +3,19 @@
 An enabled audit writes JSONL decisions with a hash chain. Ed25519 signs the
 trail when a signing key is configured. Rows include agent, tool, decision,
 reason and limited extracted references, never raw arguments or response
-payloads. `verify --agent`, `--all`, `--session` and `--export` have distinct
+payloads. Locally approved decisions may also include the signed
+`approval_actor` scalar `local:uid:<decimal>`, sourced from the OS-reported Unix
+peer UID. The decimal is canonical and bounded to uint32, and the field is
+valid only on `approval-granted` or `approval-denied` rows; verifiers reject
+other values. It names an approver uid, not the tool caller, a human, PID, or
+executable. Other approval paths omit it. `verify --agent`, `--all`, `--session` and `--export` have distinct
 scopes; see the [CLI contract](../specs/cli-policy.md) and
 [export proof limits](../verifying-the-trail.md). Rolling back a valid local
 trail together with its signed head requires an external anchor to detect.
+The field is additive and omitted when unavailable, so pre-existing signed
+trail lines continue to verify. Older NockGuard versions cannot validate rows
+that carry `approval_actor`; use a verifier that understands the field for new
+local-approval rows.
 Source: `internal/audit/audit.go`, `internal/audit/export.go`.
 
 Local `proxy` and `mcp-listen` require a durable `dispatch` row before
