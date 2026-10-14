@@ -400,7 +400,6 @@ func (w *initWriter) Write(p []byte) (int, error) {
 
 	// If decision made, commit
 	if w.committed {
-		w.upstreamID = w.header.Get("Mcp-Session-Id")
 		// End the upstream stream now; the gateway flushes the result after
 		// this handler returns and releases the session.
 		if w.onCommit != nil {
@@ -494,7 +493,7 @@ func (w *initWriter) parseSSEEvents() {
 				eventLines := bytes.Split(normalized, []byte("\n"))
 
 				if w.processSSEEvent(eventLines) {
-					w.committed = true
+					w.commit()
 					return
 				}
 			}
@@ -604,6 +603,11 @@ func (w *initWriter) reject() {
 	w.rejected = true
 }
 
+func (w *initWriter) commit() {
+	w.upstreamID = w.header.Get("Mcp-Session-Id")
+	w.committed = true
+}
+
 func (w *initWriter) commitSSE() {
 	w.writeHeaders()
 	w.real.WriteHeader(w.status)
@@ -624,13 +628,12 @@ func (w *initWriter) finalize() {
 		body := w.held.Bytes()
 
 		if validateInitializeResponse(w.status, contentType, body, w.id) {
-			w.upstreamID = w.header.Get("Mcp-Session-Id")
 			w.writeHeaders()
 			w.real.WriteHeader(w.status)
 			if len(body) > 0 {
 				_, _ = w.real.Write(body)
 			}
-			w.committed = true
+			w.commit()
 		} else {
 			// Validation failed, write as-is without session id
 			w.writeHeadersNoSession()
