@@ -60,6 +60,20 @@ may have occurred and must not be retried automatically.
 Origins, when supplied, must be explicitly allowed. The configured public host
 must match; forwarded identity/host headers are not trusted.
 
+The production session handler is the required-audit `HTTPListener`. Initialize
+does not write an audit row; its gate sequence is resolved before the upstream
+response body is streamed. For SSE initialize, the gateway validates and holds
+the matching result, cancels the forwarded request context, and flushes the
+result after the listener handler returns and releases its request-scoped audit
+gate. The listener's upstream HTTP request uses that context, so its streaming
+body read ends when the matching result is accepted. A new `mcp-gateway` handler
+implementation must honor request cancellation and return after its validated
+initialize result. Handlers that ignore cancellation are outside the supported
+gateway contract and can delay the client's result. Required-audit health checks can delay a request before or
+during response setup while another write is in progress; once an initialize
+stream has passed its response audit check, committing its matching result does
+not write an audit row.
+
 ## Deployment boundary
 
 The command binds explicit loopback only. A co-located HTTPS ingress or tunnel
