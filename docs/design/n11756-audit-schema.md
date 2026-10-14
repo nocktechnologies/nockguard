@@ -1,0 +1,91 @@
+# N11756: action-aware audit schema design
+
+**Status:** design for review; no runtime behavior changes in this document-only change.  
+**Base reviewed:** `next` at `cc4841935f4b6bfe7dd072a5c06ae17eed75fc37`.
+
+## Purpose and limits
+
+The current trail answers which policy decision NockGuard recorded. This design adds correlation for one tool-call attempt, the proxy's terminal observation, and the tool definition that was observed and optionally pinned. It must preserve the existing rule that an audit row is not proof that an upstream side effect completed. A matching MCP response is only a response observed by NockGuard. After a dispatch, timeout, cancellation, transport loss, or proxy crash leaves remote execution unknown; callers must not automatically retry.
+
+Do not log tool arguments, result content, prompts, schemas, credentials, raw JSON-RPC request IDs, or response bodies. Hashes and typed status codes are sufficient. Existing `PROTECTED` remains an integrity verdict only; it is never a completeness or execution verdict.
+
+## Current behavior
+
+`audit.Event` is marshaled as a Go struct, signed over every non-`sig` field, and chained to the prior signature. Signed appends coordinate across processes with a file lock. A signed `.hwm` sidecar commits the global shared-trail count and tail signature. `Verify` / `VerifyEd25519` unmarshal each line into the typed `Event`, marshal it again, and verify that canonical serialization. [Event and signing](../../internal/audit/audit.go), [verification](../../internal/audit/audit.go).
+
+The stdio proxy durably records `dispatch` before forwarding when auditing is enabled; later `allow`/related records may be deferred until the response path resolves. The HTTP listener uses the same gate. The gateway shares one audit writer across session-specific gates and durably writes dispatch before forwarding. The documented meaning is explicit: dispatch proves authorization to forward, not execution. [stdio dispatch](../../internal/proxy/stdio.go), [HTTP listener dispatch](../../internal/proxy/httplisten.go), [gateway audit boundary](hosted-gateway.md#customer-setup).
+
+The current `Event` has no action ID, run nonce/sequence, terminal observation, or tool-definition digest. A single JSONL trail may have multiple writers and interleaved runs, while `.hwm` counts the whole file, not one run. See [current event fields](../../internal/audit/audit.go) and [README audit contract](../../README.md#audit-trail-phase-4).
+
+## Version 2 wire shape
+
+Keep schema v1 implicit: legacy rows have no `schema_version` and continue to use the current field set. A v2 row has integer `schema_version: 2` and a `record_type` discriminator. Dispatch on the version before signature verification. Missing version means v1; explicit `1`, null, strings, fractional numbers, and every unsupported version are rejected. Existing required fields (`ts`, `agent`, `tool`, `decision`) remain present for a single typed Go representation. Run lifecycle rows use empty `tool` and `decision`; action observations retain the called tool and use an empty `decision`. Consumers classify rows by `record_type`, never as policy decisions in the Wall.
+
+Both versions need a lossless envelope parse before decoding into Go structs. Reject duplicate member names at every JSON object depth, unknown top-level members, and case-fold aliases of known audit field names (for example `Schema_Version` or `SIG`) before the typed decode. V2 accepts only its declared field set and exact spellings. Audit rows currently have no nested object fields; this rule prevents future nested values from silently hiding duplicate/unknown members. For the nested tool-definition object, apply its separately specified canonicalization rules below. Do not use a generic map marshal to canonicalize either version.
+
+V1 verification must retain the historical path exactly: decode to the legacy `Event`, clear `sig`, `json.Marshal` that typed value, and verify those bytes. This preserves old signatures and Go struct field order. For new readers, however, reject unknown extensions before this legacy path instead of letting typed decoding discard them. Omitted optional fields mean their zero/unknown value; an optional field with `omitempty` must be omitted when zero/empty, while required fields must be present even when their value is empty. These rules avoid two encodings for the same v2 event. Preserve existing Go field order through `KeyID`; insert N11755 `approval_actor` after `reason` and before extracted references, and place all N11756 v2 fields after `KeyID` and before `Sig`. The actor exception preserves legacy omission bytes while keeping its v1 serialization order explicit.
+
+New optional `Event` fields, all omitted when empty in v1:
+
+- `schema_version` integer; absent means v1, `2` means action-aware rows.
+- `record_type`: `run`, `decision`, or `action_observation`.
+- `run_id`: fresh cryptographically random 128-bit nonce encoded as lowercase hex, generated once per proxy process run. It contains no PID or machine identity.
+- `run_seq`: monotonically increasing uint64 for every v2 row emitted by that run, starting at 1. This is per-run order, independent of global interleaving in the shared file.
+- `run_event`: `open`, `heartbeat`, or `close` for `record_type=run`.
+- `run_count` and `run_head` on `close`: `run_count` is the number of preceding rows with this `run_id`; the close row has `run_seq=run_count+1`. `run_head` is the `sig` of the immediately preceding row for that run (empty for unsigned trails or an empty run). The signed close commits to the per-run count/head while the existing global chain and `.hwm` protect the full shared trail.
+- `action_id`: `<run_id>.<action_seq>`, with a separate increasing uint64 action counter for each parsed `tools/call` attempt. Every decision for that attempt, its `dispatch` if forwarded, and its eventual observation use the same ID. Do not derive it from a client-supplied JSON-RPC ID.
+- `observation`: terminal values are `not_forwarded`, `response_observed`, or `outcome_unknown`; `late_response_observed` is a supplemental, nonterminal fact allowed only after `outcome_unknown`. A `cause` may be `policy_denied`, `validation_blocked`, `approval_denied`, `limit_reached`, `audit_unavailable`, `timeout`, `client_cancel`, `transport_lost`, `upstream_exit`, `shutdown`, or `late_response`. For a matching response, `response_class` is only `jsonrpc_result` or `jsonrpc_error`; represent `mcp_is_error` as an optional boolean (pointer/tri-state), set only when the upstream's boolean was actually observed. Omission means unknown, never false. Never include response content. `outcome_unknown` after dispatch means exactly that; cancellation is a request, not evidence the remote server stopped.
+- `tool_hash_version`, `tool_definition_hash`, `tool_pin_hash`, and `tool_pin_status` on applicable decision/observation rows. Hash version is `jcs-rfc8785-v1`; digests are lowercase SHA-256 hex. Pin status is `matched`, `mismatch`, `unobserved`, or `unpinned`.
+- `approval_actor,omitempty` as a string matching `local:uid:(0|[1-9][0-9]*)` only on approval decision rows, sourced from the local approver's peer UID. This aligns with N11755; it is never caller supplied. Parse the decimal as the platform UID type with overflow rejection. Empty remains omitted. This field is a scalar, not an actor object.
+
+Conceptual abbreviated dispatch and timeout row subsets (signatures shown symbolically; omitted fields and key order are not canonical examples, and the observed and expected digests match):
+
+```json
+{"ts":"2026-10-13T18:00:00Z","agent":"coder","tool":"read_file","decision":"dispatch","schema_version":2,"record_type":"decision","run_id":"9f...e2","run_seq":2,"action_id":"9f...e2.1","tool_hash_version":"jcs-rfc8785-v1","tool_definition_hash":"a1...7c","tool_pin_hash":"a1...7c","tool_pin_status":"matched","sig":"..."}
+{"ts":"2026-10-13T18:05:00Z","agent":"coder","tool":"read_file","decision":"","schema_version":2,"record_type":"action_observation","run_id":"9f...e2","run_seq":3,"action_id":"9f...e2.1","observation":"outcome_unknown","cause":"timeout","sig":"..."}
+```
+
+The writer serializes global-chain and per-run state changes under the same ordered file lock. It proposes the next `run_seq` and previous `run_head`, then advances in-memory counters/head only after the complete row and corresponding shared-trail checkpoint, when configured, are durably appended. Any append or fsync error latches the run as degraded: stop accepting/forwarding calls, do not reuse sequence state, and never emit a clean close even if storage recovers. Never wrap a uint64; if a run counter is exhausted, stop that run and require a fresh nonce. `run/open` must be durably appended before the v2 producer accepts or forwards calls. Heartbeats are periodic for long-lived runs and also advance `run_seq`; lack of a recent heartbeat indicates stale/unavailable liveness, never proof of a crash time. On shutdown, stop accepting calls, wait only for a bounded grace period, append `outcome_unknown` for still-tracked dispatched calls when possible, then durably append `run/close` only if the run is not degraded. A hard crash or degraded run remains open. Runs never resume across process restart; a restart creates a fresh nonce.
+
+For every attempted call, assign an `action_id` before policy evaluation. Its valid lifecycle is a decision sequence followed by either one `not_forwarded` observation, or a durable `dispatch` followed by one terminal observation: `response_observed` for a matching response, or `outcome_unknown` for timeout, disconnect, client cancellation, invalid/missing response, upstream exit, or bounded shutdown. Never forward unless dispatch is durable. After `outcome_unknown`, a later matching response is an additional nonterminal `late_response_observed` fact; it does not rewrite the terminal row or claim the upstream side effect succeeded. The analyzer requires exactly one terminal observation per durably recorded dispatch, permits only this documented supplemental late-response fact, and checks all recorded rows are accounted for. `LIMITED` may include `outcome_unknown`: it means the signed observation stream is complete, not that remote execution is known. A run may close only after the producer has stopped accepting calls and recorded all observations it can make for in-flight calls. On any row/checkpoint append or fsync failure, latch the run as degraded, stop accepting/forwarding calls, do not advance/reuse sequence state, and never emit a clean close even if storage recovers. An open degraded run is `INCOMPLETE`. An attempted call that failed before its first durable row is not visible in the trail; no analyzer can certify its absence, so `LIMITED` describes only the internally complete recorded stream and never proves that every attempted call was recorded.
+
+## Tool-definition digest and operator pins
+
+Hash the complete tool definition object as received, including `name`, `description`, `inputSchema`, optional `outputSchema`, annotations, title, `_meta`, and extension members. Use strict RFC 8785 canonical JSON and SHA-256 with a domain prefix (`nockguard:mcp-tool:jcs-rfc8785-v1\0`). Reject duplicate JSON member names recursively, case-fold aliases of protocol-level Tool structural fields, duplicate tool names in a page, malformed objects, and unsupported canonicalization input; never let parser differences silently produce a trusted digest. RFC 8785 requires unique object names and numbers representable as IEEE-754 doubles, so pin mode must reject inputs outside that profile rather than round them silently. Nested schema property names are data and remain case-sensitive. The raw schema is not written to the audit trail.
+
+Pins are operator-authored, static policy data, scoped by stable upstream ID and exact tool name, for example:
+
+```yaml
+agents:
+  coder:
+    tool_pins:
+      filesystem-local:
+        read_file:
+          hash_version: jcs-rfc8785-v1
+          sha256: a1...7c
+```
+
+A configured pin is never learned or updated from `tools/list`. In strict pin mode, a missing pin, unseen definition, duplicate/invalid definition, or digest mismatch fails closed even if a broad name allow rule matches. `tools/list` must not advertise mismatched pinned tools as usable, and direct `tools/call` must independently enforce the same pin. Re-listing may refresh the observed digest but cannot change the expected digest. Only a reviewed operator policy update can approve a new definition. Existing policies without pins retain their current behavior unless strict pinning is explicitly enabled.
+
+The scope key must distinguish upstreams; agent name plus tool name is insufficient when an agent policy is reused against different servers. Use an explicit stable upstream ID, not a command string that may include secrets or host-specific paths. For HTTP sessions, scope the observed catalog to the relevant upstream MCP session and never share observed definitions across unrelated sessions.
+
+Build each catalog as a distinct generation: accumulate all pages until `nextCursor` is absent, and publish it atomically only when complete. Bound page count, tool count, response size, and cursor length; reject repeated cursors/cycles, duplicate tool names across any pages, malformed entries, or a bound breach without publishing a partial generation. Calls in strict pin mode fail closed until a complete generation is available; do not combine pages or definitions from different generations. On `notifications/tools/list_changed`, invalidate the published observed generation immediately, stop advertising its tools, and re-list from the first page. Calls remain blocked until the new generation completes and each applicable pin is checked. A relist may change observed hashes, never operator pins.
+
+## Completeness assessment
+
+Add a separate analyzer result; do not change `verify`'s integrity `PROTECTED` verdict. Suggested values:
+
+- `LIMITED`: the best possible status, requiring a valid signed/checkpointed v2 trail, a matching open/close nonce, contiguous `run_seq`, close count/head match, no rows after close, and exactly one applicable terminal observation per durably recorded dispatch with no unaccounted lifecycle rows. It may contain `outcome_unknown` actions; it means **the recorded signed observation stream is internally complete for this run**, not that every attempted call was recorded or remote outcomes are known. An upstream response proves only that NockGuard observed a response, not that a side effect completed.
+- `IN_PROGRESS`: valid open run with recent heartbeat and no close yet.
+- `INCOMPLETE`: a signed v2 run is stale/open, lacks close, has a gap/count/head mismatch, has a dispatch without terminal observation, or has an ambiguous action lifecycle.
+- `UNASSESSABLE`: legacy-only trail, unsigned trail, mixed/unknown producer records that cannot be assigned to a run, unsupported schema, or unavailable verification. Signature/checkpoint failure remains `TAMPERED`/`UNVERIFIABLE` from the existing integrity verifier and must never be upgraded by the analyzer.
+
+The analyzer scans the full shared trail after ordinary integrity verification, groups only by `run_id`, and validates per-run counters/head plus action lifecycles. The global `.hwm` count still covers the shared file; a run-local close summary is not a replacement for it. Old v1 rows provide no run membership or terminal evidence, so an analyzer cannot declare a legacy run complete.
+
+## Compatibility and rollout
+
+The historical v1 field set is the original `Event` plus N11755's additive `approval_actor,omitempty`. When that field and all v2 fields are empty, new readers must retain the historical typed-marshal bytes exactly. N11755 write and read validation applies to the actor field in both versions. A populated actor remains an implicit-v1 row, but an old verifier that predates N11755 will drop it and fail signature verification; disclose this compatibility boundary with N11755. New verifiers must verify actor-bearing v1 rows and v2 against their respective typed shapes. Add golden tests proving old signed HMAC and Ed25519 fixtures still verify and serialize byte-for-byte, plus tests for duplicate keys at nested depths, unknown keys, case aliases, omitted/default fields, explicit v1, and unknown versions.
+
+**Do not enable v2 writers before readers.** Compatibility is directional. A new strict verifier must read historical v1 rows, reject unrecognized v1 extensions, and verify v2 rows. An old typed verifier reading a populated v2 row drops added fields, re-marshals without them, and fails the signature that covered them. An old verifier may silently accept an unsigned unknown field appended to a v1 line because typed decoding discards it; the new strict reader closes that gap. Older UI/report readers may ignore fields and misclassify lifecycle rows even where they do not verify signatures. Ship and release v1/v2-aware verification, Wall, export, and analytics consumers first; add an explicit producer feature gate or minimum-version release boundary; stop old writers before enabling v2 on the shared trail. Mixed v1/v2 trails remain verifiable by new readers, but completeness is `UNASSESSABLE` where a producer/run cannot be scoped safely. Document that older binaries cannot verify trails containing v2 rows.
+
+No raw argument/result logging, scanner-based approval, learned policy, or automatic pin mutation is part of this design. Related follow-up cards: N11755 (local approval actor), N11757 (reader-first compatibility and opt-in writer pairing), N11758, N11759 (run lifecycle needed before activating completeness), and N11760. Ship N11757 readers and the opt-in pairing independently; keep activation gated until N11759 supplies lifecycle records so reader rollout does not depend on lifecycle implementation. The cards should own implementation and consumer rollout; this document does not assume any other split.
