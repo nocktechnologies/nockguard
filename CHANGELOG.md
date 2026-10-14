@@ -12,6 +12,7 @@ All notable changes to NockGuard are documented here.
 - Build CI and release archives with Go 1.26.9 and gate source and release binaries with `govulncheck`.
 - `nockguard proxy` now starts a one-second shutdown deadline when the upstream dies, even while the client holds stdin open or stops reading stdout. It sends JSON-RPC `-32603` errors for in-flight requests when the client can receive them, then stops the upstream process group and exits nonzero.
 - `verify --agent` now verifies an explicitly supplied `--audit` file instead of silently checking the agent's default trail.
+- The stdio proxy registers response correlation before writing a request upstream, and clears pending state and resolves its audit sequence when the write fails.
 
 ### Changed
 - The Wall no longer scrolls horizontally on narrow screens (390 px): filters and tiles wrap, feed rows stack, and the evidence scope notes sit behind an "Evidence details" toggle on narrow screens (open by default on wide ones).
