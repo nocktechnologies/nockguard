@@ -11,12 +11,16 @@ and macOS checks on pushes to both `next` and `main`.
 
 Prepare the version and changelog on `next`, or on a short-lived
 `release/vX.Y.Z` branch cut from `next` that carries only the release metadata
-listed in step 1. Freeze `next` from the release-branch cut through the
-post-release `main`-to-`next` back-sync. During the freeze, only Mira-gated
+listed in step 1. Freeze `next` when release preparation starts: before
+preparing metadata directly on `next`, or before cutting a release branch.
+Keep the freeze through the post-release `main`-to-`next` back-sync. During the freeze, only Mira-gated
 release-fix card PRs may merge into `next`; a maintainer must incorporate each
 fix into the release candidate and rerun its exact-head review and checks before
 promotion. No builder merges into `next` during the freeze. Promote the prepared
-branch with a squash PR to `main`.
+branch with a squash PR to `main`. Before promotion, record in the release PR
+body the exact `next` commit included in the final candidate. Update that record
+after every incorporated release fix (and after metadata changes made on
+`next`). Call this recorded commit `release_next_head` in the steps below.
 Require the same exact-head reviews and checks on that PR, then wait for the checks on the
 resulting `main` head before tagging. Branch rules are maintained separately;
 do not weaken existing protections to make promotion pass.
@@ -55,20 +59,34 @@ does not show already-released changes again. Do this before new, unreleased
 work arrives on `next`; if it has already arrived, stop and reconcile that work
 rather than replacing it with the release tree.
 
-From a clean checkout, fetch both branches and create a temporary branch from
-`origin/next`. Merge `origin/main` with `git merge --no-ff --no-commit origin/main`.
-Resolve every conflict to main's version from the repository root with
-`git checkout origin/main -- :/`; also stage any deletions needed to match
-main. Commit the result as a normal merge commit. Never reset or force-push
-`next`. If unreleased work has arrived on `next`, stop without pushing or
-replacing its tree; resume only after a maintainer reconciles it through a
-reviewed path.
+From a clean checkout, fetch both branches. Set `release_next_head` to the
+recorded commit from the gated release PR. **Before creating the merge or
+replacing any files**, check:
 
-Before pushing, compare `git rev-parse 'origin/main^{tree}'` with
-`git rev-parse 'HEAD^{tree}'`. They must be equal. Confirm `origin/next` has not
-advanced, then push the merge commit with `git push origin HEAD:next` through
-the administrator bypass in the `next-batch-gate` ruleset. This release
-back-sync is the one direct push to `next`; every other change arrives by PR.
+```bash
+git log --oneline "$release_next_head"..origin/next
+test "$(git rev-parse origin/next)" = "$release_next_head"
+```
+
+The log must be empty and the equality check must pass. If the record is
+missing, next differs, or any command fails, stop without merging, replacing
+files or pushing. A maintainer must reconcile that work through a reviewed path.
+
+Only after this check, create a temporary branch from `origin/next`. Merge
+`origin/main` with `git merge --no-ff --no-commit origin/main`. Resolve conflicts
+to main's version from the repository root with `git checkout origin/main -- :/`;
+also stage any deletions needed to match main. Commit as a normal merge commit.
+Never reset or force-push `next`.
+
+Compare `git rev-parse 'origin/main^{tree}'` with `git rev-parse 'HEAD^{tree}'`.
+They must be equal. This checks the merge result only; it does not detect
+unreleased work, which is why the earlier commit check is mandatory. Fetch
+`next` again and repeat the equality check against `release_next_head` before
+pushing. If it advanced, stop. Otherwise push with `git push origin HEAD:next`
+through the administrator bypass in the `next-batch-gate` ruleset. A normal
+push will reject a concurrent non-fast-forward update; never override that
+rejection. This release back-sync is the one direct push to `next`; every other
+change arrives by PR.
 
 Source: `.github/workflows/release-assets.yml`,
 `scripts/build-release-assets.sh`, `scripts/check-release-version.sh`.
