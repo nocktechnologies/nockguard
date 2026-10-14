@@ -6,12 +6,12 @@ dispatches commands and lists their flags in `printUsage`.
 | Command | Purpose |
 | --- | --- |
 | `init [--policy PATH] [--force]` | Write the starter policy. |
-| `proxy --upstream CMD [--agent NAME] [--policy PATH]` | Gate one stdio MCP server; without an explicit policy or default file, starts observe mode. |
-| `mcp-http --upstream URL --agent NAME [--policy PATH] [--auth-env ENV]` | Observe-only stdio-to-HTTP bridge. |
-| `mcp-listen --listen 127.0.0.1:PORT --upstream URL --agent NAME [--policy PATH] [--audit PATH]` | Local HTTP enforcement listener. |
+| `proxy --upstream CMD [--agent NAME] [--policy PATH] [--audit-best-effort]` | Gate one stdio MCP server; without an explicit policy or default file, starts observe mode. |
+| `mcp-http --upstream URL --agent NAME [--policy PATH] [--auth-env ENV] [--audit-best-effort]` | Observe-only stdio-to-HTTP bridge. |
+| `mcp-listen --listen 127.0.0.1:PORT --upstream URL --agent NAME [--policy PATH] [--audit PATH] [--audit-best-effort]` | Local HTTP enforcement listener. |
 | `mcp-gateway --config PATH` | Single-agent OAuth resource gateway; see [gateway contract](../design/hosted-gateway.md). |
 | `wall [--agent NAME] [--audit PATH] [--demo]` | Launch the companion Live Wall binary; see [Install](../../README.md#install) for both binaries. |
-| `egress-proxy --listen ADDR --agent NAME --policy PATH [--audit PATH] [--enforce]` | Explicit HTTP/CONNECT proxy; policy observe-only without `--enforce`. |
+| `egress-proxy --listen ADDR --agent NAME [--policy PATH] [--audit PATH] [--enforce]` | Explicit HTTP/CONNECT proxy; policy observe-only without `--enforce`. |
 | `verify` / `audit verify` | Verify one trail via `--agent`, `--key-env`, or `--ed25519-pub-env`; `--all`, `--session` and `--export` select their own modes. |
 | `selftest [--policy PATH] [--json]` | Synthetic positive-control enforcement check. |
 | `policy check --policy PATH` | Load the file with the proxy's loader and nothing else; exit 0 loaded (warnings go to stderr), 1 not. |
@@ -21,6 +21,11 @@ dispatches commands and lists their flags in `printUsage`.
 | `approvals list\|approve ID\|deny ID\|prune` | Operate local-socket approvals. |
 | `keygen [--agent NAME] [--force] [--print-env]` | Write one keypair; `--print-env` prints the secret seed and public key as env assignments instead of writing files. |
 | `version`, `--help`, `-h` | Print version or usage. |
+
+`--audit-best-effort` is available only on local `proxy`, `mcp-http`, and
+`mcp-listen`; it allows calls through after local audit-write failures,
+weakening fail-closed audit enforcement. `mcp-gateway` has no such option and
+requires auditing to be enabled.
 
 Default policy: `~/.nockguard/policy.yaml`; default audit root:
 `~/.nockguard/logs/`. `verify --agent NAME` uses the per-agent trail and
@@ -38,7 +43,7 @@ Top level `audit` is optional. Source: [internal/policy/policy.go](../../interna
 | --- | --- |
 | `agents.<name>.allow`, `deny`, `ask`, `shadow`, `require_approval` | Tool patterns; `deny` wins, `ask` holds, `shadow` observes, `require_approval` is the legacy gate. |
 | `agents.<name>.mode` | Explicit `allow` permits tools without an allow list; `deny` blocks them. Omitted mode and no allow list deny by default; an allow list denies unmatched tools. |
-| `agents.<name>.fail_mode` | `deny` (default) or `ask` for ambiguous tool calls. |
+| `agents.<name>.fail_mode` | `deny` (default) or `ask` for malformed or ambiguous `tools/call` messages. |
 | `agents.<name>.validate_input` | Opt-in `sqli`, `path_traversal`, `secrets` categories. |
 | `agents.<name>.block_params` | Custom argument regexes. |
 | `agents.<name>.rate_limit` | `max_calls` and positive Go-duration `window`; sliding window. |
