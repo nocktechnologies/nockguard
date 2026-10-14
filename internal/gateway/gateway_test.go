@@ -122,6 +122,16 @@ func request(g *Gateway, body, sid string, tweak func(*http.Request)) *httptest.
 	return w
 }
 
+type flushObserver struct {
+	*httptest.ResponseRecorder
+	onFlush func()
+}
+
+func (w *flushObserver) Flush() {
+	w.ResponseRecorder.Flush()
+	w.onFlush()
+}
+
 func TestAuthenticationFailsClosed(t *testing.T) {
 	c := testConfig(t)
 	cases := map[string]func(map[string]interface{}){
@@ -1155,8 +1165,6 @@ func TestSSEParserCRLFSplitMidEventNoPhantomBlankLine(t *testing.T) {
 // without the upstream ever closing the initialize stream on its own.
 func TestSSEInitializeKeepOpenReleasesSession(t *testing.T) {
 	c := testConfig(t)
-	finished := make(chan struct{})
-	defer close(finished)
 	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Mcp-Session-Id") != "" {
@@ -1167,10 +1175,7 @@ func TestSSEInitializeKeepOpenReleasesSession(t *testing.T) {
 			w.Header().Set("Mcp-Session-Id", "upstream-session-id")
 			fmt.Fprint(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n")
 			w.(http.Flusher).Flush()
-			select { // keep-open upstream: only a cancelled request ends this
-			case <-finished:
-			case <-r.Context().Done():
-			}
+			<-r.Context().Done()
 		})
 	})
 	server := httptest.NewServer(g)
@@ -1215,5 +1220,146 @@ func TestSSEInitializeKeepOpenReleasesSession(t *testing.T) {
 	g.mu.Unlock()
 	if s == nil || s.upstreamID != "upstream-session-id" {
 		t.Fatalf("upstream session id not installed after initialize: %+v", s)
+	}
+}
+
+// A client can send its next request as soon as the initialize result flushes.
+// Probe that exact handoff instead of relying on HTTP scheduling to expose it.
+func TestSSEInitializeFollowupAtFlush(t *testing.T) {
+	c := testConfig(t)
+	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Mcp-Session-Id") != "" {
+				fmt.Fprint(w, `{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}`)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Mcp-Session-Id", "upstream-session-id")
+			fmt.Fprint(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n")
+			<-r.Context().Done()
+		})
+	})
+	w := &flushObserver{ResponseRecorder: httptest.NewRecorder()}
+	flushed := false
+	w.onFlush = func() {
+		flushed = true
+		sid := w.Header().Get("Mcp-Session-Id")
+		if sid == "" {
+			t.Fatal("initialize result flushed without a session id")
+		}
+		if got := request(g, list, sid, nil).Code; got != http.StatusOK {
+			t.Fatalf("follow-up at initialize flush got %d, want 200", got)
+		}
+	}
+	r := httptest.NewRequest(http.MethodPost, "https://guard.example/mcp", strings.NewReader(initialize))
+	r.Header.Set("Authorization", "Bearer connector-test-token")
+	g.ServeHTTP(w, r)
+	if !flushed {
+		t.Fatal("initialize result was not flushed")
+	}
+}
+
+func TestSSEInitializeIncompleteEventAtEOFHasNoSession(t *testing.T) {
+	c := testConfig(t)
+	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Mcp-Session-Id", "upstream-session-id")
+			fmt.Fprint(w, `data: {"jsonrpc":"2.0","id":1,"result":{}}`)
+		})
+	})
+	w := request(g, initialize, "", nil)
+	if w.Header().Get("Mcp-Session-Id") != "" {
+		t.Fatal("incomplete SSE event created a session")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.sessions) != 0 {
+		t.Fatal("incomplete SSE event retained a session")
+	}
+}
+
+func TestSSEInitializeAuditedListenerKeepOpen(t *testing.T) {
+	c := testConfig(t)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditor, err := audit.New(filepath.Join(t.TempDir(), "audit.jsonl"), audit.WithEd25519Key(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer auditor.Close()
+	engine, err := policy.LoadBytes([]byte("agents:\n  mira:\n    mode: allow\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Mcp-Session-Id") != "" {
+			if r.Header.Get("Mcp-Session-Id") != "private-upstream-session" {
+				t.Error("follow-up did not carry the private upstream session ID")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":2,"result":{"description":"ok","messages":[]}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Mcp-Session-Id", "private-upstream-session")
+		fmt.Fprint(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n")
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-stop:
+		}
+	}))
+	defer upstream.Close()
+	defer close(stop)
+	logger := log.New(io.Discard, "", 0)
+	g := newTestGateway(t, c, validAuth(t, c), func() http.Handler {
+		gate := proxy.NewStdioProxy(nil, c.Agent, engine, nil, nil, auditor, nil, logger)
+		return proxy.NewHTTPListener("", upstream.URL, gate, logger).
+			WithUpstreamAgentToken("test-upstream-credential").WithRequiredAudit()
+	})
+	server := httptest.NewServer(g)
+	defer server.Close()
+	client := &http.Client{Timeout: 2 * time.Second}
+	initReq, err := http.NewRequest(http.MethodPost, server.URL+"/mcp", strings.NewReader(initialize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	initReq.Host = "guard.example"
+	initReq.Header.Set("Authorization", "Bearer connector-test-token")
+	initResp, err := client.Do(initReq)
+	if err != nil {
+		t.Fatalf("audited initialize did not return promptly: %v", err)
+	}
+	defer initResp.Body.Close()
+	sid := initResp.Header.Get("Mcp-Session-Id")
+	if initResp.StatusCode != http.StatusOK || sid == "" {
+		t.Fatalf("audited initialize returned %d with session ID %q", initResp.StatusCode, sid)
+	}
+	line, err := bufio.NewReader(initResp.Body).ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, "data: ") {
+		t.Fatalf("audited initialize result was not delivered: %q %v", line, err)
+	}
+	followReq, err := http.NewRequest(http.MethodPost, server.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"prompts/get","params":{"name":"demo"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	followReq.Host = "guard.example"
+	followReq.Header.Set("Authorization", "Bearer connector-test-token")
+	followReq.Header.Set("Mcp-Session-Id", sid)
+	followResp, err := client.Do(followReq)
+	if err != nil {
+		t.Fatalf("audited follow-up request failed: %v", err)
+	}
+	defer followResp.Body.Close()
+	if followResp.StatusCode != http.StatusOK {
+		t.Fatalf("audited follow-up got %d, want 200", followResp.StatusCode)
+	}
+	body, err := io.ReadAll(followResp.Body)
+	if err != nil || !strings.Contains(string(body), `"description":"ok"`) {
+		t.Fatalf("audited follow-up did not return the prompt result: %q %v", body, err)
 	}
 }

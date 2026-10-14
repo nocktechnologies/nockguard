@@ -4,6 +4,9 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- `mcp-gateway` releases an SSE initialize session before delivering its matching result, so an immediate follow-up does not receive a spurious `429 gateway busy`.
+
 ## [0.7.0] - 2026-10-14
 
 ### Fixed
