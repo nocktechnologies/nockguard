@@ -259,11 +259,43 @@ func (a *Auditor) verifyExisting(path string) error {
 		if !ok {
 			return fmt.Errorf("ed25519 private key has no usable public key")
 		}
-		_, err := VerifyEd25519(path, pub)
+		if _, err := VerifyEd25519(path, pub); err != nil {
+			return err
+		}
+	} else if _, err := Verify(path, a.key); err != nil {
 		return err
 	}
-	_, err := Verify(path, a.key)
-	return err
+	return a.seedRunSequences(path)
+}
+
+// seedRunSequences resumes each v2 run counter from its highest verified row.
+// This covers an append whose row reached disk but whose checkpoint update
+// failed: the verified chain may be ahead of the .hwm count after reopen.
+func (a *Auditor) seedRunSequences(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var ev Event
+		if err := json.Unmarshal(line, &ev); err != nil {
+			return fmt.Errorf("seed audit run sequences: %w", err)
+		}
+		if ev.SchemaVersion == 2 && ev.RunSeq > a.runSeqs[ev.RunID] {
+			a.runSeqs[ev.RunID] = ev.RunSeq
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("seed audit run sequences: %w", err)
+	}
+	return nil
 }
 
 // Enabled reports whether the Auditor is writing to a file. Nil-safe, so callers
@@ -339,12 +371,13 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	latchRequiredFailure := true
 	if required {
 		defer func() {
 			// The trail cannot report its own failed write. Keep an operator
 			// signal beside it for status and the Wall. Enforcement relies on
 			// requiredErr, never on this best-effort marker.
-			if err != nil {
+			if err != nil && latchRequiredFailure {
 				if a.requiredErr == nil {
 					a.requiredErr = err
 				}
@@ -372,11 +405,6 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 	if err := validateApprovalActor(ev); err != nil {
 		return err
 	}
-	if required {
-		if err = a.checkPathIdentity(); err != nil {
-			return err
-		}
-	}
 	if a.signing() {
 		// Serialize the timestamp with signed appends across processes.
 		if err := lockExclusive(a.f.Fd()); err != nil {
@@ -389,20 +417,30 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 	ev.Sig = "" // canonical content never includes the signature itself
 	if ev.SchemaVersion == 2 {
 		if !required {
+			latchRequiredFailure = false
 			return fmt.Errorf("schema v2 audit rows require durable writes")
 		}
 		if ev.RunSeq != 0 {
+			latchRequiredFailure = false
 			return fmt.Errorf("schema v2 run_seq is assigned by the auditor")
 		}
 		if a.runSeqs[ev.RunID] == ^uint64(0) {
+			latchRequiredFailure = false
 			return fmt.Errorf("schema v2 run_seq exhausted; start a new run")
 		}
 		ev.RunSeq = a.runSeqs[ev.RunID] + 1
 	} else if ev.SchemaVersion != 0 {
+		latchRequiredFailure = false
 		return fmt.Errorf("unsupported audit schema_version %d", ev.SchemaVersion)
 	}
 	if err := validateAuditEvent(ev); err != nil {
+		latchRequiredFailure = false
 		return err
+	}
+	if required {
+		if err = a.checkPathIdentity(); err != nil {
+			return err
+		}
 	}
 
 	// N10647: stamp correlation fields before the canonical bytes are computed

@@ -58,6 +58,83 @@ func TestV2RunSequenceIsUniqueUnderConcurrentRetries(t *testing.T) {
 	}
 }
 
+func TestV2RunSequenceSeedsFromTrailAfterCheckpointFailure(t *testing.T) {
+	key := []byte("v2-reopen-signing-key-0123456789")
+	runID := "00112233445566778899aabbccddeeff"
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	a, err := New(path, WithSigningKey(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(tool string) error {
+		return a.RecordRequired(Event{Agent: "mira", Tool: tool, Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: runID})
+	}
+	if err := write("first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path+".hwm.tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := write("checkpoint-fails-after-row"); err == nil {
+		t.Fatal("checkpoint failure after append returned nil")
+	}
+	if a.RequiredError() == nil {
+		t.Fatal("checkpoint failure did not latch the required writer")
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path + ".hwm.tmp"); err != nil {
+		t.Fatal(err)
+	}
+	rows := readLines(t, path)
+	if len(rows) != 2 || rows[1]["run_seq"] != float64(2) {
+		t.Fatalf("failed-checkpoint row was not present with run_seq 2: %+v", rows)
+	}
+
+	reopened, err := New(path, WithSigningKey(key))
+	if err != nil {
+		t.Fatalf("verified reopen failed: %v", err)
+	}
+	if err := reopened.RecordRequired(Event{Agent: "mira", Tool: "after-reopen", Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: runID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rows = readLines(t, path)
+	if len(rows) != 3 || rows[0]["run_seq"] != float64(1) || rows[1]["run_seq"] != float64(2) || rows[2]["run_seq"] != float64(3) {
+		t.Fatalf("reopened run sequence duplicated or skipped: %+v", rows)
+	}
+	if _, err := Verify(path, key); err != nil {
+		t.Fatalf("recovered v2 trail did not verify: %v", err)
+	}
+}
+
+func TestV2CallerValidationFailureDoesNotLatchRequiredWriter(t *testing.T) {
+	runID := "00112233445566778899aabbccddeeff"
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	a, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	invalid := Event{Agent: "mira", Tool: "", Decision: "dispatch", SchemaVersion: 2, RecordType: "decision", RunID: runID, ActionID: runID + ".1"}
+	if err := a.RecordRequired(invalid); err == nil {
+		t.Fatal("dispatch with an empty tool was accepted")
+	}
+	if err := a.RequiredError(); err != nil {
+		t.Fatalf("caller-input validation failure latched the writer: %v", err)
+	}
+	valid := Event{Agent: "mira", Tool: "safe_tool", Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: runID}
+	if err := a.RecordRequired(valid); err != nil {
+		t.Fatalf("valid write after caller-input failure failed: %v", err)
+	}
+	if rows := readLines(t, path); len(rows) != 1 || rows[0]["run_seq"] != float64(1) {
+		t.Fatalf("invalid row was written or consumed run_seq: %+v", rows)
+	}
+}
+
 func TestV2RejectsCallerSequenceAndDispatchWithoutActionID(t *testing.T) {
 	runID := "00112233445566778899aabbccddeeff"
 	for _, tc := range []struct {

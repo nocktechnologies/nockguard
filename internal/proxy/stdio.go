@@ -33,6 +33,11 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/validate"
 )
 
+type auditSequenceRange struct {
+	start uint64
+	end   uint64
+}
+
 type StdioProxy struct {
 	upstream      []string
 	agent         string
@@ -71,13 +76,13 @@ type StdioProxy struct {
 	cardMu      sync.Mutex // serializes currentCard updates
 
 	// Audit ordering: track request sequence to ensure audits are emitted in request order
-	auditSeq      uint64                    // atomic: incremented for each request to assign sequence numbers
+	auditSeq      uint64                    // next request sequence, protected by auditMutex
 	auditTodo     map[uint64][]*audit.Event // buffered audits awaiting emission in sequence order
 	auditMutex    sync.Mutex
-	auditNext     uint64              // next sequence number ready to emit
-	auditResolved map[uint64]struct{} // tracks which sequences are ready to flush
-	cardAfterSeq  map[uint64]int      // seq -> card state after that commit
-	auditWake     chan struct{}       // wakes the upstream reader when request-order audits advance
+	auditNext     uint64               // next sequence number ready to emit
+	auditResolved []auditSequenceRange // compact sorted ranges of resolved sequences
+	auditPending  map[uint64]struct{}  // allocated sequences whose audit lifecycle is unsettled
+	cardAfterSeq  map[uint64]int       // seq -> card state after that commit
 	requestIDMu   sync.Mutex
 	activeIDs     map[uint64]json.RawMessage // request ids held until their agent-facing response is delivered
 	actionPairing bool
@@ -144,8 +149,8 @@ func (p *StdioProxy) Probe(line []byte) (forwarded bool, reply []byte, err error
 	// upstream response path. This exercises the same audit queue as live traffic.
 	pending.Range(func(key, val interface{}) bool {
 		if cardVal, ok := val.(*pendingCard); ok {
-			if cardVal.tool != "" {
-				p.updateCardState(cardVal.auditSeq, cardVal.tool, &cardVal.refs)
+			if cardVal.stateTool != "" {
+				p.updateCardState(cardVal.auditSeq, cardVal.stateTool, &cardVal.stateRefs)
 			}
 			if cardVal.actionID != "" {
 				p.markActionUnknown(cardVal, "upstream_exit")
@@ -206,9 +211,8 @@ func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, valid
 		resolver:      resolver,
 		scrubber:      newScrubSet(256), // LRU capped at 256 secret values
 		auditTodo:     make(map[uint64][]*audit.Event),
-		auditResolved: make(map[uint64]struct{}),
+		auditPending:  make(map[uint64]struct{}),
 		cardAfterSeq:  make(map[uint64]int),
-		auditWake:     make(chan struct{}, 1),
 		activeIDs:     make(map[uint64]json.RawMessage),
 		actionIDs:     make(map[uint64]string),
 	}
@@ -285,11 +289,23 @@ func (p *StdioProxy) appendAuditWithApprovalActor(seq uint64, tool, decision, re
 	}
 }
 
+// reserveAuditSequence assigns request order and tracks the pending lifecycle
+// before the request can commit card state or produce audit rows.
+func (p *StdioProxy) reserveAuditSequence() uint64 {
+	p.auditMutex.Lock()
+	seq := p.auditSeq
+	p.auditSeq++
+	p.auditPending[seq] = struct{}{}
+	p.auditMutex.Unlock()
+	return seq
+}
+
 // resolveAudit marks a sequence as ready to flush. Stamping of currentCard
 // happens later at flush time to ensure deferred audits see card state from
 // preceding claim/release commits.
 func (p *StdioProxy) resolveAudit(seq uint64) {
 	p.auditMutex.Lock()
+	defer p.auditMutex.Unlock()
 
 	// Idempotent: a seq below the flush frontier has already been emitted and its
 	// auditResolved entry deleted. Re-marking it would reinsert a key that
@@ -298,89 +314,156 @@ func (p *StdioProxy) resolveAudit(seq uint64) {
 	// resolves a policy-denied call and the HTTP/stdio handler resolves it again — so
 	// a repeat of an already-flushed seq is a no-op, not an error.
 	if seq < p.auditNext {
-		p.auditMutex.Unlock()
 		return
 	}
 
-	// Mark this sequence as resolved.
-	p.auditResolved[seq] = struct{}{}
+	// Mark this sequence resolved. Ranges keep a long run of completions behind
+	// one slow request to constant size instead of retaining one map entry each.
+	p.markAuditSequenceResolvedLocked(seq)
+
+	// Action replies depend on their own decision, dispatch, and observation rows,
+	// not on every earlier request finishing. Persist an action's rows now; the
+	// request-order frontier will skip this sequence when it catches up.
+	if p.actionPairing && p.actionIDs[seq] != "" {
+		p.flushAuditSequenceLocked(seq)
+		delete(p.actionIDs, seq)
+	}
+	delete(p.auditPending, seq)
+	p.pruneCardHistoryLocked()
 
 	// Flush any consecutive sequences that are resolved.
 	p.flushAuditsLocked()
-	p.auditMutex.Unlock()
+}
 
-	select {
-	case p.auditWake <- struct{}{}:
-	default:
+func (p *StdioProxy) auditSequenceResolvedLocked(seq uint64) bool {
+	i := sort.Search(len(p.auditResolved), func(i int) bool {
+		return p.auditResolved[i].end >= seq
+	})
+	return i < len(p.auditResolved) && p.auditResolved[i].start <= seq
+}
+
+func (p *StdioProxy) markAuditSequenceResolvedLocked(seq uint64) {
+	merged := auditSequenceRange{start: seq, end: seq}
+	ranges := make([]auditSequenceRange, 0, len(p.auditResolved)+1)
+	inserted := false
+	for _, current := range p.auditResolved {
+		if current.end < merged.start && current.end+1 < merged.start {
+			ranges = append(ranges, current)
+			continue
+		}
+		if merged.end < current.start && merged.end+1 < current.start {
+			if !inserted {
+				ranges = append(ranges, merged)
+				inserted = true
+			}
+			ranges = append(ranges, current)
+			continue
+		}
+		merged.start = min(merged.start, current.start)
+		merged.end = max(merged.end, current.end)
 	}
+	if !inserted {
+		ranges = append(ranges, merged)
+	}
+	p.auditResolved = ranges
+}
+
+func (p *StdioProxy) consumeAuditSequenceLocked(seq uint64) {
+	if len(p.auditResolved) == 0 || p.auditResolved[0].start != seq {
+		return
+	}
+	if p.auditResolved[0].end == seq {
+		p.auditResolved = p.auditResolved[1:]
+	} else {
+		p.auditResolved[0].start++
+	}
+}
+
+// flushAuditSequenceLocked writes one resolved sequence without waiting for an
+// earlier unresolved request. Action observations use this path so a slow call
+// does not hold unrelated replies. Must be called under auditMutex.
+func (p *StdioProxy) flushAuditSequenceLocked(seq uint64) {
+	audits, exists := p.auditTodo[seq]
+	if !exists {
+		return
+	}
+
+	// Stamp audits from the highest committed card state at or before this
+	// request. A later response may have committed a different card first.
+	var latestCard int
+	var latestCardSeq uint64
+	haveLatest := false
+	for s, card := range p.cardAfterSeq {
+		if s <= seq && (!haveLatest || s > latestCardSeq) {
+			latestCardSeq = s
+			latestCard = card
+			haveLatest = true
+		}
+	}
+	for _, ev := range audits {
+		if ev.NockID == 0 && latestCard > 0 {
+			ev.NockID = latestCard
+		}
+		p.recordAudit(*ev)
+	}
+	delete(p.auditTodo, seq)
 }
 
 // flushAuditsLocked emits queued audits in sequence order, stamping currentCard
 // at flush time using the card state recorded by preceding commits.
 // Must be called under auditMutex.
 func (p *StdioProxy) flushAuditsLocked() {
-	for {
-		if _, resolved := p.auditResolved[p.auditNext]; !resolved {
-			break // No more consecutive resolved sequences
-		}
+	for p.auditSequenceResolvedLocked(p.auditNext) {
+		// Action sequences may already have been emitted out of order.
+		p.flushAuditSequenceLocked(p.auditNext)
+		p.advanceAuditFrontierLocked()
+	}
+}
 
-		audits, exists := p.auditTodo[p.auditNext]
-		if !exists || audits == nil {
-			// Shouldn't happen, but handle it gracefully
-			delete(p.auditResolved, p.auditNext)
-			p.auditNext++
-			continue
-		}
+// advanceAuditFrontierLocked cleans up the emitted sequence and prunes card
+// history while preserving pending requests' predecessors. Must hold auditMutex.
+func (p *StdioProxy) advanceAuditFrontierLocked() {
+	seq := p.auditNext
+	p.consumeAuditSequenceLocked(seq)
+	delete(p.auditPending, seq)
+	delete(p.actionIDs, seq)
+	p.auditNext++
+	p.pruneCardHistoryLocked()
+}
 
-		// Stamp audits that don't have an extracted NockID with the card state from
-		// the highest committed seq <= p.auditNext. Iterate the (pruned, small) map
-		// rather than scanning 0..p.auditNext, which is O(auditNext) per flush and
-		// O(N^2) over a long-lived session.
-		var latestCard int
-		var latestCardSeq uint64
-		haveLatest := false
-		for s, card := range p.cardAfterSeq {
-			if s <= p.auditNext && (!haveLatest || s > latestCardSeq) {
-				latestCardSeq = s
-				latestCard = card
-				haveLatest = true
-			}
+// pruneCardHistoryLocked keeps the latest card state and the predecessor needed
+// by each unsettled sequence, including requests whose audit rows are not queued yet.
+func (p *StdioProxy) pruneCardHistoryLocked() {
+	if len(p.cardAfterSeq) <= 1 {
+		return
+	}
+	cardSeqs := make([]uint64, 0, len(p.cardAfterSeq))
+	for seq := range p.cardAfterSeq {
+		cardSeqs = append(cardSeqs, seq)
+	}
+	sort.Slice(cardSeqs, func(i, j int) bool { return cardSeqs[i] < cardSeqs[j] })
+	keep := map[uint64]struct{}{cardSeqs[len(cardSeqs)-1]: {}}
+	pendingSeqs := make([]uint64, 0, len(p.auditPending)+len(p.auditTodo))
+	for seq := range p.auditPending {
+		pendingSeqs = append(pendingSeqs, seq)
+	}
+	for seq := range p.auditTodo {
+		pendingSeqs = append(pendingSeqs, seq)
+	}
+	sort.Slice(pendingSeqs, func(i, j int) bool { return pendingSeqs[i] < pendingSeqs[j] })
+	cardIndex := 0
+	for _, seq := range pendingSeqs {
+		for cardIndex < len(cardSeqs) && cardSeqs[cardIndex] <= seq {
+			cardIndex++
 		}
-		for _, ev := range audits {
-			if ev.NockID == 0 && latestCard > 0 {
-				ev.NockID = latestCard
-			}
+		if cardIndex > 0 {
+			keep[cardSeqs[cardIndex-1]] = struct{}{}
 		}
-
-		// Emit all audits for this sequence.
-		for _, ev := range audits {
-			// Record to audit trail
-			p.recordAudit(*ev)
+	}
+	for seq := range p.cardAfterSeq {
+		if _, ok := keep[seq]; !ok {
+			delete(p.cardAfterSeq, seq)
 		}
-
-		// Clean up and move to next sequence.
-		// NOTE: Do NOT delete cardAfterSeq entries here - they are kept for the entire session
-		// because later seqs need to reference earlier card state updates.
-		// Prune cardAfterSeq to avoid unbounded growth: keep only the single
-		// latest entry with key < p.auditNext, which allows later seqs to still
-		// reference the card state in effect at that point.
-		var latestSeq uint64
-		for seq := range p.cardAfterSeq {
-			if seq < p.auditNext && seq > latestSeq {
-				latestSeq = seq
-			}
-		}
-		// Delete all entries with key < p.auditNext except the latest one
-		for seq := range p.cardAfterSeq {
-			if seq < p.auditNext && seq != latestSeq {
-				delete(p.cardAfterSeq, seq)
-			}
-		}
-
-		delete(p.auditTodo, p.auditNext)
-		delete(p.auditResolved, p.auditNext)
-		delete(p.actionIDs, p.auditNext)
-		p.auditNext++
 	}
 }
 
@@ -511,19 +594,20 @@ func (p *StdioProxy) drainAudits() {
 	p.auditMutex.Lock()
 	defer p.auditMutex.Unlock()
 
-	// Collect unresolved sequences for logging
+	// Collect unresolved sequences for logging and mark them ready to flush.
 	var unresolved []uint64
 	for seq := range p.auditTodo {
-		if _, isResolved := p.auditResolved[seq]; !isResolved {
+		if !p.auditSequenceResolvedLocked(seq) {
 			unresolved = append(unresolved, seq)
+			p.markAuditSequenceResolvedLocked(seq)
 		}
 	}
 	sort.Slice(unresolved, func(i, j int) bool { return unresolved[i] < unresolved[j] })
 
-	// Mark all pending sequences as resolved so flushAuditsLocked can emit them
-	for seq := range p.auditTodo {
-		if _, isResolved := p.auditResolved[seq]; !isResolved {
-			p.auditResolved[seq] = struct{}{}
+	// Include requests that have not produced audit rows yet.
+	for seq := range p.auditPending {
+		if !p.auditSequenceResolvedLocked(seq) {
+			p.markAuditSequenceResolvedLocked(seq)
 		}
 	}
 
@@ -823,8 +907,10 @@ type deferredAudit struct {
 }
 
 type pendingCard struct {
-	tool                 string
-	refs                 extract.References // for card state updates (claim/release only) - COPY, not pointer
+	tool                 string             // action tool for the terminal observation
+	refs                 extract.References // references written on the terminal observation
+	stateTool            string             // only claim/release may change current-card state
+	stateRefs            extract.References // copied references used by updateCardState
 	auditSeq             uint64             // sequence number for audit ordering
 	actionID             string
 	requestID            json.RawMessage
@@ -925,7 +1011,7 @@ func (p *StdioProxy) appendActionObservation(seq uint64, card *pendingCard, obse
 	}
 
 	p.auditMutex.Lock()
-	if seq < p.auditNext {
+	if seq < p.auditNext || p.auditSequenceResolvedLocked(seq) {
 		p.auditMutex.Unlock()
 		return p.recordAudit(ev)
 	}
@@ -1084,17 +1170,6 @@ func (c *pendingCard) wasAnswered() bool {
 	return c.answered
 }
 
-func markPendingActionAnswered(pending *sync.Map, seq uint64) {
-	pending.Range(func(_, value any) bool {
-		card, ok := value.(*pendingCard)
-		if ok && card.actionID != "" && card.auditSeq == seq {
-			card.markAnswered()
-			return false
-		}
-		return true
-	})
-}
-
 func invalidActionResponseID(line []byte, decodeErr error) (json.RawMessage, bool) {
 	dec := json.NewDecoder(bytes.NewReader(line))
 	tok, err := dec.Token()
@@ -1213,7 +1288,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			}
 		}
 		// Assign sequence number to this request for audit ordering
-		seq := atomic.AddUint64(&p.auditSeq, 1) - 1
+		seq := p.reserveAuditSequence()
 		deferred := false
 		actionID := ""
 		var canonicalMsg *jsonrpc.Message
@@ -1322,18 +1397,18 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				if d.refsForState != nil {
 					refsCopy = *d.refsForState
 				}
+				var auditRefs extract.References
+				if d.refsForAudit != nil {
+					auditRefs = *d.refsForAudit
+				}
 				pendingCard := &pendingCard{
-					tool:      d.toolForState,
-					refs:      refsCopy,
+					tool:      d.tool,
+					refs:      auditRefs,
+					stateTool: d.toolForState,
+					stateRefs: refsCopy,
 					auditSeq:  seq,
 					actionID:  actionID,
 					requestID: append(json.RawMessage(nil), d.forwardID...),
-				}
-				if actionID != "" {
-					pendingCard.tool = d.tool
-					if d.refsForAudit != nil {
-						pendingCard.refs = *d.refsForAudit
-					}
 				}
 				pending.Store(string(d.forwardID), pendingCard)
 			}
@@ -1492,6 +1567,16 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 	// Extract auditable references from tool arguments.
 	refs := extract.FromToolCall(toolName, canonicalParams)
 	if !ok || toolName == "" {
+		if p.actionPairing {
+			// An empty tool name is caller input, not an approvable policy miss.
+			// Reject it before it can become an invalid schema-v2 dispatch row,
+			// which requires a non-empty tool.
+			p.logger.Printf("DENY agent=%s reason=unextractable-name", p.agent)
+			p.appendAudit(seq, "", "deny", "unextractable-name", nil)
+			p.resolveAudit(seq)
+			return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600,
+				rejectMsg: "nockguard: tools/call rejected — tool name could not be extracted", notForwardedCause: "policy_denied"}
+		}
 		// A tools/call whose name we cannot extract fails CLOSED — the
 		// upstream might still resolve a name the proxy could not see.
 		dec := p.engine.FailModeVerdict(p.agent, "unextractable-name")
@@ -1682,64 +1767,28 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 	upstreamLines := make(chan []byte, 1)
 	scanDone := make(chan error, 1)
+	stopScanner := make(chan struct{})
 	go func() {
+		defer close(upstreamLines)
 		for scanner.Scan() {
-			upstreamLines <- append([]byte(nil), scanner.Bytes()...)
+			line := append([]byte(nil), scanner.Bytes()...)
+			select {
+			case upstreamLines <- line:
+			case <-stopScanner:
+				return
+			}
 		}
 		scanDone <- scanner.Err()
-		close(upstreamLines)
 	}()
-	deferredResponses := make(map[uint64][]byte)
-	flushDeferred := func() error {
-		p.auditMutex.Lock()
-		next := p.auditNext
-		p.auditMutex.Unlock()
-		var ready []uint64
-		for seq := range deferredResponses {
-			if seq < next {
-				ready = append(ready, seq)
-			}
+	defer func() {
+		close(stopScanner)
+		if closer, ok := r.(io.Closer); ok {
+			_ = closer.Close()
 		}
-		sort.Slice(ready, func(i, j int) bool { return ready[i] < ready[j] })
-		for _, seq := range ready {
-			line := deferredResponses[seq]
-			delete(deferredResponses, seq)
-			if p.requiredAudit && p.auditor.RequiredError() != nil {
-				var msg jsonrpc.Message
-				_ = json.Unmarshal(line, &msg)
-				line = jsonrpc.ErrorResponse(msg.ID, -32603, auditAfterForwardError)
-			}
-			if err := p.writeAgentLine(w, line); err != nil {
-				return err
-			}
-			markPendingActionAnswered(pending, seq)
-			p.releaseRequestID(seq)
-			select {
-			case progress <- struct{}{}:
-			default:
-			}
-		}
-		return nil
-	}
-	var scanErr error
-readLoop:
-	for {
-		var line []byte
+	}()
+	for line := range upstreamLines {
 		var releaseSeq uint64
 		releaseRequest := false
-		select {
-		case <-p.auditWake:
-			if err := flushDeferred(); err != nil {
-				return err
-			}
-			continue
-		case next, ok := <-upstreamLines:
-			if !ok {
-				scanErr = <-scanDone
-				break readLoop
-			}
-			line = next
-		}
 		msg, err := jsonrpc.Decode(line)
 		suppressAgentResponse := false
 		var answeredCard *pendingCard
@@ -1757,9 +1806,8 @@ readLoop:
 					if p.requiredAudit && p.auditor.RequiredError() != nil {
 						line = jsonrpc.ErrorResponse(card.requestID, -32603, auditAfterForwardError)
 					}
-					if !p.auditSequenceFlushed(card.auditSeq) {
-						deferredResponses[card.auditSeq] = append([]byte(nil), line...)
-						continue
+					if !p.auditSequenceDurable(card.auditSeq) && p.auditor.RequiredError() == nil {
+						return fmt.Errorf("action audit rows for sequence %d were not durable before response", card.auditSeq)
 					}
 					if writeErr := p.writeAgentLine(w, line); writeErr != nil {
 						return writeErr
@@ -1768,9 +1816,6 @@ readLoop:
 					select {
 					case progress <- struct{}{}:
 					default:
-					}
-					if flushErr := flushDeferred(); flushErr != nil {
-						return flushErr
 					}
 					continue
 				}
@@ -1802,11 +1847,6 @@ readLoop:
 				} else if cardVal, ok := val.(*pendingCard); ok {
 					releaseSeq, releaseRequest = cardVal.auditSeq, true
 					suppressAgentResponse = cardVal.actionID != "" && cardVal.lateReplySuppressed()
-					if suppressAgentResponse {
-						if _, responseBuffered := deferredResponses[cardVal.auditSeq]; responseBuffered {
-							releaseRequest = false
-						}
-					}
 					// Pending forward — check JSON-RPC success before committing state or auditing
 					validActionResponse := cardVal.actionID == "" || validToolResponseID(cardVal.requestID, line)
 					if cardVal.actionID != "" && !validActionResponse {
@@ -1836,7 +1876,7 @@ readLoop:
 					// Only commit state if JSON-RPC succeeded.
 					// Audits are resolved unconditionally to ensure the queue doesn't stall.
 					if shouldCommit {
-						p.updateCardState(cardVal.auditSeq, cardVal.tool, &cardVal.refs)
+						p.updateCardState(cardVal.auditSeq, cardVal.stateTool, &cardVal.stateRefs)
 					}
 					if cardVal.actionID != "" {
 						if validActionResponse {
@@ -1848,17 +1888,16 @@ readLoop:
 							p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, cardVal.tool, err)
 						}
 					}
-					// Resolve audits unconditionally - even if shouldCommit is false.
-					// Appended audits will be emitted in order by flushAuditsLocked.
+					// Resolve audits unconditionally. Action rows flush per sequence;
+					// unrelated request-order rows can still wait for earlier sequences.
 					p.resolveAudit(cardVal.auditSeq)
 					if p.requiredAudit && p.auditor.RequiredError() != nil {
 						line = jsonrpc.ErrorResponse(cardVal.requestID, -32603, auditAfterForwardError)
 					} else if cardVal.actionID != "" && !validActionResponse {
 						line = jsonrpc.ErrorResponse(cardVal.requestID, -32603, unverifiedToolResponseError)
 					}
-					if cardVal.actionID != "" && !suppressAgentResponse && !p.auditSequenceFlushed(cardVal.auditSeq) {
-						deferredResponses[cardVal.auditSeq] = append([]byte(nil), line...)
-						continue
+					if cardVal.actionID != "" && !suppressAgentResponse && !p.auditSequenceDurable(cardVal.auditSeq) && p.auditor.RequiredError() == nil {
+						return fmt.Errorf("action audit rows for sequence %d were not durable before response", cardVal.auditSeq)
 					}
 				}
 			}
@@ -1879,10 +1918,8 @@ readLoop:
 		case progress <- struct{}{}:
 		default:
 		}
-		if err := flushDeferred(); err != nil {
-			return err
-		}
 	}
+	scanErr := <-scanDone
 	if len(finalizeOnEOF) > 0 && finalizeOnEOF[0] {
 		cause := "upstream_exit"
 		if scanErr != nil {
@@ -1890,9 +1927,6 @@ readLoop:
 		}
 		p.finishPendingActions(pending, cause)
 		p.drainAudits()
-		if err := flushDeferred(); err != nil {
-			return err
-		}
 	}
 	return scanErr
 }
@@ -1900,7 +1934,18 @@ readLoop:
 func (p *StdioProxy) auditSequenceFlushed(seq uint64) bool {
 	p.auditMutex.Lock()
 	defer p.auditMutex.Unlock()
-	return seq < p.auditNext
+	if seq < p.auditNext {
+		return true
+	}
+	if !p.auditSequenceResolvedLocked(seq) {
+		return false
+	}
+	_, queued := p.auditTodo[seq]
+	return !queued
+}
+
+func (p *StdioProxy) auditSequenceDurable(seq uint64) bool {
+	return p.auditSequenceFlushed(seq) && (!p.requiredAudit || p.auditor.RequiredError() == nil)
 }
 
 func actionResponseDetails(line []byte) (string, *bool) {

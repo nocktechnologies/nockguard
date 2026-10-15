@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -173,6 +176,100 @@ func TestHTTPListener_CardAfterSeqPruningKeepsBoundary(t *testing.T) {
 	if cardAfterSeqLen > maxExpected {
 		t.Errorf("cardAfterSeq has %d entries after 5 requests, want <= %d (pruning not working)", cardAfterSeqLen, maxExpected)
 	}
+}
+
+func TestHTTPListener_PendingToolsListKeepsCardPredecessor(t *testing.T) {
+	listEntered := make(chan struct{})
+	listRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseList := func() { releaseOnce.Do(func() { close(listRelease) }) }
+	defer releaseList()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read upstream request: %v", err)
+			return
+		}
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("decode upstream request: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if req.Method == "tools/list" {
+			close(listEntered)
+			<-listRelease
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":"list","result":{"tools":[{"name":"secret_tool"}]}}`)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{}}`, req.ID)
+	}))
+	defer upstream.Close()
+
+	auditor, path, _ := newEd25519Auditor(t)
+	defer auditor.Close()
+	gate := newGate(t, `audit:
+  enabled: true
+agents:
+  mira:
+    mode: allow
+    deny: ["secret_tool"]
+`, nil, auditor)
+	listener := NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit()
+	server := httptest.NewServer(listener)
+	defer server.Close()
+
+	claimA := `{"jsonrpc":"2.0","id":"claim-a","method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":111}}}`
+	if status, _, _ := post(t, server.URL, claimA); status != http.StatusOK {
+		t.Fatalf("claim A status = %d, want 200", status)
+	}
+	listDone := make(chan error, 1)
+	go func() {
+		resp, err := http.Post(server.URL, "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":"list","method":"tools/list","params":{}}`))
+		if err != nil {
+			listDone <- err
+			return
+		}
+		defer resp.Body.Close()
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			listDone <- err
+			return
+		}
+		listDone <- nil
+	}()
+	select {
+	case <-listEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tools/list did not reach the controlled upstream")
+	}
+	claimB := `{"jsonrpc":"2.0","id":"claim-b","method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":222}}}`
+	if status, _, _ := post(t, server.URL, claimB); status != http.StatusOK {
+		t.Fatalf("claim B status = %d, want 200", status)
+	}
+	releaseList()
+	select {
+	case err := <-listDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("tools/list did not finish after its upstream response was released")
+	}
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range readAuditEvents(t, path) {
+		if ev.Tool == "secret_tool" && ev.Decision == "hide" {
+			if ev.NockID != 111 {
+				t.Fatalf("tools/list hide row card = %d, want predecessor card 111", ev.NockID)
+			}
+			return
+		}
+	}
+	t.Fatal("tools/list hide row was not recorded")
 }
 
 // TestHTTPListener_MalformedSuccessDoesNotCommitCard verifies that a 2xx

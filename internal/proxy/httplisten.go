@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/extract"
@@ -209,7 +208,7 @@ func (l *HTTPListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	seq := atomic.AddUint64(&l.gate.auditSeq, 1) - 1
+	seq := l.gate.reserveAuditSequence()
 
 	// Guarantee exactly-once resolution per reserved seq: establish defer with flag
 	// that ensures even on early returns, the seq gets resolved exactly once.

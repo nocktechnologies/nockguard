@@ -280,10 +280,12 @@ success evidence, and an unknown outcome must not trigger an automatic retry.
 V2 rows are durably appended and assigned a per-run `run_seq`; the existing
 HMAC/Ed25519 verifier validates both strict v1 and v2 envelopes while retaining
 the historical v1 typed-marshal signature bytes. Older binaries cannot verify
-trails containing v2 rows. Run open/close markers and completeness assessment
-are not emitted by this opt-in writer; v2 pairing provides action correlation,
-not a completeness verdict. `--audit-best-effort` cannot be combined with
-`action_pairing`.
+trails containing v2 rows. Enabling `action_pairing` is a one-way change for
+that audit path: an older binary refuses to open a trail with v2 rows and
+reports tampering. A rollback must use a new audit path. Run open/close markers
+and completeness assessment are not emitted by this opt-in writer; v2 pairing
+provides action correlation, not a completeness verdict. `--audit-best-effort`
+cannot be combined with `action_pairing`.
 
 `reason` names the specific policy rule behind each decision — `deny-rule "…"`, `allow-rule "…"`, `no allow-rule matched`, `default-allow (no allow list)`, or `no policy for agent (fail-closed)` — so the trail is *explainable* rather than an opaque `policy`. The matched rule is recorded operator-side only; the error returned to the agent stays minimal (`denied by policy`), so a hostile agent cannot map the policy surface from rejections.
 

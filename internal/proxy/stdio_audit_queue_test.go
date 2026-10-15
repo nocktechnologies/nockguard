@@ -20,6 +20,54 @@ type auditWriteCheck func([]byte) (int, error)
 
 func (f auditWriteCheck) Write(p []byte) (int, error) { return f(p) }
 
+func TestReserveAuditSequenceRegistersUnderOneLock(t *testing.T) {
+	proxy := &StdioProxy{auditPending: make(map[uint64]struct{})}
+	const count = 128
+	seqs := make([]uint64, count)
+	var wg sync.WaitGroup
+	for i := range seqs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			seqs[i] = proxy.reserveAuditSequence()
+		}(i)
+	}
+	wg.Wait()
+	sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
+	for i, seq := range seqs {
+		if seq != uint64(i) {
+			t.Fatalf("reserved sequence %d = %d, want contiguous value %d", i, seq, i)
+		}
+	}
+	if len(proxy.auditPending) != count {
+		t.Fatalf("pending sequences = %d, want %d", len(proxy.auditPending), count)
+	}
+}
+
+func TestAuditResolvedRangesMergeAndConsume(t *testing.T) {
+	proxy := &StdioProxy{}
+	proxy.auditMutex.Lock()
+	defer proxy.auditMutex.Unlock()
+	for _, seq := range []uint64{5, 1, 3, 2, 4, 8, 6, 7, 10, 12, 11} {
+		proxy.markAuditSequenceResolvedLocked(seq)
+	}
+	if len(proxy.auditResolved) != 2 {
+		t.Fatalf("resolved ranges = %+v, want [1,8] and [10,12]", proxy.auditResolved)
+	}
+	for seq := uint64(0); seq <= 13; seq++ {
+		want := (seq >= 1 && seq <= 8) || (seq >= 10 && seq <= 12)
+		if got := proxy.auditSequenceResolvedLocked(seq); got != want {
+			t.Errorf("sequence %d resolved = %t, want %t", seq, got, want)
+		}
+	}
+	for seq := uint64(1); seq <= 8; seq++ {
+		proxy.consumeAuditSequenceLocked(seq)
+	}
+	if len(proxy.auditResolved) != 1 || proxy.auditResolved[0] != (auditSequenceRange{start: 10, end: 12}) {
+		t.Errorf("ranges after consuming first interval = %+v, want [10,12]", proxy.auditResolved)
+	}
+}
+
 func TestStdioOutOfOrderResponseAuditLimit(t *testing.T) {
 	auditor, path, _ := newEd25519Auditor(t)
 	defer auditor.Close()
@@ -141,9 +189,9 @@ func assertStdioAuditQueueResolved(t *testing.T, gate *StdioProxy) {
 	t.Helper()
 	gate.auditMutex.Lock()
 	defer gate.auditMutex.Unlock()
-	if gate.auditNext != 1 || len(gate.auditTodo) != 0 || len(gate.auditResolved) != 0 {
-		t.Errorf("audit queue = next %d, todo %d, resolved %d; want next 1 with empty queues",
-			gate.auditNext, len(gate.auditTodo), len(gate.auditResolved))
+	if gate.auditNext != 1 || len(gate.auditTodo) != 0 || len(gate.auditResolved) != 0 || len(gate.auditPending) != 0 {
+		t.Errorf("audit queue = next %d, todo %d, resolved %d, pending %d; want next 1 with empty queues",
+			gate.auditNext, len(gate.auditTodo), len(gate.auditResolved), len(gate.auditPending))
 	}
 }
 

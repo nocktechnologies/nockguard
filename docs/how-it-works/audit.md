@@ -49,11 +49,14 @@ after an unknown outcome is appended as `late_response_observed`, preserving
 the original uncertainty. No request IDs, tool arguments, or response bodies
 are written. Audit verification accepts historical v1 rows with their original
 typed-marshal signature bytes and strictly validates v2 rows; old binaries do
-not verify v2 trails. Pairing is disabled by default, requires required audit
-writes, applies to stdio only, and cannot be combined with `--audit-best-effort`.
-These action rows do not include run open/close records and therefore do not
-support a completeness verdict; the dispatch itself never proves execution or
-success. Source: `internal/audit/audit.go`, `internal/proxy/stdio.go`.
+not verify v2 trails. Enabling pairing is a one-way change for that audit path:
+an older binary refuses to open a trail containing v2 rows and reports
+tampering, so a rollback must use a new audit path. Pairing is disabled by
+default, requires required audit writes, applies to stdio only, and cannot be
+combined with `--audit-best-effort`. These action rows do not include run
+open/close records and therefore do not support a completeness verdict; the
+dispatch itself never proves execution or success. Source:
+`internal/audit/audit.go`, `internal/proxy/stdio.go`.
 
 `evidence --framework soc2` maps verified rows into a local pack; other
 framework names are stubs ([cmd/nockguard/main.go](../../cmd/nockguard/main.go)). Optional NockCC
