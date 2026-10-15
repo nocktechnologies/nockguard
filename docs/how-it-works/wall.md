@@ -9,6 +9,10 @@ nockguard wall --agent coder
 
 The command opens a loopback dashboard at
 `http://127.0.0.1:8787`. It reads and streams decisions, not tool arguments.
+Requests must use `127.0.0.1`, `localhost`, or `[::1]` as the Host with the
+configured port. `--allow-host <name>` accepts one additional Host name.
+Serving on a non-loopback `--addr` requires `--allow-remote` and prints a
+warning. `/events` and `/export` reject cross-site browser requests.
 `--agent` selects one Guard trail; `--lock-db` adds a read-only NockLock SQLite
 log to the display. The PROOF export covers Guard rows only. Source:
 `cmd/nockguard-wall/main.go`, `cmd/nockguard-wall/lock.go`,

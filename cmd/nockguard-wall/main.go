@@ -22,6 +22,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -926,8 +927,85 @@ func defaultAuditPath() string {
 	return filepath.Join(home, ".nockguard", "logs", "audit.jsonl")
 }
 
+func wallListenConfig(addr string, allowRemote bool) (string, bool, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", false, fmt.Errorf("--addr: %w", err)
+	}
+	ip := net.ParseIP(host)
+	remote := host != "localhost" && (ip == nil || !ip.IsLoopback())
+	if remote && !allowRemote {
+		return "", false, fmt.Errorf("--addr %q is not loopback; use --allow-remote to serve remotely", addr)
+	}
+	return port, remote, nil
+}
+
+func wallHandler(b *broker, port, allowHost string) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/events", b.handleSSE)
+	mux.HandleFunc("/pulse", b.handlePulse)
+	mux.HandleFunc("/context", b.handleContext)
+	mux.HandleFunc("/export", b.handleExport)
+	mux.HandleFunc("/verify", b.handleVerify)
+	mux.HandleFunc("/sessions", b.handleSessions)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		data, _ := indexFS.ReadFile("index.html")
+		if len(b.proofSigner) != 0 && !b.demo {
+			data = bytes.Replace(data, []byte(`id="f-proof" hidden`), []byte(`id="f-proof"`), 1)
+		}
+		if b.lockDB != "" || b.demo {
+			data = bytes.Replace(data, []byte(`data-lock="0"`), []byte(`data-lock="1"`), 1)
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(data)
+	})
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		allowedHost := r.Host == net.JoinHostPort("127.0.0.1", port) ||
+			r.Host == net.JoinHostPort("localhost", port) ||
+			r.Host == net.JoinHostPort("::1", port) ||
+			(allowHost != "" && r.Host == net.JoinHostPort(allowHost, port))
+		if port == "80" {
+			allowedHost = allowedHost || r.Host == "127.0.0.1" || r.Host == "localhost" ||
+				r.Host == "[::1]" || (allowHost != "" && r.Host == allowHost)
+		}
+		if !allowedHost {
+			log.Printf("wall request rejected: host=%q path=%q", r.Host, r.URL.Path)
+			http.Error(w, "forbidden host", http.StatusForbidden)
+			return
+		}
+		if r.URL.Path == "/events" || r.URL.Path == "/export" {
+			origins := r.Header.Values("Origin")
+			if len(origins) > 1 {
+				log.Printf("wall request rejected: multiple origins path=%q", r.URL.Path)
+				http.Error(w, "forbidden origin", http.StatusForbidden)
+				return
+			}
+			if len(origins) == 1 && origins[0] != "http://"+r.Host {
+				log.Printf("wall request rejected: origin=%q path=%q", origins[0], r.URL.Path)
+				http.Error(w, "forbidden origin", http.StatusForbidden)
+				return
+			}
+			for _, site := range r.Header.Values("Sec-Fetch-Site") {
+				if site != "same-origin" && site != "none" {
+					log.Printf("wall request rejected: sec-fetch-site=%q path=%q", site, r.URL.Path)
+					http.Error(w, "forbidden site", http.StatusForbidden)
+					return
+				}
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8787", "address to serve the wall on (loopback = private)")
+	allowHost := flag.String("allow-host", "", "additional Host name accepted on the configured port")
+	allowRemote := flag.Bool("allow-remote", false, "permit a non-loopback --addr (exposes the wall remotely)")
 	agent := flag.String("agent", "", "agent whose per-agent audit trail and public key to watch")
 	auditPath := flag.String("audit", defaultAuditPath(), "path to the NockGuard audit JSONL")
 	demoMode := flag.Bool("demo", false, "synthesize a sample event stream (use when there is no live traffic)")
@@ -941,6 +1019,13 @@ func main() {
 	lockPubEnv := flag.String("lock-pub-env", "NOCKLOCK_AUDIT_ED25519_PUB",
 		"env var holding the NockLock Ed25519 PUBLIC key for the per-session proof badge. Unset var = badges read UNVERIFIABLE.")
 	flag.Parse()
+	port, remote, err := wallListenConfig(*addr, *allowRemote)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if remote {
+		log.Printf("warning: Wall is listening on non-loopback address %q; audit data is remotely accessible", *addr)
+	}
 	var agentSet, auditSet, pubEnvSet bool
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
@@ -1032,34 +1117,11 @@ func main() {
 		go tail(ctx, *auditPath, b)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/events", b.handleSSE)
-	mux.HandleFunc("/pulse", b.handlePulse)
-	mux.HandleFunc("/context", b.handleContext)
-	mux.HandleFunc("/export", b.handleExport)
-	mux.HandleFunc("/verify", b.handleVerify)
-	mux.HandleFunc("/sessions", b.handleSessions)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		data, _ := indexFS.ReadFile("index.html")
-		if len(b.proofSigner) != 0 && !b.demo {
-			data = bytes.Replace(data, []byte(`id="f-proof" hidden`), []byte(`id="f-proof"`), 1)
-		}
-		if b.lockDB != "" || b.demo {
-			data = bytes.Replace(data, []byte(`data-lock="0"`), []byte(`data-lock="1"`), 1)
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(data)
-	})
-
 	fmt.Printf("NockGuard Live Wall → http://%s   (audit: %s, lock: %q, demo: %v, chain-verify: %v)\n",
 		*addr, *auditPath, b.lockDB, *demoMode, v.enabled())
 	srv := &http.Server{
 		Addr:         *addr,
-		Handler:      mux,
+		Handler:      wallHandler(b, port, *allowHost),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 0, // SSE requires streaming.
 		IdleTimeout:  120 * time.Second,
