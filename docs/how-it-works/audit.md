@@ -48,10 +48,11 @@ cancellation, disconnect, and shutdown produce `outcome_unknown`. A late reply
 after an unknown outcome is appended as `late_response_observed`, preserving
 the original uncertainty. No request IDs, tool arguments, or response bodies
 are written. Audit verification accepts historical v1 rows with their original
-typed-marshal signature bytes and strictly validates v2 rows; old binaries do
-not verify v2 trails. Enabling pairing is a one-way change for that audit path:
-an older binary refuses to open a trail containing v2 rows and reports
-tampering, so a rollback must use a new audit path. Pairing is disabled by
+typed-marshal signature bytes and strictly validates v2 rows; old binaries
+cannot verify signed v2 trails, and their signed writer refuses to reopen such
+a trail after startup verification fails. An older unsigned writer does not
+authenticate v2 fields and may append legacy rows instead. Keep pairing on a
+dedicated audit path; a rollback must use a new path. Pairing is disabled by
 default, requires required audit writes, applies to stdio only, and cannot be
 combined with `--audit-best-effort`. These action rows do not include run
 open/close records and therefore do not support a completeness verdict; the

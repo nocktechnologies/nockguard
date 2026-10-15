@@ -111,6 +111,39 @@ func TestV2RunSequenceSeedsFromTrailAfterCheckpointFailure(t *testing.T) {
 	}
 }
 
+func TestV2RunSequenceSeedsFromUnsignedTrailAfterReopen(t *testing.T) {
+	runID := "00112233445566778899aabbccddeeff"
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	write := func(a *Auditor, tool string) error {
+		return a.RecordRequired(Event{Agent: "mira", Tool: tool, Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: runID})
+	}
+	first, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := write(first, "before-reopen"); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := write(reopened, "after-reopen"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rows := readLines(t, path)
+	if len(rows) != 2 || rows[0]["run_seq"] != float64(1) || rows[1]["run_seq"] != float64(2) {
+		t.Fatalf("unsigned reopened run sequence duplicated or skipped: %+v", rows)
+	}
+}
+
 func TestV2CallerValidationFailureDoesNotLatchRequiredWriter(t *testing.T) {
 	runID := "00112233445566778899aabbccddeeff"
 	path := filepath.Join(t.TempDir(), "audit.jsonl")

@@ -82,6 +82,7 @@ type StdioProxy struct {
 	auditNext     uint64               // next sequence number ready to emit
 	auditResolved []auditSequenceRange // compact sorted ranges of resolved sequences
 	auditPending  map[uint64]struct{}  // allocated sequences whose audit lifecycle is unsettled
+	auditFailed   map[uint64]struct{}  // action sequences with a row rejected before append
 	cardAfterSeq  map[uint64]int       // seq -> card state after that commit
 	requestIDMu   sync.Mutex
 	activeIDs     map[uint64]json.RawMessage // request ids held until their agent-facing response is delivered
@@ -212,6 +213,7 @@ func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, valid
 		scrubber:      newScrubSet(256), // LRU capped at 256 secret values
 		auditTodo:     make(map[uint64][]*audit.Event),
 		auditPending:  make(map[uint64]struct{}),
+		auditFailed:   make(map[uint64]struct{}),
 		cardAfterSeq:  make(map[uint64]int),
 		activeIDs:     make(map[uint64]json.RawMessage),
 		actionIDs:     make(map[uint64]string),
@@ -232,9 +234,11 @@ func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, valid
 	return p
 }
 
-// appendAudit queues an audit event for later emission in request-order.
-// The event is queued but NOT stamped with currentCard yet; stamping happens
-// at flush time to ensure deferred audits see card state from a preceding claim.
+// appendAudit queues an audit event for later emission in request-order. The
+// event is stamped at flush time from the latest card state already committed
+// at or before this sequence. Action pairing may flush a later call while an
+// earlier claim is still pending; that row intentionally keeps the prior card
+// (or no card), and a later claim commit never rewrites it.
 func (p *StdioProxy) appendAudit(seq uint64, tool, decision, reason string, refs *extract.References) {
 	p.appendAuditWithApprovalActor(seq, tool, decision, reason, refs, "")
 }
@@ -404,9 +408,18 @@ func (p *StdioProxy) flushAuditSequenceLocked(seq uint64) {
 		if ev.NockID == 0 && latestCard > 0 {
 			ev.NockID = latestCard
 		}
-		p.recordAudit(*ev)
+		if err := p.recordAudit(*ev); err != nil && ev.ActionID != "" {
+			p.markAuditFailureLocked(seq)
+		}
 	}
 	delete(p.auditTodo, seq)
+}
+
+func (p *StdioProxy) markAuditFailureLocked(seq uint64) {
+	if p.auditFailed == nil {
+		p.auditFailed = make(map[uint64]struct{})
+	}
+	p.auditFailed[seq] = struct{}{}
 }
 
 // flushAuditsLocked emits queued audits in sequence order, stamping currentCard
@@ -1013,7 +1026,13 @@ func (p *StdioProxy) appendActionObservation(seq uint64, card *pendingCard, obse
 	p.auditMutex.Lock()
 	if seq < p.auditNext || p.auditSequenceResolvedLocked(seq) {
 		p.auditMutex.Unlock()
-		return p.recordAudit(ev)
+		err := p.recordAudit(ev)
+		if err != nil {
+			p.auditMutex.Lock()
+			p.markAuditFailureLocked(seq)
+			p.auditMutex.Unlock()
+		}
+		return err
 	}
 	p.auditTodo[seq] = append(p.auditTodo[seq], &ev)
 	p.auditMutex.Unlock()
@@ -1178,6 +1197,8 @@ func invalidActionResponseID(line []byte, decodeErr error) (json.RawMessage, boo
 	}
 	var id, versionRaw, errorRaw json.RawMessage
 	var hasID, hasVersion, hasMethod, hasResult, hasError bool
+	var seenKeys []string
+	duplicateKey := false
 	for dec.More() {
 		tok, err = dec.Token()
 		if err != nil {
@@ -1187,6 +1208,13 @@ func invalidActionResponseID(line []byte, decodeErr error) (json.RawMessage, boo
 		if !ok {
 			return nil, false
 		}
+		for _, seen := range seenKeys {
+			if strings.EqualFold(seen, key) {
+				duplicateKey = true
+				break
+			}
+		}
+		seenKeys = append(seenKeys, key)
 		var value json.RawMessage
 		if dec.Decode(&value) != nil {
 			return nil, false
@@ -1216,7 +1244,7 @@ func invalidActionResponseID(line []byte, decodeErr error) (json.RawMessage, boo
 	if !hasID || len(id) == 0 {
 		return nil, false
 	}
-	invalid := decodeErr != nil || hasMethod
+	invalid := decodeErr != nil || hasMethod || duplicateKey
 	var version string
 	if !hasVersion || json.Unmarshal(versionRaw, &version) != nil || version != "2.0" || hasResult == hasError {
 		invalid = true
@@ -1806,12 +1834,10 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 					if p.requiredAudit && p.auditor.RequiredError() != nil {
 						line = jsonrpc.ErrorResponse(card.requestID, -32603, auditAfterForwardError)
 					}
-					if !p.auditSequenceDurable(card.auditSeq) && p.auditor.RequiredError() == nil {
-						return fmt.Errorf("action audit rows for sequence %d were not durable before response", card.auditSeq)
-					}
 					if writeErr := p.writeAgentLine(w, line); writeErr != nil {
 						return writeErr
 					}
+					p.clearAuditFailure(card.auditSeq)
 					card.markAnswered()
 					select {
 					case progress <- struct{}{}:
@@ -1893,11 +1919,9 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 					p.resolveAudit(cardVal.auditSeq)
 					if p.requiredAudit && p.auditor.RequiredError() != nil {
 						line = jsonrpc.ErrorResponse(cardVal.requestID, -32603, auditAfterForwardError)
-					} else if cardVal.actionID != "" && !validActionResponse {
+					} else if cardVal.actionID != "" && !suppressAgentResponse &&
+						(!validActionResponse || !p.auditSequenceDurable(cardVal.auditSeq)) {
 						line = jsonrpc.ErrorResponse(cardVal.requestID, -32603, unverifiedToolResponseError)
-					}
-					if cardVal.actionID != "" && !suppressAgentResponse && !p.auditSequenceDurable(cardVal.auditSeq) && p.auditor.RequiredError() == nil {
-						return fmt.Errorf("action audit rows for sequence %d were not durable before response", cardVal.auditSeq)
 					}
 				}
 			}
@@ -1908,10 +1932,12 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 				return writeErr
 			}
 			if answeredCard != nil {
+				p.clearAuditFailure(answeredCard.auditSeq)
 				answeredCard.markAnswered()
 			}
 		}
 		if releaseRequest {
+			p.clearAuditFailure(releaseSeq)
 			p.releaseRequestID(releaseSeq)
 		}
 		select {
@@ -1931,21 +1957,22 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 	return scanErr
 }
 
-func (p *StdioProxy) auditSequenceFlushed(seq uint64) bool {
+func (p *StdioProxy) auditSequenceDurable(seq uint64) bool {
 	p.auditMutex.Lock()
-	defer p.auditMutex.Unlock()
-	if seq < p.auditNext {
-		return true
+	_, failed := p.auditFailed[seq]
+	flushed := seq < p.auditNext
+	if !flushed && p.auditSequenceResolvedLocked(seq) {
+		_, queued := p.auditTodo[seq]
+		flushed = !queued
 	}
-	if !p.auditSequenceResolvedLocked(seq) {
-		return false
-	}
-	_, queued := p.auditTodo[seq]
-	return !queued
+	p.auditMutex.Unlock()
+	return !failed && flushed && (!p.requiredAudit || p.auditor.RequiredError() == nil)
 }
 
-func (p *StdioProxy) auditSequenceDurable(seq uint64) bool {
-	return p.auditSequenceFlushed(seq) && (!p.requiredAudit || p.auditor.RequiredError() == nil)
+func (p *StdioProxy) clearAuditFailure(seq uint64) {
+	p.auditMutex.Lock()
+	delete(p.auditFailed, seq)
+	p.auditMutex.Unlock()
 }
 
 func actionResponseDetails(line []byte) (string, *bool) {

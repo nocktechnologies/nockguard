@@ -228,6 +228,8 @@ func New(path string, opts ...Option) (*Auditor, error) {
 		if err := a.verifyExisting(path); err != nil {
 			return nil, fmt.Errorf("audit trail %s failed verification on open — refusing to append onto a tampered or broken chain: %w", path, err)
 		}
+	} else if err := a.seedRunSequences(path); err != nil {
+		return nil, fmt.Errorf("seed audit run sequences: %w", err)
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -268,11 +270,14 @@ func (a *Auditor) verifyExisting(path string) error {
 	return a.seedRunSequences(path)
 }
 
-// seedRunSequences resumes each v2 run counter from its highest verified row.
-// This covers an append whose row reached disk but whose checkpoint update
-// failed: the verified chain may be ahead of the .hwm count after reopen.
+// seedRunSequences resumes each v2 run counter from its highest existing row.
+// Signed trails are verified before this scan. This also preserves sequence
+// continuity when an unsigned trail is reopened with the same run id.
 func (a *Auditor) seedRunSequences(path string) error {
 	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -285,10 +290,10 @@ func (a *Auditor) seedRunSequences(path string) error {
 			continue
 		}
 		var ev Event
-		if err := json.Unmarshal(line, &ev); err != nil {
-			return fmt.Errorf("seed audit run sequences: %w", err)
+		if err := json.Unmarshal(line, &ev); err != nil || ev.SchemaVersion != 2 || validateAuditLine(line, ev) != nil {
+			continue
 		}
-		if ev.SchemaVersion == 2 && ev.RunSeq > a.runSeqs[ev.RunID] {
+		if ev.RunSeq > a.runSeqs[ev.RunID] {
 			a.runSeqs[ev.RunID] = ev.RunSeq
 		}
 	}
@@ -1111,7 +1116,7 @@ func validateAuditLine(raw []byte, ev Event) error {
 				return fmt.Errorf("v2 field %q requires schema_version 2", name)
 			}
 		}
-		return nil
+		return validateApprovalActor(ev)
 	}
 	if ev.SchemaVersion != 2 {
 		return fmt.Errorf("unsupported audit schema_version %d", ev.SchemaVersion)
@@ -1476,9 +1481,6 @@ func verifyHMACStream(r io.Reader, hwm *highWaterMark, key []byte) (int, error) 
 		if err := validateAuditLine(raw, ev); err != nil {
 			return n, markTamper(n, fmt.Errorf("line %d: invalid audit record: %w", n, err))
 		}
-		if err := validateAuditEvent(ev); err != nil {
-			return n, markTamper(n, fmt.Errorf("line %d: invalid audit record: %w", n, err))
-		}
 		got := ev.Sig
 		if got == "" {
 			return n, markTamper(n, fmt.Errorf("line %d: entry is not signed", n))
@@ -1585,9 +1587,6 @@ func verifyEd25519Stream(r io.Reader, hwm *highWaterMark, pub ed25519.PublicKey)
 			return n, markTamper(n, fmt.Errorf("line %d: invalid json: %w", n, err))
 		}
 		if err := validateAuditLine(raw, ev); err != nil {
-			return n, markTamper(n, fmt.Errorf("line %d: invalid audit record: %w", n, err))
-		}
-		if err := validateAuditEvent(ev); err != nil {
 			return n, markTamper(n, fmt.Errorf("line %d: invalid audit record: %w", n, err))
 		}
 		if ev.Sig == "" {

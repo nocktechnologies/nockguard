@@ -315,10 +315,26 @@ func TestStdioActionPairingFastReplyIsNotHeldByEarlierSlowCall(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("fast response was held behind the earlier slow call")
 	}
-	if gate.requestIDInUse(pending, []byte("2")) {
-		t.Fatal("request ID remained reserved after its durable reply")
+	deadline := time.Now().Add(2 * time.Second)
+	var rows []audit.Event
+	for {
+		requestIDInUse := gate.requestIDInUse(pending, []byte("2"))
+		rows = actionEvents(readAuditEvents(t, path))
+		fastTerminalWritten := false
+		for _, ev := range rows {
+			if ev.Tool == "fast_tool" && ev.Observation == "response_observed" {
+				fastTerminalWritten = true
+				break
+			}
+		}
+		if !requestIDInUse && fastTerminalWritten {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fast action did not finish durably before deadline: request_id_in_use=%v rows=%+v", requestIDInUse, rows)
+		}
+		time.Sleep(time.Millisecond)
 	}
-	rows := actionEvents(readAuditEvents(t, path))
 	var slowDispatch, slowAllow, slowTerminal, fastAllow, fastTerminal int
 	for _, ev := range rows {
 		switch ev.Tool {
@@ -781,6 +797,74 @@ func TestActionPairingFailureAfterDispatchReturnsUnknownRetryWarning(t *testing.
 	}
 }
 
+func TestStdioRequiredAuditFailureAfterForwardWarnsInV1Mode(t *testing.T) {
+	auditor, path, _ := newEd25519Auditor(t)
+	defer auditor.Close()
+	gate := newGate(t, `audit:
+  enabled: true
+agents:
+  mira:
+    mode: allow
+`, nil, auditor)
+	pending := &sync.Map{}
+	if err := gate.agentToUpstream(strings.NewReader(callLine("1", "tool_one", "private")+"\n"), io.Discard, pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var agent bytes.Buffer
+	response := `{"jsonrpc":"2.0","id":1,"result":{"private":"must-not-pass"}}` + "\n"
+	if err := gate.upstreamToAgent(strings.NewReader(response), &agent, pending, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(agent.String(), auditAfterForwardError) || strings.Contains(agent.String(), "must-not-pass") {
+		t.Fatalf("v1 response after required audit failure was not withheld with a retry warning: %s", agent.String())
+	}
+}
+
+func TestStdioActionPairingWithholdsResponseWhenObservationRowFailsValidation(t *testing.T) {
+	auditor, path, _ := newEd25519Auditor(t)
+	defer auditor.Close()
+	gate := newActionPairingGate(t, auditor, "")
+	pending := &sync.Map{}
+	if err := gate.agentToUpstream(strings.NewReader(callLine("1", "tool_one", "private")+"\n"), io.Discard, pending); err != nil {
+		t.Fatal(err)
+	}
+	value, ok := pending.Load("1")
+	if !ok {
+		t.Fatal("forwarded action is missing from pending requests")
+	}
+	card, ok := value.(*pendingCard)
+	if !ok {
+		t.Fatalf("pending request has type %T, want *pendingCard", value)
+	}
+
+	// Simulate a queued schema-v2 observation that fails the auditor's validation.
+	// RecordRequired deliberately does not latch caller-input validation failures.
+	gate.actionRunID = "invalid-run-id"
+	var agent bytes.Buffer
+	response := `{"jsonrpc":"2.0","id":1,"result":{"secret":"must-not-pass"}}` + "\n"
+	if err := gate.upstreamToAgent(strings.NewReader(response), &agent, pending, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(agent.String(), unverifiedToolResponseError) || strings.Contains(agent.String(), "must-not-pass") {
+		t.Fatalf("response with an unrecordable observation was released: %s", agent.String())
+	}
+	if card.actionID == "" {
+		t.Fatal("forwarded action has no action id")
+	}
+	for _, ev := range actionEvents(readAuditEvents(t, path)) {
+		if ev.Observation != "" {
+			t.Fatalf("invalid observation unexpectedly reached the trail: %+v", ev)
+		}
+	}
+}
+
 func TestStdioActionPairingRejectsInvalidMatchedResponseEnvelope(t *testing.T) {
 	auditor, path, _ := newEd25519Auditor(t)
 	defer auditor.Close()
@@ -803,6 +887,57 @@ func TestStdioActionPairingRejectsInvalidMatchedResponseEnvelope(t *testing.T) {
 		}
 	}
 	t.Fatal("invalid matched response was not recorded as unknown")
+}
+
+func TestStdioActionPairingRejectsAmbiguousResponseEnvelopeKeys(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+	}{
+		{
+			name:     "duplicate id",
+			response: `{"jsonrpc":"2.0","id":1,"id":2,"result":{"private":"must-not-pass"}}`,
+		},
+		{
+			name:     "case alias id",
+			response: `{"jsonrpc":"2.0","id":1,"ID":2,"result":{"private":"must-not-pass"}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			auditor, path, _ := newEd25519Auditor(t)
+			defer auditor.Close()
+			gate := newActionPairingGate(t, auditor, "")
+			pending := &sync.Map{}
+			if err := gate.agentToUpstream(strings.NewReader(callLine("2", "tool_two", "request-private")+"\n"), io.Discard, pending); err != nil {
+				t.Fatal(err)
+			}
+
+			var agent bytes.Buffer
+			if err := gate.upstreamToAgent(strings.NewReader(tt.response+"\n"), &agent, pending, nil); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(agent.String(), unverifiedToolResponseError) || strings.Contains(agent.String(), "must-not-pass") {
+				t.Fatalf("ambiguous response was not replaced with an uncertainty error: %s", agent.String())
+			}
+			if !gate.requestIDInUse(pending, []byte("2")) {
+				t.Fatal("ambiguous response consumed the pending request before late-response correlation")
+			}
+
+			var unknown, observed int
+			for _, ev := range actionEvents(readAuditEvents(t, path)) {
+				if ev.Observation == "outcome_unknown" {
+					unknown++
+				}
+				if ev.Observation == "response_observed" {
+					observed++
+				}
+			}
+			if unknown != 1 || observed != 0 {
+				t.Fatalf("ambiguous response outcomes unknown/observed=%d/%d; want 1/0", unknown, observed)
+			}
+		})
+	}
 }
 
 func TestStdioActionPairingMalformedTypedErrorResolvesAndUnblocksLaterResponse(t *testing.T) {

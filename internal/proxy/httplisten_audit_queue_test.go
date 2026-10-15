@@ -183,7 +183,6 @@ func TestHTTPListener_PendingToolsListKeepsCardPredecessor(t *testing.T) {
 	listRelease := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseList := func() { releaseOnce.Do(func() { close(listRelease) }) }
-	defer releaseList()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -221,6 +220,7 @@ agents:
 	listener := NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit()
 	server := httptest.NewServer(listener)
 	defer server.Close()
+	defer releaseList()
 
 	claimA := `{"jsonrpc":"2.0","id":"claim-a","method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":111}}}`
 	if status, _, _ := post(t, server.URL, claimA); status != http.StatusOK {
