@@ -1090,15 +1090,25 @@ func validateAuditLine(raw []byte, ev Event) error {
 	if err := rejectDuplicateObjectKeys(raw); err != nil {
 		return err
 	}
-	if err := rejectNonStringApprovalActor(raw); err != nil {
-		return err
-	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
 		if err == nil {
 			err = fmt.Errorf("audit line is not a JSON object")
 		}
 		return err
+	}
+	if actorRaw, ok := fields["approval_actor"]; ok {
+		actorRaw = bytes.TrimSpace(actorRaw)
+		if len(actorRaw) == 0 || actorRaw[0] != '"' {
+			return fmt.Errorf("approval_actor must be a JSON string")
+		}
+		var actor string
+		if err := json.Unmarshal(actorRaw, &actor); err != nil {
+			return fmt.Errorf("approval_actor must be a JSON string")
+		}
+		if actor == "" {
+			return fmt.Errorf("empty approval_actor must be omitted")
+		}
 	}
 	for key := range fields {
 		if _, known := auditFieldNames[key]; !known {

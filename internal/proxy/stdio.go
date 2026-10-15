@@ -1319,10 +1319,12 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 		seq := p.reserveAuditSequence()
 		deferred := false
 		actionID := ""
+		var canonicalTopLevel map[string]json.RawMessage
+		var canonicalLine []byte
+		var canonicalFailure canonicalMessageFailure
 		var canonicalMsg *jsonrpc.Message
 		if p.actionPairing {
-			var canonicalFailure canonicalMessageFailure
-			_, _, canonicalMsg, canonicalFailure = canonicalizeMessage(scanner.Bytes())
+			canonicalTopLevel, canonicalLine, canonicalMsg, canonicalFailure = canonicalizeMessage(scanner.Bytes())
 			if canonicalFailure == canonicalMessageOK && canonicalMsg != nil && canonicalMsg.Method == "tools/call" {
 				var err error
 				actionID, err = p.newActionID()
@@ -1357,7 +1359,12 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			continue
 		}
 
-		d := p.decide(scanner.Bytes(), seq)
+		var d mcpDecision
+		if p.actionPairing {
+			d = p.decideCanonical(canonicalTopLevel, canonicalLine, canonicalMsg, canonicalFailure, seq)
+		} else {
+			d = p.decide(scanner.Bytes(), seq)
+		}
 		if p.requiredAudit && p.auditor.RequiredError() != nil {
 			p.resolveAudit(seq)
 			id := d.rejectID
@@ -1421,23 +1428,12 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				if p.actionPairing {
 					p.trackRequestID(seq, d.forwardID)
 				}
-				var refsCopy extract.References
+				pendingCard := d.actionCard(seq, actionID)
+				pendingCard.stateTool = d.toolForState
 				if d.refsForState != nil {
-					refsCopy = *d.refsForState
+					pendingCard.stateRefs = *d.refsForState
 				}
-				var auditRefs extract.References
-				if d.refsForAudit != nil {
-					auditRefs = *d.refsForAudit
-				}
-				pendingCard := &pendingCard{
-					tool:      d.tool,
-					refs:      auditRefs,
-					stateTool: d.toolForState,
-					stateRefs: refsCopy,
-					auditSeq:  seq,
-					actionID:  actionID,
-					requestID: append(json.RawMessage(nil), d.forwardID...),
-				}
+				pendingCard.requestID = append(json.RawMessage(nil), d.forwardID...)
 				pending.Store(string(d.forwardID), pendingCard)
 			}
 			if _, writeErr := fmt.Fprintf(w, "%s\n", d.forward); writeErr != nil {
@@ -1542,6 +1538,10 @@ func (p *StdioProxy) decide(line []byte, seq uint64) mcpDecision {
 	// "method":"tools/list" hiding a "method":"tools/call"). A line that is not
 	// a single JSON object (batch array, malformed) fails here → fail CLOSED.
 	topLevel, canonicalLine, msg, failure := canonicalizeMessage(line)
+	return p.decideCanonical(topLevel, canonicalLine, msg, failure, seq)
+}
+
+func (p *StdioProxy) decideCanonical(topLevel map[string]json.RawMessage, canonicalLine []byte, msg *jsonrpc.Message, failure canonicalMessageFailure, seq uint64) mcpDecision {
 	switch failure {
 	case canonicalMessageUndecodable:
 		p.logger.Printf("REJECT agent=%s reason=undecodable-or-batch", p.agent)
@@ -1595,23 +1595,17 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 	// Extract auditable references from tool arguments.
 	refs := extract.FromToolCall(toolName, canonicalParams)
 	if !ok || toolName == "" {
-		if p.actionPairing {
-			// An empty tool name is caller input, not an approvable policy miss.
-			// Reject it before it can become an invalid schema-v2 dispatch row,
-			// which requires a non-empty tool.
-			p.logger.Printf("DENY agent=%s reason=unextractable-name", p.agent)
-			p.appendAudit(seq, "", "deny", "unextractable-name", nil)
-			p.resolveAudit(seq)
-			return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600,
-				rejectMsg: "nockguard: tools/call rejected — tool name could not be extracted", notForwardedCause: "policy_denied"}
+		if !p.actionPairing {
+			// Preserve the legacy fail_mode: ask behavior. Pairing mode rejects
+			// unextractable calls so every lifecycle row has a tool name.
+			dec := p.engine.FailModeVerdict(p.agent, "unextractable-name")
+			if dec.Verdict == policy.Ask && p.approveAsk("", canonicalLine, nil, dec, seq) {
+				p.resolveAudit(seq)
+				return mcpDecision{forward: canonicalLine}
+			}
 		}
-		// A tools/call whose name we cannot extract fails CLOSED — the
-		// upstream might still resolve a name the proxy could not see.
-		dec := p.engine.FailModeVerdict(p.agent, "unextractable-name")
-		if dec.Verdict == policy.Ask && p.approveAsk("", canonicalLine, nil, dec, seq) {
-			p.resolveAudit(seq)
-			return mcpDecision{forward: canonicalLine}
-		}
+		// A tools/call whose name cannot be extracted fails closed — an upstream
+		// may resolve a name the proxy could not see.
 		p.logger.Printf("DENY agent=%s reason=unextractable-name", p.agent)
 		p.appendAudit(seq, "", "deny", "unextractable-name", nil)
 		p.resolveAudit(seq)
