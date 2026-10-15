@@ -4,6 +4,9 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Evidence packs now parse audit entries and verify their chain and checkpoint from the same in-memory snapshot, keeping the contents and integrity verdict consistent during file replacement.
+
 ### Changed
 - The Wall decision filter lists every decision the audit log writes, adds approvals granted, dispatched and would-deny (observe) tiles with matching `/pulse` counts, keeps an "other" bucket for unknown values, and `--demo` shows each tile. A test fails CI when Go emits a decision the Wall does not know.
 
