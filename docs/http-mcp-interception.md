@@ -7,8 +7,11 @@ matches the client's connector transport.
 
 `nockguard mcp-http` is a stdio-to-HTTP bridge. A client that launches local
 stdio MCP servers can run it as the MCP command. It forwards JSON-RPC POSTs to
-the configured upstream, preserves the MCP session header, handles JSON and SSE
-responses, and applies the local agent policy and audit configuration.
+the configured upstream, preserves the MCP session header, and handles JSON and
+SSE responses. This bridge is observe-only: it records tool-call observations
+(signed when auditing is configured), but does not block calls by policy. Use
+`proxy` for a stdio server or `mcp-listen` for a loopback HTTP client when policy
+enforcement is required.
 
 ```json
 {
@@ -24,6 +27,13 @@ responses, and applies the local agent policy and audit configuration.
 
 Set `MCP_AUTH_HEADER` to the upstream Authorization header value when required.
 Use a policy and signing key for `coder` if signed auditing is needed.
+
+To return to a direct connector, restore its previous client configuration and
+restart the client. For diagnostics, `NOCKGUARD_TRIPWIRE=1` makes `mcp-http`
+forward without audit writes and logs that state loudly at startup; clear the
+variable to resume auditing. `--audit-best-effort` allows forwarding after an
+audit-write failure and also warns at startup. Both options weaken audit
+coverage, so verify the trail after restoring the normal configuration.
 
 ## Managed remote HTTP connector
 

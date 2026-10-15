@@ -819,7 +819,7 @@ func ValidAgentName(agent string) bool {
 // agent's Ed25519 private key seed. Hyphens and dots in the agent name are
 // replaced with underscores and the result is uppercased:
 //
-//	demo-nockos → NOCKGUARD_AGENT_DEMO_NOCKOS_ED25519_KEY
+//	reviewer-1 → NOCKGUARD_AGENT_REVIEWER_1_ED25519_KEY
 func AgentKeyEnvName(agent string) string {
 	upper := strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(agent))
 	return "NOCKGUARD_AGENT_" + upper + "_ED25519_KEY"
