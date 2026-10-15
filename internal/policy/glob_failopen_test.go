@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -117,5 +118,119 @@ func TestWellFormedDenyStillBehaves(t *testing.T) {
 	}
 	if !eng.Check("kit", "nockcc_spend_add") {
 		t.Error("a tool not matched by the deny but matched by allow must still be allowed")
+	}
+}
+
+func TestPolicyGlobSyntaxAcrossRuleFields(t *testing.T) {
+	fields := []struct {
+		name string
+	}{
+		{name: "deny"},
+		{name: "ask"},
+		{name: "require_approval"},
+		{name: "allow"},
+		{name: "shadow"},
+	}
+	patterns := []struct {
+		name      string
+		pattern   string
+		matching  string
+		nonmatch  string
+		malformed bool
+	}{
+		{name: "question", pattern: "exec?", matching: "exec1", nonmatch: "exec12"},
+		{name: "class", pattern: "deploy_[ab]", matching: "deploy_a", nonmatch: "deploy_c"},
+		{name: "star", pattern: "deploy_*", matching: "deploy_prod", nonmatch: "read_file"},
+		{name: "literal", pattern: "deploy_prod", matching: "deploy_prod", nonmatch: "deploy_dev"},
+		{name: "malformed_class", pattern: "deploy_[ab", malformed: true},
+	}
+
+	for _, field := range fields {
+		for _, pattern := range patterns {
+			t.Run(field.name+"/"+pattern.name, func(t *testing.T) {
+				policyText := fmt.Sprintf("agents:\n  kit:\n    mode: allow\n    %s:\n      - %q\n", field.name, pattern.pattern)
+				eng, err := LoadBytes([]byte(policyText))
+				if pattern.malformed {
+					if err == nil || !strings.Contains(err.Error(), "malformed glob") {
+						t.Fatalf("LoadBytes() error = %v, want malformed glob error", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("LoadBytes(): %v", err)
+				}
+
+				for _, sample := range []struct {
+					tool    string
+					matches bool
+				}{{pattern.matching, true}, {pattern.nonmatch, false}} {
+					if field.name == "require_approval" {
+						if got := eng.RequiresApproval("kit", sample.tool); got != sample.matches {
+							t.Errorf("RequiresApproval(%q) = %v, want %v", sample.tool, got, sample.matches)
+						}
+						continue
+					}
+
+					decision := eng.Evaluate("kit", sample.tool)
+					switch field.name {
+					case "deny":
+						want := Allow
+						if sample.matches {
+							want = Deny
+						}
+						if decision.Verdict != want {
+							t.Errorf("Evaluate(%q).Verdict = %v, want %v", sample.tool, decision.Verdict, want)
+						}
+					case "ask":
+						want := Allow
+						if sample.matches {
+							want = Ask
+						}
+						if decision.Verdict != want {
+							t.Errorf("Evaluate(%q).Verdict = %v, want %v", sample.tool, decision.Verdict, want)
+						}
+					case "allow":
+						want := Deny
+						if sample.matches {
+							want = Allow
+						}
+						if decision.Verdict != want {
+							t.Errorf("Evaluate(%q).Verdict = %v, want %v", sample.tool, decision.Verdict, want)
+						}
+					case "shadow":
+						if decision.Verdict != Allow {
+							t.Errorf("Evaluate(%q).Verdict = %v, want Allow", sample.tool, decision.Verdict)
+						}
+						want := !sample.matches
+						if decision.ShadowWouldDeny != want {
+							t.Errorf("Evaluate(%q).ShadowWouldDeny = %v, want %v", sample.tool, decision.ShadowWouldDeny, want)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestGlobPatternOverlapUsesPolicyGlobSyntax(t *testing.T) {
+	tests := []struct {
+		name         string
+		pattern      string
+		literal      string
+		wantDisjoint bool
+	}{
+		{name: "question overlaps literal", pattern: "exec?", literal: "exec1", wantDisjoint: false},
+		{name: "question misses literal", pattern: "exec?", literal: "exec12", wantDisjoint: true},
+		{name: "class overlaps literal", pattern: "deploy_[ab]", literal: "deploy_a", wantDisjoint: false},
+		{name: "class misses literal", pattern: "deploy_[ab]", literal: "deploy_c", wantDisjoint: true},
+		{name: "star overlaps literal", pattern: "deploy_*", literal: "deploy_prod", wantDisjoint: false},
+		{name: "star misses literal", pattern: "deploy_*", literal: "read_file", wantDisjoint: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isGlobPatternDisjoint(tt.pattern, tt.literal); got != tt.wantDisjoint {
+				t.Errorf("isGlobPatternDisjoint(%q, %q) = %v, want %v", tt.pattern, tt.literal, got, tt.wantDisjoint)
+			}
+		})
 	}
 }
