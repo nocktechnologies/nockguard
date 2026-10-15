@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
@@ -1255,8 +1256,20 @@ func invalidActionResponseID(line []byte, decodeErr error) (json.RawMessage, boo
 }
 
 // actionResponseKeyFold maps each rune's simple-fold cycle to its lowest rune,
-// preserving EqualFold semantics while producing a map key in one pass.
+// preserving EqualFold semantics while producing a map key in one pass. ASCII
+// keys use the equivalent, cheaper uppercase form.
 func actionResponseKeyFold(key string) string {
+	ascii := true
+	for i := 0; i < len(key); i++ {
+		if key[i] >= utf8.RuneSelf {
+			ascii = false
+			break
+		}
+	}
+	if ascii {
+		return strings.ToUpper(key)
+	}
+
 	var folded strings.Builder
 	folded.Grow(len(key))
 	for _, r := range key {
