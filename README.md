@@ -94,7 +94,7 @@ Run `nockguard wall` to start the Live Wall.
 
 ## Writing a policy
 
-`nockguard init` writes a commented, default-deny starter you edit in place. Or write one yourself — per-agent allow/deny with `*` wildcards, and a `default` for agents you did not name:
+`nockguard init` writes a commented, default-deny starter you edit in place. Or write one yourself — per-agent allow/deny with Go `path.Match` patterns, and a `default` for agents you did not name:
 
 ```yaml
 # policy.yaml
@@ -132,7 +132,7 @@ nockguard proxy \
 
 ## Policy rules
 
-- **allow**: Tool patterns the agent can use. Supports `*` wildcards.
+- **allow**: Tool patterns the agent can use.
 - **deny**: Tool patterns blocked regardless of allow rules. Deny takes precedence.
 - **shadow**: Dry-run allowlist for observe-to-enforce staging. A tool outside
   `shadow` records `would-deny` in the audit trail but is not blocked.
@@ -142,6 +142,7 @@ nockguard proxy \
   `deny` blocks them. With no allow list or explicit mode, the policy denies
   by default. With an allow list, unmatched tools are denied.
 - **default**: Fallback policy for agents not listed by name.
+- Tool patterns in `allow`, `deny`, `ask`, `shadow`, `require_approval`, and `inject` support `*`, `?`, and character classes such as `[ab]`. Wildcards do not match `/`.
 - **validate_input** (Phase 2): built-in input-validation categories applied to tool-call arguments — `sqli`, `path_traversal`, `secrets`. Opt-in per agent.
 - **block_params** (Phase 2): custom regex patterns; a tool call is blocked if any argument matches.
 - **rate_limit** (Phase 3): at most `max_calls` tool calls within a sliding `window` (a positive Go duration — `30s`, `1m`, `1h`). Missing, invalid, zero, and negative windows are rejected when loading the policy. The allowance refills as the window slides — this bounds bursts and runaway tool-call loops without blocking normal traffic.
