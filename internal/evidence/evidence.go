@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"time"
@@ -124,32 +125,23 @@ func BuildPack(opts PackOptions) (Pack, error) {
 		return Pack{}, err
 	}
 
-	// 1) Snapshot each trail and checkpoint once. Parse the trail snapshot for
-	// the raw appendix and control buckets; a tampered trail still yields its
-	// now-suspect entries, which the attestation flags and the evidence shows.
+	// 1) Snapshot each trail and checkpoint under the audit writer's shared
+	// lock. Parse the trail snapshot for the raw appendix and control buckets; a
+	// tampered trail still yields its now-suspect entries, which the attestation
+	// flags and the evidence shows.
 	snapshots := make([]auditSnapshot, 0, len(opts.AuditFiles))
 	var allEntries []audit.Event
 	for _, path := range opts.AuditFiles {
-		trail, rerr := os.ReadFile(path)
+		snapshot, rerr := readAuditSnapshot(path)
 		if rerr != nil {
 			return Pack{}, fmt.Errorf("reading audit file %s: %w", path, rerr)
 		}
-		checkpoint, checkpointErr := os.ReadFile(path + ".hwm")
-		if errors.Is(checkpointErr, os.ErrNotExist) {
-			checkpoint = nil
-			checkpointErr = nil
-		}
-		entries, rerr := parseEntries(trail)
+		entries, rerr := parseEntries(snapshot.trail)
 		if rerr != nil {
 			return Pack{}, fmt.Errorf("reading audit file %s: %w", path, rerr)
 		}
 		allEntries = append(allEntries, entries...)
-		snapshots = append(snapshots, auditSnapshot{
-			path:          path,
-			trail:         trail,
-			checkpoint:    checkpoint,
-			checkpointErr: checkpointErr,
-		})
+		snapshots = append(snapshots, snapshot)
 	}
 
 	// 2) Verify each file's chain via the existing audit package. Harden the
@@ -243,6 +235,38 @@ type auditSnapshot struct {
 	trail         []byte
 	checkpoint    []byte
 	checkpointErr error
+}
+
+// readAuditSnapshot reads the checkpoint first, then the trail through one open
+// file while holding the same shared flock signed writers take exclusively.
+func readAuditSnapshot(path string) (snapshot auditSnapshot, err error) {
+	snapshot.path = path
+	f, err := os.Open(path)
+	if err != nil {
+		return snapshot, err
+	}
+	defer f.Close()
+	if err := audit.LockShared(f.Fd()); err != nil {
+		snapshot.checkpointErr = fmt.Errorf("locking audit snapshot: %w", err)
+	} else {
+		defer func() {
+			if err := audit.UnlockFile(f.Fd()); err != nil && snapshot.checkpointErr == nil {
+				snapshot.checkpointErr = fmt.Errorf("unlocking audit snapshot: %w", err)
+			}
+		}()
+	}
+
+	checkpoint, checkpointErr := os.ReadFile(path + ".hwm")
+	if errors.Is(checkpointErr, os.ErrNotExist) {
+		checkpoint = nil
+		checkpointErr = nil
+	}
+	snapshot.checkpoint = checkpoint
+	if snapshot.checkpointErr == nil {
+		snapshot.checkpointErr = checkpointErr
+	}
+	snapshot.trail, err = io.ReadAll(f)
+	return snapshot, err
 }
 
 // verifyFile checks a trail snapshot and captures verification failures in the
