@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
@@ -1197,7 +1198,7 @@ func invalidActionResponseID(line []byte, decodeErr error) (json.RawMessage, boo
 	}
 	var id, versionRaw, errorRaw json.RawMessage
 	var hasID, hasVersion, hasMethod, hasResult, hasError bool
-	var seenKeys []string
+	seenKeys := make(map[string]struct{})
 	duplicateKey := false
 	for dec.More() {
 		tok, err = dec.Token()
@@ -1208,13 +1209,11 @@ func invalidActionResponseID(line []byte, decodeErr error) (json.RawMessage, boo
 		if !ok {
 			return nil, false
 		}
-		for _, seen := range seenKeys {
-			if strings.EqualFold(seen, key) {
-				duplicateKey = true
-				break
-			}
+		foldedKey := actionResponseKeyFold(key)
+		if _, seen := seenKeys[foldedKey]; seen {
+			duplicateKey = true
 		}
-		seenKeys = append(seenKeys, key)
+		seenKeys[foldedKey] = struct{}{}
 		var value json.RawMessage
 		if dec.Decode(&value) != nil {
 			return nil, false
@@ -1253,6 +1252,23 @@ func invalidActionResponseID(line []byte, decodeErr error) (json.RawMessage, boo
 		invalid = true
 	}
 	return id, invalid
+}
+
+// actionResponseKeyFold maps each rune's simple-fold cycle to its lowest rune,
+// preserving EqualFold semantics while producing a map key in one pass.
+func actionResponseKeyFold(key string) string {
+	var folded strings.Builder
+	folded.Grow(len(key))
+	for _, r := range key {
+		canonical := r
+		for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {
+			if next < canonical {
+				canonical = next
+			}
+		}
+		folded.WriteRune(canonical)
+	}
+	return folded.String()
 }
 
 func (p *StdioProxy) markCancelledAction(pending *sync.Map, requestID json.RawMessage) {

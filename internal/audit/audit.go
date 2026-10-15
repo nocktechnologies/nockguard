@@ -140,15 +140,16 @@ const nocklockSessionIDEnv = "NOCKLOCK_SESSION_ID"
 type Auditor struct {
 	clock func() time.Time
 
-	mu          sync.Mutex
-	f           *os.File
-	path        string             // audit file path; used to re-read the on-disk chain head under the flock
-	key         []byte             // HMAC signing key; empty = unsigned trail
-	edPriv      ed25519.PrivateKey // Ed25519 signing key; non-nil = non-repudiable trail (takes precedence over key)
-	keyID       string             // hex(sha256(pub)) of edPriv's public key; stamped on Events when edPriv is set
-	runSeqs     map[string]uint64  // last durably appended v2 sequence per fresh process run id
-	closed      bool
-	requiredErr error
+	mu            sync.Mutex
+	f             *os.File
+	path          string             // audit file path; used to re-read the on-disk chain head under the flock
+	key           []byte             // HMAC signing key; empty = unsigned trail
+	edPriv        ed25519.PrivateKey // Ed25519 signing key; non-nil = non-repudiable trail (takes precedence over key)
+	keyID         string             // hex(sha256(pub)) of edPriv's public key; stamped on Events when edPriv is set
+	runSeqs       map[string]uint64  // last durably appended v2 sequence per fresh process run id
+	actionPairing bool               // seed existing v2 run sequences only for the opt-in pairing writer
+	closed        bool
+	requiredErr   error
 }
 
 // Option configures an Auditor at construction.
@@ -180,6 +181,12 @@ func WithEd25519Key(priv ed25519.PrivateKey) Option {
 			a.keyID = hex.EncodeToString(sum[:])
 		}
 	}
+}
+
+// WithActionPairing enables resuming v2 run sequences from an existing trail.
+// The default audit path does not scan unsigned trails on open.
+func WithActionPairing() Option {
+	return func(a *Auditor) { a.actionPairing = true }
 }
 
 // signing reports whether any signing mode is active.
@@ -228,8 +235,12 @@ func New(path string, opts ...Option) (*Auditor, error) {
 		if err := a.verifyExisting(path); err != nil {
 			return nil, fmt.Errorf("audit trail %s failed verification on open — refusing to append onto a tampered or broken chain: %w", path, err)
 		}
-	} else if err := a.seedRunSequences(path); err != nil {
-		return nil, fmt.Errorf("seed audit run sequences: %w", err)
+	} else if a.actionPairing {
+		// Unsigned v1 users retain the legacy open path. Only the opt-in v2
+		// pairing writer needs to scan for a run sequence to resume.
+		if err := a.seedRunSequences(path); err != nil {
+			return nil, fmt.Errorf("seed audit run sequences: %w", err)
+		}
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -245,9 +256,9 @@ func New(path string, opts ...Option) (*Auditor, error) {
 }
 
 // verifyExisting walks the existing trail and confirms the hash chain is intact
-// before the auditor seeds its prevSig from the tail and starts appending. A
-// missing file (nothing recorded yet) and unsigned mode are both no-ops. For
-// Ed25519 the public key is derived from the configured private key, so the same
+// before the auditor starts appending. When action pairing is enabled, it also
+// seeds the per-run v2 sequence counters. A missing file is a no-op. For Ed25519
+// the public key is derived from the configured private key, so the same
 // verification the external `audit verify` command runs is enforced at open time.
 func (a *Auditor) verifyExisting(path string) error {
 	if _, err := os.Stat(path); err != nil {
@@ -267,7 +278,10 @@ func (a *Auditor) verifyExisting(path string) error {
 	} else if _, err := Verify(path, a.key); err != nil {
 		return err
 	}
-	return a.seedRunSequences(path)
+	if a.actionPairing {
+		return a.seedRunSequences(path)
+	}
+	return nil
 }
 
 // seedRunSequences resumes each v2 run counter from its highest existing row.

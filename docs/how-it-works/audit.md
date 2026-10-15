@@ -59,6 +59,10 @@ open/close records and therefore do not support a completeness verdict; the
 dispatch itself never proves execution or success. Source:
 `internal/audit/audit.go`, `internal/proxy/stdio.go`.
 
+When pairing is enabled, the writer resumes unsigned `run_seq` counters from
+valid v2 rows already in the trail. Unsigned audit opens without pairing retain
+the legacy path and do not scan the trail for sequence state.
+
 `evidence --framework soc2` maps verified rows into a local pack; other
 framework names are stubs ([cmd/nockguard/main.go](../../cmd/nockguard/main.go)). Optional NockCC
 ops-log forwarding is a second output, not the local proof source

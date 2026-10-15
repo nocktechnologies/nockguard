@@ -902,6 +902,10 @@ func TestStdioActionPairingRejectsAmbiguousResponseEnvelopeKeys(t *testing.T) {
 			name:     "case alias id",
 			response: `{"jsonrpc":"2.0","id":1,"ID":2,"result":{"private":"must-not-pass"}}`,
 		},
+		{
+			name:     "unicode case-fold alias",
+			response: `{"jsonrpc":"2.0","id":2,"result":{"private":"must-not-pass"},"re\u017Fult":{}}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -937,6 +941,36 @@ func TestStdioActionPairingRejectsAmbiguousResponseEnvelopeKeys(t *testing.T) {
 				t.Fatalf("ambiguous response outcomes unknown/observed=%d/%d; want 1/0", unknown, observed)
 			}
 		})
+	}
+}
+
+func TestInvalidActionResponseIDHandlesLargeEnvelopeQuickly(t *testing.T) {
+	const keys = 100_000
+	var response strings.Builder
+	response.Grow(keys * 16)
+	response.WriteString(`{"jsonrpc":"2.0","id":1,"result":{}`)
+	for i := 0; i < keys; i++ {
+		response.WriteString(`,"field`)
+		response.WriteString(strconv.Itoa(i))
+		response.WriteString(`":0`)
+	}
+	response.WriteByte('}')
+
+	start := time.Now()
+	id, invalid := invalidActionResponseID([]byte(response.String()), nil)
+	if invalid || string(id) != "1" {
+		t.Fatalf("large valid envelope was rejected: id=%s invalid=%t", id, invalid)
+	}
+	if elapsed := time.Since(start); elapsed >= time.Second {
+		t.Fatalf("100,000-key response took %s to parse; want under one second", elapsed)
+	}
+}
+
+func TestInvalidActionResponseIDKeepsDottedIKeysDistinct(t *testing.T) {
+	response := []byte(`{"jsonrpc":"2.0","id":1,"\u0130d":2,"result":{}}`)
+	id, invalid := invalidActionResponseID(response, nil)
+	if invalid || string(id) != "1" {
+		t.Fatalf("distinct dotted-I key was treated as an id alias: id=%s invalid=%t", id, invalid)
 	}
 }
 

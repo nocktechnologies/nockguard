@@ -62,7 +62,7 @@ func TestV2RunSequenceSeedsFromTrailAfterCheckpointFailure(t *testing.T) {
 	key := []byte("v2-reopen-signing-key-0123456789")
 	runID := "00112233445566778899aabbccddeeff"
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
-	a, err := New(path, WithSigningKey(key))
+	a, err := New(path, WithSigningKey(key), WithActionPairing())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestV2RunSequenceSeedsFromTrailAfterCheckpointFailure(t *testing.T) {
 		t.Fatalf("failed-checkpoint row was not present with run_seq 2: %+v", rows)
 	}
 
-	reopened, err := New(path, WithSigningKey(key))
+	reopened, err := New(path, WithSigningKey(key), WithActionPairing())
 	if err != nil {
 		t.Fatalf("verified reopen failed: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestV2RunSequenceSeedsFromUnsignedTrailAfterReopen(t *testing.T) {
 	write := func(a *Auditor, tool string) error {
 		return a.RecordRequired(Event{Agent: "mira", Tool: tool, Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: runID})
 	}
-	first, err := New(path)
+	first, err := New(path, WithActionPairing())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestV2RunSequenceSeedsFromUnsignedTrailAfterReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened, err := New(path)
+	reopened, err := New(path, WithActionPairing())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,6 +141,44 @@ func TestV2RunSequenceSeedsFromUnsignedTrailAfterReopen(t *testing.T) {
 	rows := readLines(t, path)
 	if len(rows) != 2 || rows[0]["run_seq"] != float64(1) || rows[1]["run_seq"] != float64(2) {
 		t.Fatalf("unsigned reopened run sequence duplicated or skipped: %+v", rows)
+	}
+}
+
+func TestUnsignedTrailDoesNotSeedRunSequencesWithoutActionPairing(t *testing.T) {
+	runID := "00112233445566778899aabbccddeeff"
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	prior, err := json.Marshal(Event{
+		Time:          "2026-10-15T00:00:00Z",
+		Agent:         "mira",
+		Tool:          "tool",
+		Decision:      "allow",
+		SchemaVersion: 2,
+		RecordType:    "decision",
+		RunID:         runID,
+		RunSeq:        9,
+		ActionID:      runID + ".1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event Event
+	if err := json.Unmarshal(prior, &event); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateAuditLine(prior, event); err != nil {
+		t.Fatalf("test v2 row is invalid: %v", err)
+	}
+	if err := os.WriteFile(path, append(append([]byte("not-json\n"), prior...), '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := New(path)
+	if err != nil {
+		t.Fatalf("unsigned legacy trail with an unparseable line should still open: %v", err)
+	}
+	defer a.Close()
+	if len(a.runSeqs) != 0 {
+		t.Fatalf("default audit open unexpectedly scanned v2 run sequences: %+v", a.runSeqs)
 	}
 }
 

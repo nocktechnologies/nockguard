@@ -773,6 +773,9 @@ func (e *Engine) auditorAt(path string) (*audit.Auditor, error) {
 		return nil, err
 	}
 	var opts []audit.Option
+	if e.config.Audit != nil && e.config.Audit.ActionPairing {
+		opts = append(opts, audit.WithActionPairing())
+	}
 	// Ed25519 (non-repudiable) takes precedence over HMAC when both are configured.
 	if e.config.Audit != nil && e.config.Audit.SignEd25519KeyEnv != "" {
 		env := e.config.Audit.SignEd25519KeyEnv
@@ -927,7 +930,11 @@ func (e *Engine) AuditorForAgent(agent string, requirePerAgent bool) (*audit.Aud
 	} else if path, err = expandTilde(path); err != nil {
 		return nil, false, err
 	}
-	a, err := audit.New(AgentAuditPath(path, agent), audit.WithEd25519Key(priv))
+	opts := []audit.Option{audit.WithEd25519Key(priv)}
+	if e.config.Audit.ActionPairing {
+		opts = append(opts, audit.WithActionPairing())
+	}
+	a, err := audit.New(AgentAuditPath(path, agent), opts...)
 	return a, err == nil, err
 }
 
