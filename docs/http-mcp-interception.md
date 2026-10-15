@@ -1,149 +1,39 @@
-# HTTP MCP Interception — Phase-0 Design Note (N8761)
+# HTTP MCP interception
 
-> **Superseded for the flagship seat** by
-> [`docs/design/n8761-phase0-http-listener-forward-proxy.md`](design/n8761-phase0-http-listener-forward-proxy.md).
-> The stdio-bridge transport chosen below (Candidate 1a) is inapplicable to
-> Mira's managed remote-HTTP connector, which has no local `.mcp.json` command
-> entry to load a stdio server into. The HTTP listener (Candidate 1b, filed here
-> as a fallback) is promoted to the chosen path in that note. `nockguard mcp-http`
-> as built remains valid for genuinely stdio-wrappable seats.
+NockGuard supports two paths for an HTTP MCP upstream. Choose the path that
+matches the client's connector transport.
 
-## Context
+## Local stdio client
 
-Mira's flagship seat reaches NockCC via the **claude.ai remote-HTTP connector**
-(`claude mcp list` → "claude.ai NCC: https://cc.nocktechnologies.io/mcp ✔ Connected").
-A stdio proxy cannot wrap an HTTP endpoint, which is why the pilot has been dark
-since 2026-07-07 (`~/.nockguard/logs/mira.audit.jsonl` frozen at
-2026-07-07T05:17Z, no proxy running).
+`nockguard mcp-http` is a stdio-to-HTTP bridge. A client that launches local
+stdio MCP servers can run it as the MCP command. It forwards JSON-RPC POSTs to
+the configured upstream, preserves the MCP session header, handles JSON and SSE
+responses, and applies the local agent policy and audit configuration.
 
-## Interception Point
-
-A **localhost MCP-aware proxy** that Claude Code connects to as its NockCC MCP
-server. The proxy forwards every MCP JSON-RPC call to the real remote upstream
-(`https://cc.nocktechnologies.io/mcp`) and records a signed audit event per
-`tools/call`. No calls are blocked — observe mode only.
-
-## Transport Choice
-
-### Candidate 1a — stdio MCP server (stdio-wrappable seats only)
-
-Claude Code launches `nockguard mcp-http --upstream <url> --agent mira` over
-stdio via the existing `.mcp.json` command mechanism. The proxy speaks the MCP
-stdio protocol (newline-delimited JSON-RPC) to Claude Code and bridges each
-request to the HTTP upstream via POST. Auth headers/session (`Mcp-Session-Id`)
-are preserved transparently.
-
-**Applicability:** Lowest cutover risk *where it applies* — the `.mcp.json`
-`command:` entry is the proven mechanism for stdio MCP servers and needs no
-account-level connector URL changes. But it applies **only to genuinely
-stdio-wrappable seats**, NOT Mira's flagship seat: the managed remote-HTTP
-connector has no local `.mcp.json` command entry to load a stdio server into, so
-this path cannot intercept it. Uses NockGuard's existing per-agent Ed25519
-signing Auditor unchanged.
-
-### Candidate 1b — local HTTP listener (chosen for the flagship seat)
-
-The managed connector requires a reachable, authenticated HTTPS gateway with a
-protected route to the loopback listener. It cannot directly reach localhost
-on the operator's machine: its requests originate in Anthropic's cloud. The
-gateway, credential boundary, and per-agent session isolation remain deployment
-prerequisites; see the corrected design at
-[`docs/design/n8761-phase0-http-listener-forward-proxy.md`](design/n8761-phase0-http-listener-forward-proxy.md).
-
-### Candidate 2 — NCC server-side middleware (REJECTED)
-
-The guard would live INSIDE the product it guards (NockCC). Rejected: weaker
-isolation, requires NockCC prod changes, and defeats the purpose of an
-independent audit trail for the flagship seat.
-
-### Candidate 3 — bare MCP protocol shim (SUBSUMED)
-
-Essentially what Candidate 1a is, but framed as a NockGuard proxy mode so it
-reuses the existing audit, policy, and Wall infrastructure. Not a separate candidate.
-
-## Phase-1 Build
-
-The `nockguard mcp-http` subcommand (see `cmd/nockguard/main.go` and
-`internal/proxy/mcphttp/`) implements:
-
-1. **stdio↔HTTP bridge** — reads newline-delimited JSON-RPC from stdin (what
-   Claude Code writes), POSTs each to the HTTP upstream, and writes the response
-   back to stdout. Handles both `application/json` and `text/event-stream` (SSE)
-   upstream responses. Session continuity via `Mcp-Session-Id` header capture.
-
-2. **Per-call audit** — for every `tools/call`, records
-   `audit.Event{Agent, Tool, Decision: "observe", Reason: "mcp-http-intercept"}`
-   through the existing Ed25519-signing Auditor → `~/.nockguard/logs/mira.audit.jsonl`,
-   chain verifying. Auth headers and tool arguments are NEVER logged (only tool
-   name + decision).
-
-3. **Observe policy mode** — the proxy does not deny calls by policy. When
-   auditing is enabled, a tool call is forwarded only after its observe
-   decision is durable. `--audit-best-effort` explicitly restores forwarding
-   after audit-write errors.
-
-4. **Kill-switch tripwire** — `NOCKGUARD_TRIPWIRE=1` disables audit writes while
-   still forwarding calls (never a silent dead-end). The proxy logs loudly on
-   every startup when the tripwire is engaged.
-
-## Cutover Plan (Mira executes, not the builder)
-
-> Applies only to genuinely stdio-wrappable seats, **not Mira's flagship seat**.
-> The flagship cutover requires a validated hosted gateway in front of the
-> local HTTP forward-proxy — see
-> [`docs/design/n8761-phase0-http-listener-forward-proxy.md`](design/n8761-phase0-http-listener-forward-proxy.md).
-
-1. Generate a per-agent keypair if not present:
-   ```bash
-   nockguard keygen --agent mira   # writes ~/.nockguard/keys/mira.ed25519 (0600) + mira.pub; the proxy and `verify --agent mira` find them by name
-   ```
-
-2. Edit `agents/mira/.mcp.json` — replace the remote-HTTP entry with a `command:`
-   stdio entry that launches the proxy:
-   ```json
-   {
-     "mcpServers": {
-       "claude.ai NCC": {
-         "command": "nockguard",
-         "args": ["mcp-http",
-                  "--upstream", "https://cc.nocktechnologies.io/mcp",
-                  "--agent", "mira",
-                  "--auth-env", "NOCKCC_MCP_AUTH"]
-       }
-     }
-   }
-   ```
-
-3. Set `NOCKCC_MCP_AUTH` to the Authorization header value if the upstream
-   requires one (e.g. `Bearer <token>`).
-
-4. Restart the session and verify:
-   - `claude mcp list` shows the server as Connected.
-   - Make a test NockCC call.
-   - `tail -f ~/.nockguard/logs/mira.audit.jsonl` shows a signed entry.
-   - `nockguard verify --agent mira` exits 0.
-   - The Live Wall (`nockguard-wall`) renders the entry.
-
-## Revert Plan
-
-To restore the direct connection in under 30 seconds:
-
-```bash
-# Option A: engage the tripwire (proxy still runs, audit disabled, logs loudly)
-export NOCKGUARD_TRIPWIRE=1
-
-# Option B: revert .mcp.json to the original remote-HTTP connector entry
-# (edit back, restart session)
+```json
+{
+  "mcpServers": {
+    "example": {
+      "command": "nockguard",
+      "args": ["mcp-http", "--upstream", "https://mcp.example.com/mcp",
+               "--agent", "coder", "--auth-env", "MCP_AUTH_HEADER"]
+    }
+  }
+}
 ```
 
-Option B is the clean revert; Option A is the zero-downtime fast escape when
-you need to rule out the proxy as a problem.
+Set `MCP_AUTH_HEADER` to the upstream Authorization header value when required.
+Use a policy and signing key for `coder` if signed auditing is needed.
 
-## Acceptance Criteria
+## Managed remote HTTP connector
 
-- `go test ./...` green, including `internal/proxy/mcphttp/`.
-- A simulated tools/call through the proxy: (a) reaches a stub upstream, (b)
-  produces a signed audit entry with a verifying chain, (c) has no policy
-  denial, (d) tripwire forwards directly with no audit writes.
-- Mira can execute the cutover and verify real traffic lands in
-  `mira.audit.jsonl` + the Live Wall with a passing chain.
+A managed connector sends requests from its provider's infrastructure. It
+cannot reach a loopback listener on the operator's machine, and it does not
+launch a local stdio command. `mcp-listen` binds loopback and does not
+authenticate remote callers. A remote connector therefore needs a reachable,
+authenticated HTTPS gateway with a protected route to the listener.
+
+The [listener design](design/n8761-phase0-http-listener-forward-proxy.md)
+describes the network boundary and validation requirements. The
+[customer-run gateway contract](design/hosted-gateway.md) describes the
+implemented OAuth resource, session isolation, and required audit behavior.

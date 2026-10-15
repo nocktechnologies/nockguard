@@ -99,6 +99,21 @@ def main():
                      (json.loads(line) for line in trail.read_text().splitlines())}
         assert {("read_file", "allow"), ("read_text_file", "allow"),
                 ("write_file", "deny")} <= decisions, decisions
+
+        subprocess.run([str(binary), "keygen", "--agent", "demo"],
+                       env=env, check=True, capture_output=True)
+        direct_call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": "demo_delete_note", "arguments": {"id": "1"}}}
+        direct = subprocess.run([sys.executable, "livedemo/live_client.py", "--stub"],
+                                cwd=repo, input=json.dumps(direct_call) + "\n",
+                                text=True, capture_output=True, timeout=5, check=True)
+        assert "result" in json.loads(direct.stdout), direct.stdout
+        demo_env = {**env, "NOCKGUARD_BIN": str(binary)}
+        demo = subprocess.run([sys.executable, "livedemo/live_client.py"],
+                              cwd=repo, env=demo_env, text=True,
+                              capture_output=True, timeout=20)
+        assert demo.returncode == 0, demo.stdout + demo.stderr
+        assert "PASS: allowed, hidden, denied, rate-limited, and validated calls" in demo.stdout, demo.stdout
         print("PASS: reads allowed; write_file denied and absent; verify PROTECTED; decisions audited")
 
 

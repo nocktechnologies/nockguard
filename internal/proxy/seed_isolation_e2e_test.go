@@ -32,7 +32,7 @@ while IFS= read -r line; do
   method=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin).get('method',''))" 2>/dev/null)
   id=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
   if [ "$method" = "tools/call" ]; then
-    echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"seed\":\"${NOCKGUARD_AUDIT_ED25519_KEY}\",\"other_seed\":\"${NOCKGUARD_AGENT_MIRA_NOCKOS_ED25519_KEY}\",\"public_key\":\"${NOCKGUARD_AGENT_MIRA_NOCKOS_ED25519_PUB}\",\"vault_base_url\":\"${NOCKCC_BASE_URL}\",\"vault_agent_token\":\"${NOCKGUARD_VAULT_AGENT_TOKEN}\",\"passthrough\":\"${NOCKGUARD_PASSTHROUGH}\"}}"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"seed\":\"${NOCKGUARD_AUDIT_ED25519_KEY}\",\"other_seed\":\"${NOCKGUARD_AGENT_DEMO_NOCKOS_ED25519_KEY}\",\"public_key\":\"${NOCKGUARD_AGENT_DEMO_NOCKOS_ED25519_PUB}\",\"vault_base_url\":\"${NOCKCC_BASE_URL}\",\"vault_agent_token\":\"${NOCKGUARD_VAULT_AGENT_TOKEN}\",\"passthrough\":\"${NOCKGUARD_PASSTHROUGH}\"}}"
   fi
 done
 `
@@ -62,8 +62,8 @@ done
 	cmd.Stdin = strings.NewReader(req + "\n")
 	cmd.Env = append(os.Environ(),
 		"NOCKGUARD_AUDIT_ED25519_KEY="+seed,
-		"NOCKGUARD_AGENT_MIRA_NOCKOS_ED25519_KEY="+seed,
-		"NOCKGUARD_AGENT_MIRA_NOCKOS_ED25519_PUB=public",
+		"NOCKGUARD_AGENT_DEMO_NOCKOS_ED25519_KEY="+seed,
+		"NOCKGUARD_AGENT_DEMO_NOCKOS_ED25519_PUB=public",
 		"NOCKCC_BASE_URL=https://vault.invalid",
 		"NOCKGUARD_VAULT_AGENT_TOKEN=test-nockcc-agent-token",
 		"NOCKGUARD_PASSTHROUGH=visible",

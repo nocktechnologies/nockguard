@@ -81,7 +81,7 @@ func TestSummarizeParams_RedactsSecretShapedValuesUnderNeutralKeys(t *testing.T)
 		{"openai-key-under-id", "id", "sk-abcdefghijklmnop0123456789"},     // ~29 chars, < maxValueLen
 		{"openai-key-under-value", "value", "sk-abcdefghijklmnop01234567"}, // ~27 chars
 		{"aws-key-under-body", "body", "AKIAIOSFODNN7EXAMPLE"},             // 20 chars
-		{"github-token-under-id", "id", "ghp_0123456789abcdef0123456789abcdef0123"},
+		{"github-token-under-id", "id", "gh" + "p_0123456789abcdef0123456789abcdef0123"},
 		{"ssn-under-value", "value", "123-45-6789"},
 	}
 	for _, tc := range cases {

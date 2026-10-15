@@ -23,7 +23,7 @@ func newActionPairingGate(t *testing.T, auditor *audit.Auditor, deny string) *St
   enabled: true
   action_pairing: true
 agents:
-  mira:
+  demo:
     mode: allow
 `
 	if deny != "" {
@@ -555,7 +555,7 @@ func TestStdioActionPairingEmptyToolDoesNotLatchRequiredWriter(t *testing.T) {
   enabled: true
   action_pairing: true
 agents:
-  mira:
+  demo:
     mode: allow
     fail_mode: ask
 `, nil, auditor)
@@ -743,7 +743,7 @@ func hasActionSuccessObservation(events []audit.Event) bool {
 func TestActionPairingOffByDefaultAndBestEffortRejected(t *testing.T) {
 	auditor, _, _ := newEd25519Auditor(t)
 	defer auditor.Close()
-	defaultGate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	defaultGate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	if defaultGate.actionPairing {
 		t.Fatal("action pairing must remain disabled without explicit policy opt-in")
 	}
@@ -756,7 +756,7 @@ func TestActionPairingOffByDefaultAndBestEffortRejected(t *testing.T) {
   enabled: true
   action_pairing: true
 agents:
-  mira:
+  demo:
     mode: allow
 `, nil, nil)
 	if missingWriter.actionInitErr == nil {
@@ -803,7 +803,7 @@ func TestStdioRequiredAuditFailureAfterForwardWarnsInV1Mode(t *testing.T) {
 	gate := newGate(t, `audit:
   enabled: true
 agents:
-  mira:
+  demo:
     mode: allow
 `, nil, auditor)
 	pending := &sync.Map{}

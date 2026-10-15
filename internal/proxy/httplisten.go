@@ -97,7 +97,7 @@ func (l *HTTPListener) WithUpstreamAgentToken(token string) *HTTPListener {
 // NewHTTPListener builds a listener that binds listen (must be a loopback
 // host:port, e.g. 127.0.0.1:8790), gates traffic through gate, and forwards
 // allowed calls to the upstream MCP endpoint (e.g.
-// https://cc.nocktechnologies.io/mcp).
+// https://command.example.com/mcp).
 func NewHTTPListener(listen, upstream string, gate *StdioProxy, logger *log.Logger) *HTTPListener {
 	// Clone DefaultTransport rather than build a bare one, so we inherit its
 	// DialContext timeout, TLSHandshakeTimeout, and HTTP(S)_PROXY/NO_PROXY

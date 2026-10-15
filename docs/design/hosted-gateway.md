@@ -81,9 +81,8 @@ must preserve the public Host and route `/mcp` and
 `/.well-known/oauth-protected-resource/mcp` to it. Existing `mcp-listen` behavior
 does not change. No authorization-server implementation, public bind, DNS,
 hosting purchase, production credential provisioning, or connector change is
-included. NockCC's existing `nockcc-mcp` audience is not a gateway audience;
-its current MCP auth also needs scoped Agent-token support before this route
-can use NockCC. These are deployment prerequisites, not fallback paths.
+included. An upstream service's existing audience may differ from the gateway
+resource audience. Configure both credentials explicitly before deployment.
 
 The gateway requires durable local auditing at runtime. Before forwarding a
 tool call it writes and synchronizes a `dispatch` decision; this proves that
@@ -108,8 +107,7 @@ Local acceptance must prove auth failures never reach upstream, credential separ
 denial/discovery filtering, session separation, quota sharing, bounded failure
 handling and signed audit verification. Validate the customer's selected HTTP
 client and server together before switching their endpoint. Rollback restores
-the previous endpoint and its authentication setup. The internal Mira pilot in
-N8761 is a separate deployment, not a prerequisite for the downloadable product.
+the previous endpoint and its authentication setup.
 
 ## Customer setup
 

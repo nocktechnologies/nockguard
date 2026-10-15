@@ -14,7 +14,7 @@ func TestNestedArgumentsHaveOneValidatedMeaning(t *testing.T) {
 		`{"items":[{"config":{"command":"FORBIDDEN"},"config":{}}]}`,
 	} {
 		t.Run(args, func(t *testing.T) {
-			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    block_params: [FORBIDDEN]\n", nil, nil)
+			gate := newGate(t, "agents:\n  demo:\n    mode: allow\n    block_params: [FORBIDDEN]\n", nil, nil)
 			request := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"safe_tool","arguments":` + args + `}}`)
 			d := gate.decide(request, 0)
 			if d.reject {
@@ -53,7 +53,7 @@ func TestCanonicalArgumentsPreserveNumberLiterals(t *testing.T) {
 }
 
 func TestCaseFoldedParamsKeyIsNotForwardedAlongsideCanonicalParams(t *testing.T) {
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, nil)
 	request := []byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"param\\u017f\":{\"name\":\"safe_tool\",\"arguments\":{\"safe\":true}}}")
 	d := gate.decide(request, 0)
 	if d.reject {

@@ -13,7 +13,7 @@ Prepare the version and changelog on `next`, or on a short-lived
 `release/vX.Y.Z` branch cut from `next` that carries only the release metadata
 listed in step 1. Freeze `next` when release preparation starts: before
 preparing metadata directly on `next`, or before cutting a release branch.
-Keep the freeze through the post-release `main`-to-`next` back-sync. During the freeze, only Mira-gated
+Keep the freeze through the post-release `main`-to-`next` back-sync. During the freeze, only maintainer-approved
 release-fix card PRs may merge into `next`; a maintainer must incorporate each
 fix into the release candidate and rerun its exact-head review and checks before
 promotion. No builder merges into `next` during the freeze. Promote the prepared

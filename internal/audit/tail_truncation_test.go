@@ -60,7 +60,7 @@ func TestEd25519TailTruncationIsDetected(t *testing.T) {
 // a signed non-empty trail missing its .hwm sidecar is now treated as suspicious
 // (the sidecar may have been deleted alongside a tail truncation). N8154 writes
 // .hwm on every Record(), so any live signed trail will always have one unless
-// it was explicitly removed. Pre-N8154 trails (e.g. mira.audit.jsonl) acquired a
+// it was explicitly removed. Pre-N8154 trails (e.g. demo.audit.jsonl) acquired a
 // .hwm the first time a new entry was appended after the N8154 deploy, so they
 // are covered too. The old behaviour (pass silently on absent .hwm) was replaced
 // by TestDeletedHighWaterMarkIsDetectedOnSignedTrail.

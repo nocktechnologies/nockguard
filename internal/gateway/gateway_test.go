@@ -79,7 +79,7 @@ func testConfig(t *testing.T) Config {
 	t.Helper()
 	t.Setenv("GUARD_TEST_INTROSPECTION", "test-introspection-credential")
 	t.Setenv("GUARD_TEST_UPSTREAM", "test-upstream-credential")
-	return Config{Listen: "127.0.0.1:0", Resource: "https://guard.example/mcp", Issuer: "https://issuer.example", IntrospectionURL: "https://issuer.example/introspect", IntrospectionAuthHeader: "Authorization", IntrospectionTokenEnv: "GUARD_TEST_INTROSPECTION", Subject: "operator-1", ClientID: "claude-connector", Scope: "mcp", Agent: "mira", Policy: "policy.yaml", Upstream: "https://upstream.example/mcp", UpstreamTokenEnv: "GUARD_TEST_UPSTREAM"}
+	return Config{Listen: "127.0.0.1:0", Resource: "https://guard.example/mcp", Issuer: "https://issuer.example", IntrospectionURL: "https://issuer.example/introspect", IntrospectionAuthHeader: "Authorization", IntrospectionTokenEnv: "GUARD_TEST_INTROSPECTION", Subject: "operator-1", ClientID: "claude-connector", Scope: "mcp", Agent: "demo", Policy: "policy.yaml", Upstream: "https://upstream.example/mcp", UpstreamTokenEnv: "GUARD_TEST_UPSTREAM"}
 }
 
 func validClaims(c Config) map[string]interface{} {
@@ -256,7 +256,7 @@ func TestSessionIsolationPolicyAndSignedAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer auditor.Close()
-	engine, err := policy.LoadBytes([]byte("agents:\n  mira:\n    mode: allow\n    deny: [delete_*]\n"))
+	engine, err := policy.LoadBytes([]byte("agents:\n  demo:\n    mode: allow\n    deny: [delete_*]\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +343,7 @@ func TestSessionIsolationPolicyAndSignedAudit(t *testing.T) {
 		if json.Unmarshal([]byte(line), &ev) != nil {
 			t.Fatal("invalid audit")
 		}
-		if ev.Agent != "mira" {
+		if ev.Agent != "demo" {
 			t.Fatal("wrong agent")
 		}
 		if ev.Tool == "read_item" && ev.Decision == "allow" {
@@ -1489,7 +1489,7 @@ func TestSSEInitializeAuditedListenerKeepOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer auditor.Close()
-	engine, err := policy.LoadBytes([]byte("agents:\n  mira:\n    mode: allow\n"))
+	engine, err := policy.LoadBytes([]byte("agents:\n  demo:\n    mode: allow\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

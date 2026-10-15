@@ -37,7 +37,7 @@ func TestHTTPListener_InitializeFollowedByToolsCall(t *testing.T) {
 	defer upstream.Close()
 
 	auditor, auditPath, pub := newEd25519Auditor(t)
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 
@@ -99,7 +99,7 @@ func TestHTTPListener_AuditQueueDoesNotStallAfter500(t *testing.T) {
 	defer upstream.Close()
 
 	auditor, auditPath, pub := newEd25519Auditor(t)
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 
@@ -153,7 +153,7 @@ func TestHTTPListener_CardAfterSeqPruningKeepsBoundary(t *testing.T) {
 	defer upstream.Close()
 
 	auditor, _, _ := newEd25519Auditor(t)
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 
@@ -213,7 +213,7 @@ func TestHTTPListener_PendingToolsListKeepsCardPredecessor(t *testing.T) {
 	gate := newGate(t, `audit:
   enabled: true
 agents:
-  mira:
+  demo:
     mode: allow
     deny: ["secret_tool"]
 `, nil, auditor)
@@ -286,7 +286,7 @@ func TestHTTPListener_MalformedSuccessDoesNotCommitCard(t *testing.T) {
 	defer upstream.Close()
 
 	auditor, _, _ := newEd25519Auditor(t)
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    allow:\n      - nockcc_nock_claim\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n    allow:\n      - nockcc_nock_claim\n", nil, auditor)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 
@@ -325,7 +325,7 @@ func TestHTTPListener_OversizedJSONResponseFailsWithoutCommittingCard(t *testing
 	defer upstream.Close()
 
 	auditor, auditPath, pub := newEd25519Auditor(t)
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 
@@ -384,7 +384,7 @@ func TestHTTPListener_JSONReadTimeoutFailsWithoutCommittingCard(t *testing.T) {
 	defer upstream.Close()
 
 	auditor, auditPath, pub := newEd25519Auditor(t)
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 	// Registered last so it runs FIRST on teardown (defers are LIFO): the
@@ -460,7 +460,7 @@ func TestHTTPListener_StructurallyInvalidSuccessDoesNotCommitCard(t *testing.T) 
 			defer upstream.Close()
 
 			auditor, _, _ := newEd25519Auditor(t)
-			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+			gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 			lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 			defer lsrv.Close()
 
@@ -498,7 +498,7 @@ func TestHTTPListener_LargeNumericIDDoesNotFalselyMatch(t *testing.T) {
 	defer upstream.Close()
 
 	auditor, _, _ := newEd25519Auditor(t)
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 

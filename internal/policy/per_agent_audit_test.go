@@ -23,7 +23,7 @@ func TestAgentKeyEnvName(t *testing.T) {
 		wantPub string
 	}{
 		{"kit", "NOCKGUARD_AGENT_KIT_ED25519_KEY", "NOCKGUARD_AGENT_KIT_ED25519_PUB"},
-		{"mira-nockos", "NOCKGUARD_AGENT_MIRA_NOCKOS_ED25519_KEY", "NOCKGUARD_AGENT_MIRA_NOCKOS_ED25519_PUB"},
+		{"demo-nockos", "NOCKGUARD_AGENT_DEMO_NOCKOS_ED25519_KEY", "NOCKGUARD_AGENT_DEMO_NOCKOS_ED25519_PUB"},
 		{"mar-nockos", "NOCKGUARD_AGENT_MAR_NOCKOS_ED25519_KEY", "NOCKGUARD_AGENT_MAR_NOCKOS_ED25519_PUB"},
 		{"UPPER", "NOCKGUARD_AGENT_UPPER_ED25519_KEY", "NOCKGUARD_AGENT_UPPER_ED25519_PUB"},
 	}
@@ -39,7 +39,7 @@ func TestAgentKeyEnvName(t *testing.T) {
 
 // TestAgentAuditPath verifies that the per-agent audit file is derived from the
 // base audit path by inserting the agent name as a path-segment prefix:
-// ~/.nockguard/logs/audit.jsonl → ~/.nockguard/logs/mira-nockos.audit.jsonl
+// ~/.nockguard/logs/audit.jsonl → ~/.nockguard/logs/demo-nockos.audit.jsonl
 func TestAgentAuditPath(t *testing.T) {
 	cases := []struct {
 		base  string
@@ -47,7 +47,7 @@ func TestAgentAuditPath(t *testing.T) {
 		want  string
 	}{
 		{"/home/user/.nockguard/logs/audit.jsonl", "kit", "/home/user/.nockguard/logs/kit.audit.jsonl"},
-		{"/home/user/.nockguard/logs/audit.jsonl", "mira-nockos", "/home/user/.nockguard/logs/mira-nockos.audit.jsonl"},
+		{"/home/user/.nockguard/logs/audit.jsonl", "demo-nockos", "/home/user/.nockguard/logs/demo-nockos.audit.jsonl"},
 		{"/tmp/test.jsonl", "wren", "/tmp/wren.test.jsonl"},
 	}
 	for _, tc := range cases {
@@ -250,9 +250,9 @@ func TestSigningKeyEnvNamesForOtherAgents(t *testing.T) {
 		name, value string
 		strip       bool
 	}{
-		{AgentKeyEnvName("mira-nockos"), "test-only-seed", true},
+		{AgentKeyEnvName("demo-nockos"), "test-only-seed", true},
 		{AgentKeyEnvName("not-in-policy"), "", true},
-		{AgentPubKeyEnvName("mira-nockos"), "public", false},
+		{AgentPubKeyEnvName("demo-nockos"), "public", false},
 		{"NOCKGUARD_AGENT_LABEL", "label", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -316,7 +316,7 @@ func TestAgentKeyEnvNameNormalization(t *testing.T) {
 // TestValidAgentName verifies the name allowlist: alphanumerics, hyphens, dots
 // accepted; slashes, dots-only traversal, empty, and control characters rejected.
 func TestValidAgentName(t *testing.T) {
-	valid := []string{"kit", "mira-nockos", "mar-nockos", "my.agent", "Agent1"}
+	valid := []string{"kit", "demo-nockos", "mar-nockos", "my.agent", "Agent1"}
 	for _, name := range valid {
 		if !ValidAgentName(name) {
 			t.Errorf("ValidAgentName(%q) = false, want true", name)

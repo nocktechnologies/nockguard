@@ -32,7 +32,7 @@ func TestHTTPListener_RequiredAuditFailureBlocksBeforeForward(t *testing.T) {
 	if err := auditor.Close(); err != nil {
 		t.Fatal(err)
 	}
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	listener := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithRequiredAudit())
 	defer listener.Close()
 
@@ -68,7 +68,7 @@ func TestHTTPListener_RequiredDispatchWriteFailureBlocksAndLatches(t *testing.T)
 	if err := os.Mkdir(auditPath+".hwm.tmp", 0700); err != nil {
 		t.Fatalf("create hwm temp directory: %v", err)
 	}
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	listener := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithRequiredAudit())
 	defer listener.Close()
 
@@ -95,7 +95,7 @@ func TestHTTPListener_RequiredAuditHealthySignedPositiveControl(t *testing.T) {
 	defer upstream.Close()
 
 	auditor, auditPath, pub := newEd25519Auditor(t)
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	listener := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithRequiredAudit())
 	defer listener.Close()
 
@@ -142,7 +142,7 @@ func TestHTTPListener_RequiredCompletionAuditFailureHidesSuccessAndLatches(t *te
 			t.Errorf("close auditor: %v", err)
 		}
 	}()
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	listener := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithRequiredAudit())
 	defer listener.Close()
 
@@ -215,7 +215,7 @@ func TestHTTPListener_RequiredSSECompletionAuditFailureWithholdsResult(t *testin
 		flusher.Flush()
 	}))
 	defer upstream.Close()
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	listener := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithRequiredAudit())
 	defer listener.Close()
 
@@ -257,7 +257,7 @@ func TestHTTPListener_RequiredSSEHealthyResultReleasesBeforeUpstreamEnds(t *test
 	defer releaseOnce.Do(func() { close(releaseUpstream) })
 	auditor, _, _ := newEd25519Auditor(t)
 	defer func() { _ = auditor.Close() }()
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	listener := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithRequiredAudit())
 	defer listener.Close()
 
@@ -317,8 +317,8 @@ func TestHTTPListener_RequiredAuditFailureBlocksOtherListenerSharingAuditor(t *t
 	}))
 	defer secondUpstream.Close()
 
-	firstGate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
-	secondGate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	firstGate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
+	secondGate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	firstListener := httptest.NewServer(NewHTTPListener("127.0.0.1:0", firstUpstream.URL, firstGate, log.New(io.Discard, "", 0)).WithRequiredAudit())
 	defer firstListener.Close()
 	secondListener := httptest.NewServer(NewHTTPListener("127.0.0.1:0", secondUpstream.URL, secondGate, log.New(io.Discard, "", 0)).WithRequiredAudit())
@@ -386,7 +386,7 @@ func TestHTTPListener_RequiredToolSSEBodyless204ReturnsUncertainOutcome(t *testi
 				_, _ = io.WriteString(w, tc.upstreamBody)
 			}))
 			defer upstream.Close()
-			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+			gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 			listener := NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithRequiredAudit()
 			lsrv := httptest.NewServer(listener)
 			defer lsrv.Close()
@@ -447,7 +447,7 @@ func TestHTTPListener_RequiredSSEWithoutMatchingResponseTimesOut(t *testing.T) {
 				<-releaseUpstream
 			}))
 			defer upstream.Close()
-			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+			gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 			listener := NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithRequiredAudit()
 			listener.streamResponseTimeout = 30 * time.Millisecond
 			lsrv := httptest.NewServer(listener)

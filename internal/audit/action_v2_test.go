@@ -25,7 +25,7 @@ func TestV2RunSequenceIsUniqueUnderConcurrentRetries(t *testing.T) {
 		go func(worker int) {
 			defer wg.Done()
 			for i := 0; i < each; i++ {
-				ev := Event{Agent: "mira", Tool: "tool", Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: "00112233445566778899aabbccddeeff"}
+				ev := Event{Agent: "demo", Tool: "tool", Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: "00112233445566778899aabbccddeeff"}
 				if err := a.RecordRequired(ev); err != nil {
 					t.Errorf("worker %d write %d: %v", worker, i, err)
 					return
@@ -67,7 +67,7 @@ func TestV2RunSequenceSeedsFromTrailAfterCheckpointFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	write := func(tool string) error {
-		return a.RecordRequired(Event{Agent: "mira", Tool: tool, Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: runID})
+		return a.RecordRequired(Event{Agent: "demo", Tool: tool, Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: runID})
 	}
 	if err := write("first"); err != nil {
 		t.Fatal(err)
@@ -96,7 +96,7 @@ func TestV2RunSequenceSeedsFromTrailAfterCheckpointFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verified reopen failed: %v", err)
 	}
-	if err := reopened.RecordRequired(Event{Agent: "mira", Tool: "after-reopen", Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: runID}); err != nil {
+	if err := reopened.RecordRequired(Event{Agent: "demo", Tool: "after-reopen", Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: runID}); err != nil {
 		t.Fatal(err)
 	}
 	if err := reopened.Close(); err != nil {
@@ -115,7 +115,7 @@ func TestV2RunSequenceSeedsFromUnsignedTrailAfterReopen(t *testing.T) {
 	runID := "00112233445566778899aabbccddeeff"
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
 	write := func(a *Auditor, tool string) error {
-		return a.RecordRequired(Event{Agent: "mira", Tool: tool, Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: runID})
+		return a.RecordRequired(Event{Agent: "demo", Tool: tool, Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: runID})
 	}
 	first, err := New(path, WithActionPairing())
 	if err != nil {
@@ -149,7 +149,7 @@ func TestUnsignedTrailDoesNotSeedRunSequencesWithoutActionPairing(t *testing.T) 
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
 	prior, err := json.Marshal(Event{
 		Time:          "2026-10-15T00:00:00Z",
-		Agent:         "mira",
+		Agent:         "demo",
 		Tool:          "tool",
 		Decision:      "allow",
 		SchemaVersion: 2,
@@ -190,14 +190,14 @@ func TestV2CallerValidationFailureDoesNotLatchRequiredWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	invalid := Event{Agent: "mira", Tool: "", Decision: "dispatch", SchemaVersion: 2, RecordType: "decision", RunID: runID, ActionID: runID + ".1"}
+	invalid := Event{Agent: "demo", Tool: "", Decision: "dispatch", SchemaVersion: 2, RecordType: "decision", RunID: runID, ActionID: runID + ".1"}
 	if err := a.RecordRequired(invalid); err == nil {
 		t.Fatal("dispatch with an empty tool was accepted")
 	}
 	if err := a.RequiredError(); err != nil {
 		t.Fatalf("caller-input validation failure latched the writer: %v", err)
 	}
-	valid := Event{Agent: "mira", Tool: "safe_tool", Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: runID}
+	valid := Event{Agent: "demo", Tool: "safe_tool", Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: runID}
 	if err := a.RecordRequired(valid); err != nil {
 		t.Fatalf("valid write after caller-input failure failed: %v", err)
 	}
@@ -212,8 +212,8 @@ func TestV2RejectsCallerSequenceAndDispatchWithoutActionID(t *testing.T) {
 		name  string
 		event Event
 	}{
-		{name: "dispatch requires action id", event: Event{Agent: "mira", Tool: "tool", Decision: "dispatch", SchemaVersion: 2, RecordType: "decision", RunID: runID}},
-		{name: "run sequence is writer assigned", event: Event{Agent: "mira", Tool: "tool", Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: runID, RunSeq: 1}},
+		{name: "dispatch requires action id", event: Event{Agent: "demo", Tool: "tool", Decision: "dispatch", SchemaVersion: 2, RecordType: "decision", RunID: runID}},
+		{name: "run sequence is writer assigned", event: Event{Agent: "demo", Tool: "tool", Decision: "allow", SchemaVersion: 2, RecordType: "decision", RunID: runID, RunSeq: 1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, err := New(filepath.Join(t.TempDir(), "audit.jsonl"))

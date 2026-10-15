@@ -60,6 +60,10 @@ To exercise the blocked canary as well, run `python3 scripts/quickstart-acceptan
 
 The Live Wall over the trail that script writes (local stub upstream, `coder` agent): 6 records in view, 4 allowed (two `allow` and two `dispatch`), 1 rejected (the denied `write_file`) and 1 tool hidden (`write_file` in discovery). The header reads "Verification: verified" against `coder.pub`.
 
+For a longer local policy demo, run `nockguard keygen --agent demo` and then
+`python3 livedemo/live_client.py`. Its bundled MCP server demonstrates allowed,
+hidden, denied, rate-limited, and input-blocked calls without external services.
+
 ![NockGuard Live Wall showing allowed reads, a denied write_file, a hidden write_file and a verified signed trail](docs/screenshots/wall-signed-trail.png)
 
 ### Observe first, then enforce
@@ -294,18 +298,20 @@ writer; v2 pairing provides action correlation, not a completeness verdict.
 
 ### Forwarding to the NockCC ops-log
 
-NockGuard can stream **enforcement decisions** (`deny`, `block`, `ratelimit`, `approval-granted`, `approval-denied`) to the [NockCC](https://cc.nocktechnologies.io) ops-log, so what the firewall blocks or parks across the fleet shows up in one Command Center feed. Allowed calls, state-write records, and tool-list hides are not forwarded — the centralized feed stays high-signal, while the local JSONL keeps the complete record.
+NockGuard can stream **enforcement decisions** (`deny`, `block`, `ratelimit`, `approval-granted`, `approval-denied`) to the NockCC ops-log, so what the firewall blocks or parks across the fleet shows up in one Command Center feed. Allowed calls, state-write records, and tool-list hides are not forwarded — the centralized feed stays high-signal, while the local JSONL keeps the complete record.
 
 ```yaml
 audit:
   enabled: true
   forward:
     enabled: true
-    url: https://cc.nocktechnologies.io
+    url: https://command.example.com
     api_key_env: NOCKCC_API_KEY   # the key is read from this env var, never stored in the policy file
 ```
 
 Forwarding is **asynchronous and fail-open**: events post on a background worker, `Enqueue` never blocks (it drops if the buffer saturates), and any HTTP/transport error is swallowed — a slow or unreachable NockCC can never stall or fail a tool call. Severity maps as `block → high` (an injection / secret-exfil attempt), `would-deny → info`, and `deny` / `ratelimit → warn`. Misconfiguration (forwarding enabled with no `url`, or an `api_key_env` that doesn't resolve) fails loud at startup rather than silently dropping every event.
+
+Replace `command.example.com` with the base URL of your own Command Center.
 
 ## Observe to Enforce
 

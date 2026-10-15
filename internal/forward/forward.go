@@ -35,7 +35,7 @@ type Event struct {
 
 // Config configures the forwarder. An empty BaseURL disables it.
 type Config struct {
-	BaseURL string       // e.g. https://cc.nocktechnologies.io
+	BaseURL string       // e.g. https://command.example.com
 	APIKey  string       // sent as the X-API-Key header
 	Client  *http.Client // optional; a sane default is used when nil
 	Buffer  int          // channel capacity; defaults to 256

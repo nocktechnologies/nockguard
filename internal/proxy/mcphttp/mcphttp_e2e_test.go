@@ -66,7 +66,7 @@ func TestMCPHTTPProxy_AuditEntrySignedChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	auditPath := filepath.Join(dir, "mira.audit.jsonl")
+	auditPath := filepath.Join(dir, "demo.audit.jsonl")
 	auditor, err := audit.New(auditPath, audit.WithEd25519Key(priv))
 	if err != nil {
 		t.Fatal(err)
@@ -103,8 +103,8 @@ func TestMCPHTTPProxy_AuditEntrySignedChain(t *testing.T) {
 	if entry.Decision != "observe" {
 		t.Errorf("expected decision=observe (proxy never blocks), got %q", entry.Decision)
 	}
-	if entry.Agent != "mira" {
-		t.Errorf("expected agent=mira, got %q", entry.Agent)
+	if entry.Agent != "demo" {
+		t.Errorf("expected agent=demo, got %q", entry.Agent)
 	}
 }
 
@@ -147,7 +147,7 @@ func TestMCPHTTPProxy_Tripwire(t *testing.T) {
 
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	dir := t.TempDir()
-	auditPath := filepath.Join(dir, "mira.audit.jsonl")
+	auditPath := filepath.Join(dir, "demo.audit.jsonl")
 	auditor, err := audit.New(auditPath, audit.WithEd25519Key(priv))
 	if err != nil {
 		t.Fatal(err)
@@ -349,5 +349,5 @@ func newTestProxy(t *testing.T, upstreamURL string, auditor *audit.Auditor) *Pro
 		}
 		auditor = a
 	}
-	return New(upstreamURL, "mira", "", auditor, log.New(io.Discard, "", 0))
+	return New(upstreamURL, "demo", "", auditor, log.New(io.Discard, "", 0))
 }
