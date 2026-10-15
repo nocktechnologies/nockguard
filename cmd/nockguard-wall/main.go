@@ -876,6 +876,9 @@ func demo(ctx context.Context, b *broker) {
 				continue
 			case n < 25+51: // mostly allows, with a steady drip of caught attempts
 				ev.Tool, ev.Decision = allows[r.Intn(len(allows))], "allow"
+			case n < 25+51+12: // routine and observe-mode rows, so every Wall tile shows in demo
+				s := demoRoutine[r.Intn(len(demoRoutine))]
+				ev.Tool, ev.Decision, ev.Reason = s.tool, s.decision, s.reason
 			default:
 				s := bads[r.Intn(len(bads))]
 				ev.Tool, ev.Decision, ev.Reason = s.tool, s.decision, s.reason
@@ -886,6 +889,15 @@ func demo(ctx context.Context, b *broker) {
 			t.Reset(time.Duration(350+r.Intn(900)) * time.Millisecond)
 		}
 	}
+}
+
+// demoRoutine are the synthetic routine and observe-mode decisions --demo mixes in.
+var demoRoutine = []struct{ tool, decision, reason string }{
+	{"mcp__billing__refund", "approval-granted", "approved by operator"},
+	{"mcp__deploy__ship", "dispatch", "required-audit-before-forward"},
+	{"mcp__crm__lookup", "would-deny", "would-deny shadow (no shadow-rule matched)"},
+	{"mcp__crm__lookup", "observe", "mcp-http-intercept"},
+	{"mcp__board__label", "state-write", "label done"},
 }
 
 // lockShots are the synthetic NockLock fence rows --demo mixes in.

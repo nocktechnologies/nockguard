@@ -1939,3 +1939,18 @@ func TestInvalidTimestampRetainedByFilterAndPulse(t *testing.T) {
 		t.Fatalf("filterEvents: invalid-Ts event (Agent=kit) not found in returned slice")
 	}
 }
+
+func TestDemoStreamCoversEveryWallTile(t *testing.T) {
+	got := map[string]bool{}
+	for _, s := range demoRoutine {
+		got[s.decision] = true
+		if ev := classify(event{Decision: s.decision, Reason: s.reason}); ev.Bucket != "approved" {
+			t.Errorf("demo %s bucket = %q, want approved", s.decision, ev.Bucket)
+		}
+	}
+	for _, want := range []string{"approval-granted", "dispatch", "would-deny"} {
+		if !got[want] {
+			t.Errorf("demo stream never emits %s, so its tile stays empty", want)
+		}
+	}
+}

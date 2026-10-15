@@ -46,13 +46,15 @@ function wall(contextPayload, mediaQuery) {
       return el;
     },
   };
+  const page = fs.readFileSync(new URL('./index.html', `file://${__filename}`), 'utf8');
   const feed = document.getElementById('feed');
   const empty = document.getElementById('empty');
   empty.parent = feed;
   empty.remove = empty.removeSelf;
   feed.children.push(empty);
   const decisions = document.getElementById('f-decision');
-  decisions.options = ['', 'allow', 'deny', 'block', 'ratelimit', 'hide', 'approval-denied'].map(value => ({ value }));
+  decisions.options = [...page.match(/<select id="f-decision"[\s\S]*?<\/select>/)[0].matchAll(/<option value="([^"]*)"/g)]
+    .map(m => ({ value: m[1] }));
   Object.defineProperty(decisions, 'value', {
     get() { return this.selectedValue ?? ''; },
     set(value) {
@@ -67,7 +69,6 @@ function wall(contextPayload, mediaQuery) {
       ? new Promise(() => {})
       : Promise.resolve({ json: () => Promise.resolve(contextPayload) }), setInterval() {},
   });
-  const page = fs.readFileSync(new URL('./index.html', `file://${__filename}`), 'utf8');
   vm.runInContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], context);
   return { context, elements, decisions };
 }
@@ -172,6 +173,49 @@ test('approval-denied uses rejection styling and a fixed decision filter option'
   assert.match(page, /\.approval-denied \.badge\s*\{[^}]*color:var\(--deny\)/);
 });
 
+// Every decision value the Go source emits (internal/forward's
+// TestWallDecisionFilterMatchesEmittedDecisions keeps this list honest).
+const EMITTED = ['allow', 'deny', 'block', 'ratelimit', 'hide', 'approval-denied', 'approval-granted',
+  'would-deny', 'dispatch', 'observe', 'state-write', 'inject', 'budget-ask', 'downgrade'];
+const FIXED = ['', ...EMITTED];
+
+test('filter lists every emitted decision and filters to exactly its rows', () => {
+  const w = wall();
+  assert.deepEqual(w.decisions.options.map(o => o.value).sort(), [...FIXED].sort());
+  for (const d of EMITTED) vm.runInContext(`render({decision:'${d}', bucket:'approved', agent:'a'})`, w.context);
+  const feed = w.elements.get('feed');
+  for (const d of EMITTED) {
+    w.decisions.value = d;
+    vm.runInContext('applyFilters()', w.context);
+    const shown = feed.children.filter(r => r.classList.contains('row') && !r.classList.contains('fout'));
+    assert.deepEqual(shown.map(r => r.dataset.decision), [d]);
+    assert.equal(feed.children.find(r => r.dataset.decision === d).className.split(' ')[1], d); // known: not 'unknown'
+  }
+});
+
+test('approval-granted, dispatch and would-deny get their own tiles', () => {
+  const w = wall();
+  vm.runInContext(`render({decision:'approval-granted', bucket:'approved'});
+    render({decision:'dispatch', bucket:'approved'}); render({decision:'dispatch', bucket:'approved'});
+    render({decision:'would-deny', bucket:'approved'}); render({decision:'deny', bucket:'blocked', severity:'low'})`, w.context);
+  assert.equal(w.elements.get('p-granted').textContent, 1);
+  assert.equal(w.elements.get('p-dispatched').textContent, 2);
+  assert.equal(w.elements.get('p-would-deny').textContent, 1);
+  assert.equal(w.elements.get('p-blocked').textContent, 1); // would-deny is not a rejection
+  assert.equal(w.elements.get('p-approved').textContent, 4);
+});
+
+test('an unknown decision lands in other, gets its own filter option and stays visible', () => {
+  const w = wall();
+  vm.runInContext("render({decision:'brand-new', bucket:'other', severity:'high'})", w.context);
+  assert.equal(w.elements.get('p-other').textContent, 1);
+  assert.equal(w.elements.get('feed').children[0].className, 'row unknown');
+  assert.ok(w.decisions.options.some(o => o.value === 'brand-new'));
+  w.decisions.value = 'brand-new';
+  vm.runInContext('applyFilters()', w.context);
+  assert.equal(w.elements.get('p-other').textContent, 1);
+});
+
 test('unknown decision options stay within the retained window', () => {
   const w = wall();
   vm.runInContext('MAX_ROWS = 2', w.context);
@@ -181,11 +225,11 @@ test('unknown decision options stay within the retained window', () => {
   vm.runInContext("render({decision:'third'})", w.context);
   assert.equal(w.decisions.value, 'second');
   assert.deepEqual(w.decisions.options.map(o => o.value),
-    ['', 'allow', 'deny', 'block', 'ratelimit', 'hide', 'approval-denied', 'third', 'second']);
+    [...FIXED, 'third', 'second']);
   vm.runInContext("render({decision:'fourth'})", w.context);
   assert.equal(w.decisions.value, '');
   assert.equal(w.decisions.selectedIndex, 0);
   assert.equal(w.elements.get('f-count').textContent, '');
   assert.deepEqual(w.decisions.options.map(o => o.value),
-    ['', 'allow', 'deny', 'block', 'ratelimit', 'hide', 'approval-denied', 'fourth', 'third']);
+    [...FIXED, 'fourth', 'third']);
 });
