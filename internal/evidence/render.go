@@ -12,9 +12,9 @@ func RenderJSON(p Pack) ([]byte, error) {
 	return json.MarshalIndent(p, "", "  ")
 }
 
-// RenderHTML renders a self-contained, inline-CSS HTML evidence pack (per Mira's
-// "HTML reports over markdown" rule — no external assets, opens anywhere). The
-// Integrity Attestation is rendered FIRST and PROMINENTLY: a green PASS banner
+// RenderHTML renders a self-contained, inline-CSS HTML evidence pack with no
+// external assets, so it opens anywhere.
+// The Integrity Attestation is rendered FIRST and PROMINENTLY: a green PASS banner
 // when the chain is intact, a red FAILED banner the instant any trail is broken.
 func RenderHTML(p Pack) ([]byte, error) {
 	var buf bytes.Buffer

@@ -801,8 +801,8 @@ func (e *Engine) auditorAt(path string) (*audit.Auditor, error) {
 
 // ValidAgentName reports whether an agent name is safe to embed in environment
 // variable names and file-system paths. Only alphanumerics, hyphens, and dots
-// are accepted — this matches every real fleet agent name (kit, mira-nockos,
-// mar-nockos, …) and excludes path separators or traversal sequences.
+// are accepted, including names like coder and reviewer-1, while path
+// separators and traversal sequences are excluded.
 func ValidAgentName(agent string) bool {
 	if agent == "" || agent == "." || strings.Contains(agent, "..") {
 		return false
@@ -819,7 +819,7 @@ func ValidAgentName(agent string) bool {
 // agent's Ed25519 private key seed. Hyphens and dots in the agent name are
 // replaced with underscores and the result is uppercased:
 //
-//	mira-nockos → NOCKGUARD_AGENT_MIRA_NOCKOS_ED25519_KEY
+//	reviewer-1 → NOCKGUARD_AGENT_REVIEWER_1_ED25519_KEY
 func AgentKeyEnvName(agent string) string {
 	upper := strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(agent))
 	return "NOCKGUARD_AGENT_" + upper + "_ED25519_KEY"

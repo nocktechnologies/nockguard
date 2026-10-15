@@ -27,7 +27,7 @@ Go tests live beside each package as `*_test.go` unless noted otherwise.
 | `internal/sessionverify/` | Combined NockLock/NockGuard verdict; caller tests in `cmd/`. |
 | `internal/trust/` | Opt-in persisted trust score; package and proxy tests. |
 | `internal/validate/` | Argument categories and regexes; package and proxy tests. |
-| `livedemo/` | Demo policy and Python client; run manually against a local proxy. |
+| `livedemo/` | Self-contained demo policy, Python client and MCP stub; exercised by quickstart acceptance. |
 | `scripts/` | Release helpers and Python quickstart acceptance; quickstart runs in CI. |
 | `templates/` | Warden and model API egress project templates; no template-only suite. |
 | `AGENTS.md`, `CLAUDE.md` | Bootstrap and contributor map; reviewed against source. |

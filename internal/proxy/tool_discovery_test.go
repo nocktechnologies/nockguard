@@ -38,9 +38,9 @@ func assertDiscovery(t *testing.T, got []byte) {
 }
 
 func TestToolDiscoveryPreservesMetadata(t *testing.T) {
-	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    allow: [safe_tool]\n", nil, nil)
 	assertDiscovery(t, gate.filterToolListResponse([]byte(discoveryResponse), 0))
-	gate = newGate(t, "agents:\n  mira:\n    mode: deny\n", nil, nil)
+	gate = newGate(t, "agents:\n  demo:\n    mode: deny\n", nil, nil)
 	got := gate.filterToolListResponse([]byte(discoveryResponse), 0)
 	if !strings.Contains(string(got), `"tools":[]`) {
 		t.Errorf("want empty array: %s", got)
@@ -54,7 +54,7 @@ func TestToolDiscoveryListsAskAndHidesDeny(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer auditor.Close()
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    ask: [ask_tool]\n    deny: [denied_tool]\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n    ask: [ask_tool]\n    deny: [denied_tool]\n", nil, auditor)
 	response := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"ask_tool"},{"name":"denied_tool"},{"name":"normal_tool"}]}}`)
 	filtered := gate.filterToolListResponse(response, 0)
 	gate.resolveAudit(0)
@@ -111,7 +111,7 @@ func TestHTTPToolDiscoveryJSONAndSSE(t *testing.T) {
 				}
 			}))
 			defer upstream.Close()
-			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    ask: [safe_tool]\n    deny: [blocked]\n", nil, nil)
+			gate := newGate(t, "agents:\n  demo:\n    mode: allow\n    ask: [safe_tool]\n    deny: [blocked]\n", nil, nil)
 			listener := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
 			defer listener.Close()
 			resp, err := http.Post(listener.URL, "application/json", strings.NewReader(discoveryRequest))
@@ -142,7 +142,7 @@ func TestHTTPToolDiscoveryJSONAndSSE(t *testing.T) {
 }
 
 func TestMalformedToolDiscoveryFailsClosed(t *testing.T) {
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, nil)
 	for _, result := range []string{`null`, `{}`, `{"tools":null}`, `{"tools":[{"name":7}]}`, `{"tools":[null]}`} {
 		got := gate.filterToolListResponse([]byte(`{"jsonrpc":"2.0","id":1,"result":`+result+`}`), 0)
 		if !strings.Contains(string(got), `"error"`) {
@@ -152,7 +152,7 @@ func TestMalformedToolDiscoveryFailsClosed(t *testing.T) {
 }
 
 func TestDiscoverySSEPreservesEventFieldsAndOtherMessages(t *testing.T) {
-	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    allow: [safe_tool]\n", nil, nil)
 	l := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
 	other := `data: {"jsonrpc":"2.0","id":9007199254740992,"result":{"other":true}}`
 	for _, ending := range []string{"\n", "\r", "\r\n"} {
@@ -174,7 +174,7 @@ func TestDiscoverySSEPreservesEventFieldsAndOtherMessages(t *testing.T) {
 }
 
 func TestHTTPDiscoveryRejectsUninspectableResponses(t *testing.T) {
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, nil)
 	l := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
 	for _, tc := range []struct{ name, contentType, body string }{
 		{"malformed", "application/json", `{"tools":["blocked"]`},
@@ -225,7 +225,7 @@ func TestHTTPToolDiscoverySSEResolvesAuditBeforeStreamCloses(t *testing.T) {
 	defer upstream.Close()
 
 	auditor, auditPath, _ := newEd25519Auditor(t)
-	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    allow: [safe_tool]\n", nil, auditor)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 
@@ -325,7 +325,7 @@ func TestHTTPToolDiscoverySSEDropsRepeatedResult(t *testing.T) {
 	defer upstream.Close()
 
 	auditor, auditPath, _ := newEd25519Auditor(t)
-	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    allow: [safe_tool]\n", nil, auditor)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
 	defer lsrv.Close()
 
@@ -378,7 +378,7 @@ func TestHTTPToolDiscoverySSEDropsRepeatedResult(t *testing.T) {
 // this branch is reachable in production against such an upstream, not just
 // in this direct unit test.
 func TestHTTPToolDiscoverySSEBodylessStatusFailsClosed(t *testing.T) {
-	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    allow: [safe_tool]\n", nil, nil)
 	l := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
 	for _, upstreamStatus := range []int{http.StatusNoContent, http.StatusNotModified} {
 		t.Run(http.StatusText(upstreamStatus), func(t *testing.T) {
@@ -431,7 +431,7 @@ func (b *blockingReadCloser) Close() error {
 // returns). closing the body instead must let this return promptly.
 func TestHTTPToolDiscoverySSESwitchingProtocolsClosesNotDrains(t *testing.T) {
 	body := newBlockingReadCloser()
-	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    allow: [safe_tool]\n", nil, nil)
 	l := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
 	w := httptest.NewRecorder()
 	resp := &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: body}
@@ -465,7 +465,7 @@ func TestHTTPToolDiscoverySSESwitchingProtocolsClosesNotDrains(t *testing.T) {
 // connector must still see a JSON-RPC error for its request id once the
 // stream ends, alongside the unrelated messages relayed unchanged.
 func TestHTTPDiscoverySSENoMatchingResponseFailsClosed(t *testing.T) {
-	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    allow: [safe_tool]\n", nil, nil)
 	l := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
 	input := strings.Join([]string{
 		`data: {"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`, "",
@@ -490,7 +490,7 @@ func TestHTTPDiscoverySSENoMatchingResponseFailsClosed(t *testing.T) {
 // with no events at all (upstream closes immediately) still yields a
 // JSON-RPC error to the connector rather than a silently empty 200.
 func TestHTTPDiscoverySSEEmptyStreamFailsClosed(t *testing.T) {
-	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    allow: [safe_tool]\n", nil, nil)
 	l := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
 	w := httptest.NewRecorder()
 	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}
@@ -506,7 +506,7 @@ func TestHTTPDiscoverySSEEmptyStreamFailsClosed(t *testing.T) {
 }
 
 func TestHTTPDiscoveryErrorUsesBodyPermittingStatus(t *testing.T) {
-	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    allow: [safe_tool]\n", nil, nil)
 	l := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
 	for _, upstreamStatus := range []int{http.StatusNoContent, http.StatusNotModified} {
 		t.Run(http.StatusText(upstreamStatus), func(t *testing.T) {
@@ -531,7 +531,7 @@ func TestHTTPDiscoveryErrorUsesBodyPermittingStatus(t *testing.T) {
 
 // The transformed payload can contain literal newlines even when the input is compact.
 func TestStreamMCPResponseFramesMultilineFilteredPayload(t *testing.T) {
-	gate := newGate(t, "agents:\n  mira:\n    allow: [safe_tool]\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    allow: [safe_tool]\n", nil, nil)
 	listener := NewHTTPListener("127.0.0.1:0", "", gate, log.New(io.Discard, "", 0))
 	filtered := "{\n\"jsonrpc\":\"2.0\",\n\"id\":9007199254740993,\n\"result\":{\"tools\":[]}\n}"
 	response := httptest.NewRecorder()

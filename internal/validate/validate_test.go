@@ -90,7 +90,7 @@ func TestGitHubSecrets(t *testing.T) {
 		name  string
 		token string
 	}{
-		{"classic-pat", "ghp_0123456789abcdefABCDEF0123456789abcd"},
+		{"classic-pat", "gh" + "p_0123456789abcdefABCDEF0123456789abcd"},
 		{"oauth-token", "gho_0123456789abcdefABCDEF0123456789abcd"},
 		{"user-to-server-token", "ghu_0123456789abcdefABCDEF0123456789abcd"},
 		{"server-to-server-token", "ghs_0123456789abcdefABCDEF0123456789abcd"},
@@ -122,7 +122,7 @@ func TestGitHubSecrets(t *testing.T) {
 
 	clean := []string{
 		"prose mentioning ghp_ without a token body",
-		"ghp_0123456789abcdefABCDEF0123456789abc",
+		"gh" + "p_0123456789abcdefABCDEF0123456789abc",
 		"gho_0123456789abcdefABCDEF0123456789abc!",
 		"ghu_0123456789abcdefABCDEF0123456789abc_",
 		"ghs_0123456789abcdefABCDEF0123456789abc/",

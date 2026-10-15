@@ -610,7 +610,7 @@ func runMCPListen(args []string) int {
 		return 1
 	}
 	if upstream == "" {
-		fmt.Fprintln(os.Stderr, "error: --upstream is required (the HTTP MCP upstream URL, e.g. https://cc.nocktechnologies.io/mcp)")
+		fmt.Fprintln(os.Stderr, "error: --upstream is required (the HTTP MCP upstream URL, e.g. https://command.example.com/mcp)")
 		return 1
 	}
 	parsedUpstream, err := url.Parse(upstream)
@@ -1474,7 +1474,7 @@ func runMCPHTTP(args []string) int {
 		}
 	}
 	if upstreamURL == "" {
-		fmt.Fprintln(os.Stderr, "error: --upstream is required (the HTTP MCP upstream URL, e.g. https://cc.nocktechnologies.io/mcp)")
+		fmt.Fprintln(os.Stderr, "error: --upstream is required (the HTTP MCP upstream URL, e.g. https://command.example.com/mcp)")
 		return 1
 	}
 	if agent == "" {

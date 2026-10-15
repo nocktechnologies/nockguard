@@ -71,7 +71,7 @@ func TestAuditResolvedRangesMergeAndConsume(t *testing.T) {
 func TestStdioOutOfOrderResponseAuditLimit(t *testing.T) {
 	auditor, path, _ := newEd25519Auditor(t)
 	defer auditor.Close()
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	pending := &sync.Map{}
 	forwards := 0
 	forward := auditWriteCheck(func(p []byte) (int, error) {
@@ -123,7 +123,7 @@ func TestStdioPendingRequestRegisteredBeforeWrite(t *testing.T) {
 		{name: "response after write returns", respondDuringWrite: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+			gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, nil)
 			pending := &sync.Map{}
 			var agent bytes.Buffer
 			response := `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}` + "\n"
@@ -171,7 +171,7 @@ func TestStdioPendingRequestRegisteredBeforeWrite(t *testing.T) {
 }
 
 func TestStdioUpstreamWriteFailureRemovesPendingAndResolvesAudit(t *testing.T) {
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, nil)
 	pending := &sync.Map{}
 	writeErr := errors.New("upstream write failed")
 	forward := auditWriteCheck(func([]byte) (int, error) { return 0, writeErr })
@@ -198,7 +198,7 @@ func assertStdioAuditQueueResolved(t *testing.T, gate *StdioProxy) {
 func TestStdioWriteFailureLeavesResolutionToResponseOwner(t *testing.T) {
 	for _, method := range []string{"tools/call", "tools/list"} {
 		t.Run(method, func(t *testing.T) {
-			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+			gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, nil)
 			pending := &sync.Map{}
 			writeErr := errors.New("upstream write failed")
 			forward := auditWriteCheck(func([]byte) (int, error) {
@@ -230,7 +230,7 @@ func TestStdioWriteFailureLeavesResolutionToResponseOwner(t *testing.T) {
 // them, ensuring resolved seqs blocked behind unresolved ones are emitted.
 func TestStdioDrainDoesNotLoseResolvedAudits(t *testing.T) {
 	auditor, auditPath, _ := newEd25519Auditor(t)
-	proxy := newGate(t, "agents:\n  mira:\n    mode: allow\n    deny:\n      - secret_tool\n", nil, auditor)
+	proxy := newGate(t, "agents:\n  demo:\n    mode: allow\n    deny:\n      - secret_tool\n", nil, auditor)
 
 	// Simulate two audits:
 	// seq 0: forwarded tool call (not yet resolved, e.g., waiting for upstream response)
@@ -269,7 +269,7 @@ func TestStdioDrainDoesNotLoseResolvedAudits(t *testing.T) {
 // correct card state stamp at flush time.
 func TestStdioOutOfOrderResponseStampingIsCorrect(t *testing.T) {
 	auditor, auditPath, _ := newEd25519Auditor(t)
-	proxy := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	proxy := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 
 	// Simulate the claim (seq 0) and generic_tool (seq 1) calls.
 	// Even if they resolve in different orders, the generic_tool audit
@@ -321,7 +321,7 @@ func TestStdioOutOfOrderResponseStampingIsCorrect(t *testing.T) {
 // resolve reinserts a key below auditNext that flushAuditsLocked never revisits.
 func TestStdioResolveAuditIsIdempotent(t *testing.T) {
 	auditor, _, _ := newEd25519Auditor(t)
-	proxy := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	proxy := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 
 	// Resolve seq 0 once — it flushes and advances the frontier past 0.
 	proxy.appendAudit(0, "forwarded_tool", "allow", "forwarded", nil)
@@ -345,7 +345,7 @@ func TestStdioResolveAuditIsIdempotent(t *testing.T) {
 
 func TestHandleFailModeAskKeepsCallerDenyAudit(t *testing.T) {
 	auditor, auditPath, _ := newEd25519Auditor(t)
-	proxy := newGate(t, "agents:\n  mira:\n    fail_mode: ask\n", nil, auditor)
+	proxy := newGate(t, "agents:\n  demo:\n    fail_mode: ask\n", nil, auditor)
 	proxy.WithApprover(approval.NewStaticApprover(true, "approved by test"))
 
 	const seq = uint64(0)
@@ -379,7 +379,7 @@ func TestStdioInjectedCallAuditsInjectThenAllowWithoutDrain(t *testing.T) {
 	auditor, auditPath, _ := newEd25519Auditor(t)
 	engine, err := policy.LoadBytes([]byte(`
 agents:
-  mira:
+  demo:
     mode: allow
     inject:
       - tools: ["echo_args"]
@@ -389,12 +389,12 @@ agents:
 	if err != nil {
 		t.Fatalf("LoadBytes: %v", err)
 	}
-	validator, err := engine.ValidatorFor("mira")
+	validator, err := engine.ValidatorFor("demo")
 	if err != nil {
 		t.Fatalf("ValidatorFor: %v", err)
 	}
 	var logs bytes.Buffer
-	proxy := NewStdioProxy(nil, "mira", engine, validator, nil, auditor, nil, log.New(&logs, "", 0))
+	proxy := NewStdioProxy(nil, "demo", engine, validator, nil, auditor, nil, log.New(&logs, "", 0))
 	proxy.WithBestEffortAudit() // this case isolates deferred queue ordering
 	proxy.WithResolver(&mockResolver{
 		values: map[string]string{
@@ -442,7 +442,7 @@ agents:
 // later audit is still stamped with the claimed card rather than a false 0.
 func TestStdioMismatchedReleaseKeepsCardStamp(t *testing.T) {
 	auditor, auditPath, _ := newEd25519Auditor(t)
-	proxy := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	proxy := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 
 	// seq 0: claim 12345
 	proxy.appendAudit(0, "nockcc_nock_claim", "allow", "forwarded", nil)

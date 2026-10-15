@@ -9,7 +9,7 @@ introspection_token_env: NOCKGUARD_INTROSPECTION_TOKEN
 subject: operator-subject-id
 client_id: registered-claude-client-id
 scope: mcp
-agent: mira
+agent: coder
 policy: /etc/nockguard/policy.yaml
 upstream: https://upstream.example/mcp
 upstream_token_env: NOCKGUARD_UPSTREAM_AGENT_TOKEN

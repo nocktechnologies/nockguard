@@ -53,7 +53,7 @@ func TestSSEInitializeCommitDoesNotWaitForSharedAuditor(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer auditor.Close()
-	engine, err := policy.LoadBytes([]byte("agents:\n  mira:\n    mode: allow\n"))
+	engine, err := policy.LoadBytes([]byte("agents:\n  demo:\n    mode: allow\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

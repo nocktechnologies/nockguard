@@ -29,7 +29,7 @@ func TestBestEffortAuditClearsStaleFailureMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer auditor.Close()
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	gate.WithBestEffortAudit()
 	if audit.FailureStatus(path) {
 		t.Fatal("best-effort mode retained stale required-writer marker")
@@ -97,7 +97,7 @@ func TestLocalAuditCheckpointFailure(t *testing.T) {
 			if err := os.Mkdir(path+".hwm.tmp", 0700); err != nil {
 				t.Fatal(err)
 			}
-			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+			gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 			if bestEffort {
 				gate.WithBestEffortAudit()
 			}
@@ -127,7 +127,7 @@ func TestLocalAuditCheckpointFailure(t *testing.T) {
 			if err := os.Mkdir(path+".hwm.tmp", 0700); err != nil {
 				t.Fatal(err)
 			}
-			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+			gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 			listener := NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0))
 			if bestEffort {
 				listener.WithBestEffortAudit()

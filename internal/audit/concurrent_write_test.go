@@ -9,7 +9,7 @@ import (
 )
 
 // TestConcurrentAuditorsKeepChainVerifiable reproduces the cross-process
-// hash-chain fork that desynced Mira's live dogfood trail (false TAMPER at the
+// hash-chain fork that desynced a live audit trail (false TAMPER at the
 // second writer's entry).
 //
 // Two Auditors opened on the SAME path simulate two proxy PROCESSES: each seeds
@@ -55,7 +55,7 @@ func TestConcurrentAuditorsKeepChainVerifiable(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := a0.Record(Event{Agent: "mira", Tool: "seed", Decision: "allow"}); err != nil {
+			if err := a0.Record(Event{Agent: "demo", Tool: "seed", Decision: "allow"}); err != nil {
 				t.Fatal(err)
 			}
 			a0.Close()
@@ -76,7 +76,7 @@ func TestConcurrentAuditorsKeepChainVerifiable(t *testing.T) {
 				go func(au *Auditor) {
 					defer wg.Done()
 					for i := 0; i < perWriter; i++ {
-						if err := au.Record(Event{Agent: "mira", Tool: "nockcc_nock_get", Decision: "allow"}); err != nil {
+						if err := au.Record(Event{Agent: "demo", Tool: "nockcc_nock_get", Decision: "allow"}); err != nil {
 							t.Errorf("Record: %v", err)
 						}
 					}

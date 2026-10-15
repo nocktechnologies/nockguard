@@ -10,9 +10,8 @@ The [hosted gateway contract](hosted-gateway.md) describes the local
 isolated session gates run in-process behind a loopback HTTP endpoint. A
 public HTTPS ingress and a compatible authorization server are still required.
 
-This supersedes the flagship-seat transport guidance in
-[`http-mcp-interception.md`](../http-mcp-interception.md). Historical pilot
-observations in that note are not a current deployment-health check.
+The [transport overview](../http-mcp-interception.md) explains when to
+use the stdio bridge or the HTTP listener.
 
 ## Network boundary
 
@@ -68,8 +67,8 @@ Before selecting and deploying that gateway, specify:
   the network route from the gateway to the listener.
 - Connector authentication supported by the actual client. Define how its
   authenticated identity selects one fixed agent policy; arbitrary callers
-  must not enter a listener and be recorded as Mira.
-- The boundary between gateway credentials and upstream NockCC credentials.
+  must not enter a listener under a configured agent identity.
+- The boundary between gateway credentials and upstream service credentials.
   Do not assume changing the hostname preserves existing OAuth or bearer-token
   behavior. Keep credentials out of URLs, logs, and audit events.
 - Session isolation. The current gate's card state, limits and identity are
@@ -106,10 +105,10 @@ fails. `--audit-best-effort` is an explicit local opt-out; do not use it for a
 hosted listener that claims complete audit evidence. The `mcp-gateway` keeps
 its required-audit contract for authenticated hosted calls.
 
-## Validation and the Kevin-gated cutover
+## Validation before endpoint changes
 
-Local development and stub-upstream tests can proceed without changing Mira's
-connection. Local acceptance covers policy denial, input validation, approval,
+Local development and stub-upstream tests can proceed without changing a live
+connector. Local acceptance covers policy denial, input validation, approval,
 rate limits, discovery filtering, streaming and signed-trail verification.
 `selftest` exercises synthetic enforcement probes; it is not proof of a live
 hosted route.
@@ -119,8 +118,6 @@ cloud reachability through its HTTPS endpoint, correct authentication and
 identity, session/stream behavior, a blocked canary, and a signed audit entry
 that verifies. Never use a connector pointed at localhost as that test.
 
-**The live cutover remains Kevin-gated:** only after those checks, re-point
-Mira's managed connector from `https://cc.nocktechnologies.io/mcp` to the
-validated gateway endpoint. Verify real traffic in the intended agent's audit
-trail and Live Wall, and exercise the documented rollback. This document and
-the local code fixes do not perform that cutover.
+After those checks, an operator can switch a connector to the validated
+gateway endpoint. Verify traffic in the configured agent's audit trail and Live
+Wall, and exercise the documented rollback.
