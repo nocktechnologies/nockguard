@@ -289,7 +289,11 @@ type pulse struct {
 	Hidden      int `json:"hidden"`      // tools/list hides; discovery filtering, not refused calls
 	Pending     int `json:"pending"`     // held calls (none of the current decisions)
 	RateLimited int `json:"rateLimited"` // rejected by rate or spend limit; subset of Blocked
-	Total       int `json:"total"`
+	// Sub-counts inside Approved, like RateLimited inside Blocked.
+	Granted    int `json:"granted"`    // approval-granted records
+	Dispatched int `json:"dispatched"` // dispatch records (a forwarded call also writes allow)
+	WouldDeny  int `json:"wouldDeny"`  // observe-mode shadow misses that were not refused
+	Total      int `json:"total"`
 	// Threat breakdown by severity (forward.Severity). Threats counts audit
 	// records with a live tier (critical+high+low), not calls; hides are excluded.
 	// Critical/High are broken out so the wall's hero counter and critical/high
@@ -395,8 +399,15 @@ func computePulse(evs []event, q, decision, severity string, since, until *time.
 			continue
 		}
 		p.Total++
-		if ev.Decision == "ratelimit" {
+		switch ev.Decision {
+		case "ratelimit":
 			p.RateLimited++
+		case "approval-granted":
+			p.Granted++
+		case "dispatch":
+			p.Dispatched++
+		case "would-deny":
+			p.WouldDeny++
 		}
 		switch forward.DecisionBucket(ev.Decision) {
 		case "approved":
