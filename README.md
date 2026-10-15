@@ -419,7 +419,7 @@ nockguard wall --audit <path>               # point at a specific audit JSONL
 
 The Wall binds to loopback by default (private), embeds its own page (no assets to ship), and replays the existing audit record on open so it is populated immediately, then streams new decisions as they land. It reads only the recorded decision (agent, tool, outcome, reason) — never raw tool-call parameters, consistent with the audit trail's no-payload rule.
 
-The Wall accepts requests for `127.0.0.1`, `localhost`, or `[::1]` on the configured port. Use `--allow-host <name>` to accept one additional Host name. Binding `--addr` to a non-loopback address requires `--allow-remote` and prints a warning; use a trusted network boundary when exposing the Wall remotely. The event stream and exports also reject cross-site browser requests.
+The Wall accepts requests for `127.0.0.1`, `localhost`, or `[::1]` on the configured port. Use `--allow-host <name>` to accept one additional Host name. Binding `--addr` to a non-loopback address requires `--allow-remote` and prints a warning; remote clients also need `--allow-host` set to the Host name or address they use. `--addr` accepts numeric ports, including `0` for an automatically chosen port. Use a trusted network boundary when exposing the Wall remotely. The event stream and exports also reject cross-site browser requests. Their Origin check expects direct HTTP; TLS fronting is not supported.
 
 With `--agent`, the wall reads `~/.nockguard/logs/<agent>.audit.jsonl` and resolves the public key from `NOCKGUARD_AGENT_<AGENT>_ED25519_PUB`, then `~/.nockguard/keys/<agent>.pub`. Explicit `--audit` and `--verify-ed25519-pub-env` values take precedence. Without a verification key, the Wall displays unverified records.
 

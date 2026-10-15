@@ -12,7 +12,10 @@ The command opens a loopback dashboard at
 Requests must use `127.0.0.1`, `localhost`, or `[::1]` as the Host with the
 configured port. `--allow-host <name>` accepts one additional Host name.
 Serving on a non-loopback `--addr` requires `--allow-remote` and prints a
-warning. `/events` and `/export` reject cross-site browser requests.
+warning. Remote clients also need `--allow-host` set to the Host name or
+address they use. `--addr` accepts numeric ports, including `0` for an
+automatically chosen port. `/events` and `/export` reject cross-site browser
+requests. This Origin check expects direct HTTP; TLS fronting is not supported.
 `--agent` selects one Guard trail; `--lock-db` adds a read-only NockLock SQLite
 log to the display. The PROOF export covers Guard rows only. Source:
 `cmd/nockguard-wall/main.go`, `cmd/nockguard-wall/lock.go`,

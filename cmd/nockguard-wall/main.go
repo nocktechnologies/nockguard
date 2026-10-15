@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -932,6 +933,10 @@ func wallListenConfig(addr string, allowRemote bool) (string, bool, error) {
 	if err != nil {
 		return "", false, fmt.Errorf("--addr: %w", err)
 	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 0 || n > 65535 {
+		return "", false, fmt.Errorf("--addr port must be numeric (0-65535): %q", port)
+	}
 	ip := net.ParseIP(host)
 	remote := host != "localhost" && (ip == nil || !ip.IsLoopback())
 	if remote && !allowRemote {
@@ -1005,7 +1010,7 @@ func wallHandler(b *broker, port, allowHost string) http.Handler {
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8787", "address to serve the wall on (loopback = private)")
 	allowHost := flag.String("allow-host", "", "additional Host name accepted on the configured port")
-	allowRemote := flag.Bool("allow-remote", false, "permit a non-loopback --addr (exposes the wall remotely)")
+	allowRemote := flag.Bool("allow-remote", false, "permit a non-loopback --addr (also requires --allow-host for remote clients)")
 	agent := flag.String("agent", "", "agent whose per-agent audit trail and public key to watch")
 	auditPath := flag.String("audit", defaultAuditPath(), "path to the NockGuard audit JSONL")
 	demoMode := flag.Bool("demo", false, "synthesize a sample event stream (use when there is no live traffic)")
@@ -1023,8 +1028,17 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	listener, err := net.Listen("tcp", *addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer listener.Close()
+	_, port, err = net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		log.Fatal(err)
+	}
 	if remote {
-		log.Printf("warning: Wall is listening on non-loopback address %q; audit data is remotely accessible", *addr)
+		log.Printf("warning: Wall is listening on non-loopback address %q; use --allow-host to accept remote requests", listener.Addr())
 	}
 	var agentSet, auditSet, pubEnvSet bool
 	flag.Visit(func(f *flag.Flag) {
@@ -1118,13 +1132,13 @@ func main() {
 	}
 
 	fmt.Printf("NockGuard Live Wall → http://%s   (audit: %s, lock: %q, demo: %v, chain-verify: %v)\n",
-		*addr, *auditPath, b.lockDB, *demoMode, v.enabled())
+		listener.Addr(), *auditPath, b.lockDB, *demoMode, v.enabled())
 	srv := &http.Server{
-		Addr:         *addr,
+		Addr:         listener.Addr().String(),
 		Handler:      wallHandler(b, port, *allowHost),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 0, // SSE requires streaming.
 		IdleTimeout:  120 * time.Second,
 	}
-	log.Fatal(srv.ListenAndServe())
+	log.Fatal(srv.Serve(listener))
 }

@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestWallHostGateCoversEveryRoute(t *testing.T) {
@@ -133,6 +136,66 @@ func TestWallBindRequiresExplicitRemoteOptIn(t *testing.T) {
 	for _, addr := range []string{"127.0.0.1:8787", "localhost:8787", "[::1]:8787"} {
 		if port, remote, err := wallListenConfig(addr, false); err != nil || port != "8787" || remote {
 			t.Errorf("%q: port=%q remote=%v err=%v", addr, port, remote, err)
+		}
+	}
+}
+
+func TestWallEphemeralPortServesRealHost(t *testing.T) {
+	cmd, output := wallCommand(t, t.TempDir(), "-addr", "127.0.0.1:0")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start wall: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_, after, found := strings.Cut(output.String(), "NockGuard Live Wall → http://")
+		if found {
+			addr := strings.Fields(after)[0]
+			_, port, err := net.SplitHostPort(addr)
+			if err != nil || port == "0" {
+				t.Fatalf("wall announced invalid address %q: %v", addr, err)
+			}
+			resp, err := http.Get("http://" + addr + "/verify")
+			if err != nil {
+				t.Fatalf("GET wall: %v", err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("real Host status = %d, want 200", resp.StatusCode)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("wall did not announce listening address: %s", output.String())
+}
+
+func TestWallNamedPortRefused(t *testing.T) {
+	if _, _, err := wallListenConfig("127.0.0.1:http", false); err == nil || !strings.Contains(err.Error(), "port must be numeric") {
+		t.Fatalf("named port error = %v, want numeric port error", err)
+	}
+}
+
+func TestWallRemoteBindNeedsExplicitHost(t *testing.T) {
+	b := newBroker()
+	b.auditPath = filepath.Join(t.TempDir(), "audit.jsonl")
+	b.verifier = &verifier{}
+	for _, tc := range []struct {
+		allowHost string
+		want      int
+	}{
+		{"", http.StatusForbidden},
+		{"192.0.2.1", http.StatusOK},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Host = "192.0.2.1:8787"
+		w := httptest.NewRecorder()
+		wallHandler(b, "8787", tc.allowHost).ServeHTTP(w, r)
+		if w.Code != tc.want {
+			t.Errorf("allow-host %q: status = %d, want %d", tc.allowHost, w.Code, tc.want)
 		}
 	}
 }
