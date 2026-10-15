@@ -238,7 +238,7 @@ type auditSnapshot struct {
 }
 
 // readAuditSnapshot reads the checkpoint first, then the trail through one open
-// file while holding the same shared flock signed writers take exclusively.
+// file. Regular trails use the shared flock signed writers take exclusively.
 func readAuditSnapshot(path string) (snapshot auditSnapshot, err error) {
 	snapshot.path = path
 	f, err := os.Open(path)
@@ -246,14 +246,19 @@ func readAuditSnapshot(path string) (snapshot auditSnapshot, err error) {
 		return snapshot, err
 	}
 	defer f.Close()
-	if err := audit.LockShared(f.Fd()); err != nil {
-		snapshot.checkpointErr = fmt.Errorf("locking audit snapshot: %w", err)
-	} else {
-		defer func() {
-			if err := audit.UnlockFile(f.Fd()); err != nil && snapshot.checkpointErr == nil {
-				snapshot.checkpointErr = fmt.Errorf("unlocking audit snapshot: %w", err)
-			}
-		}()
+	info, err := f.Stat()
+	if err != nil {
+		snapshot.checkpointErr = fmt.Errorf("stating audit snapshot: %w", err)
+	} else if info.Mode().IsRegular() {
+		if err := audit.LockShared(f.Fd()); err != nil {
+			snapshot.checkpointErr = fmt.Errorf("locking audit snapshot: %w", err)
+		} else {
+			defer func() {
+				if err := audit.UnlockFile(f.Fd()); err != nil && snapshot.checkpointErr == nil {
+					snapshot.checkpointErr = fmt.Errorf("unlocking audit snapshot: %w", err)
+				}
+			}()
+		}
 	}
 
 	checkpoint, checkpointErr := os.ReadFile(path + ".hwm")
