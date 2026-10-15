@@ -19,34 +19,53 @@ MCP server (filesystem, GitHub, your own)
 First [install NockGuard](#install), then run:
 
 ```bash
-QS=$(mktemp -d)                                  # private fixture directory (not a predictable /tmp path)
-printf 'NockGuard read succeeded\n' > "$QS/hello.txt"
-echo "$QS"                                        # substitute this path for <QS> below
-nockguard init                                   # writes ~/.nockguard/policy.yaml (coder policy, audit enabled; never clobbers an existing one)
-nockguard keygen --agent coder                   # writes ~/.nockguard/keys/coder.ed25519 and coder.pub
+QS=$(mktemp -d)
+cd "$QS"
+printf 'NockGuard read succeeded\n' > hello.txt
+pwd -P
 ```
 
-The generated policy allows `coder` to call the filesystem server's `read_file` and `read_text_file` tools and denies `write_file`. Auditing is enabled, and the key generated above signs `coder`'s trail. Point your MCP client at NockGuard:
+Use the physical path printed by `pwd -P` as `<QS>` below. Keep the fixture and executable paths free of spaces for this example. The sample filesystem server needs Node.js with `npx`.
+
+Initialize the starter policy and create the key that signs `coder`'s trail:
+
+```bash
+nockguard init
+nockguard keygen --agent coder
+```
+
+The starter policy lives at `~/.nockguard/policy.yaml`. It allows `coder` to call the filesystem server's `read_file` and `read_text_file` tools, denies `write_file`, and enables auditing. Existing policies are preserved. If you already have a policy, check that auditing is enabled and `coder` can use the read tools.
+
+Configure your client with the absolute executable paths and explicit `PATH` from the same terminal. Copy the output of `command -v nockguard` and `command -v npx` into `<NOCKGUARD_PATH>` and `<NPX_PATH>`, and the output of `printf '%s\n' "$PATH"` into `<SHELL_PATH>`:
+
+```bash
+command -v nockguard
+command -v npx
+printf '%s\n' "$PATH"
+```
+
+Replace all four placeholders in this client configuration:
 
 ```json
 {
   "mcpServers": {
     "files": {
-      "command": "nockguard",
-      "args": ["proxy", "--upstream", "npx -y @modelcontextprotocol/server-filesystem <QS>", "--agent", "coder"]
+      "command": "<NOCKGUARD_PATH>",
+      "args": ["proxy", "--upstream", "<NPX_PATH> -y @modelcontextprotocol/server-filesystem <QS>", "--agent", "coder"],
+      "env": {"PATH": "<SHELL_PATH>"}
     }
   }
 }
 ```
 
-Ask your MCP client to call `read_file` with `{"path":"<QS>/hello.txt"}`: it should return `NockGuard read succeeded`. Each `tools/call` routed through this proxy is policy-checked; with auditing enabled and the per-agent key available, its decision is recorded in a signed audit trail. After the call, run:
+Save the configuration and restart or reload the client. Ask it to call `read_file` on `<QS>/hello.txt`; it should return `NockGuard read succeeded`. Each `tools/call` routed through this proxy is policy-checked and recorded in the signed audit trail. After the read succeeds, verify the trail and open the Live Wall:
 
 ```bash
 nockguard verify --agent coder        # reads ~/.nockguard/keys/coder.pub; exit 0 and PROTECTED for a non-empty, fully checkpointed trail
 nockguard wall --agent coder          # open the Live Wall for coder's signed trail
 ```
 
-To exercise the blocked canary as well, run `python3 scripts/quickstart-acceptance.py` from a source checkout. This Linux CI test runs the commands above in an empty home with a local MCP stub using the filesystem server's tool names. It confirms both reads succeed, a direct `write_file` call is denied without creating a file, `verify` exits 0 with `PROTECTED`, and the signed trail records both allow and deny decisions. Denied tools are hidden from normal MCP tool discovery, so the test sends the canary call directly.
+To exercise the blocked canary as well, run `python3 scripts/quickstart-acceptance.py` from a source checkout. This Linux CI check runs `init`, `keygen`, `proxy`, and `verify` in an empty home with a local MCP stub using the filesystem server's tool names. It confirms both reads succeed, a direct `write_file` call is denied without creating a file, `verify` exits 0 with `PROTECTED`, and the signed trail records both allow and deny decisions. Denied tools are hidden from normal MCP tool discovery, so the test sends the canary call directly.
 
 The Live Wall over the trail that script writes (local stub upstream, `coder` agent): 6 records in view, 4 allowed (two `allow` and two `dispatch`), 1 rejected (the denied `write_file`) and 1 tool hidden (`write_file` in discovery). The header reads "Verification: verified" against `coder.pub`.
 

@@ -5,6 +5,7 @@ All notable changes to NockGuard are documented here.
 ## [Unreleased]
 
 ### Changed
+- README quickstart now uses a physical fixture path, absolute executable paths, and an explicit client `PATH`, matching the website setup steps.
 - The Wall decision filter lists every decision the audit log writes, adds approvals granted, dispatched and would-deny (observe) tiles with matching `/pulse` counts, keeps an "other" bucket for unknown values, and `--demo` shows each tile. A test fails CI when Go emits a decision the Wall does not know.
 
 ## [0.7.1] - 2026-10-14
