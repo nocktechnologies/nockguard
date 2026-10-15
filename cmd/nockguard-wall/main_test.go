@@ -166,6 +166,13 @@ func TestRateLimitRejectedAndUnknownDecisionRetained(t *testing.T) {
 	if got.Total != 5 || got.Approved != 2 || got.Blocked != 2 || got.RateLimited != 1 || got.Other != 1 || got.Pending != 0 {
 		t.Fatalf("pulse = %+v, want two routine, two rejections, and one other decision", got)
 	}
+	sub := computePulse([]event{{Decision: "approval-granted"}, {Decision: "dispatch"}, {Decision: "dispatch"}, {Decision: "would-deny"}, {Decision: "allow"}}, "", "", "", nil, nil)
+	if sub.Granted != 1 || sub.Dispatched != 2 || sub.WouldDeny != 1 || sub.Approved != 5 {
+		t.Fatalf("pulse = %+v, want granted 1, dispatched 2, wouldDeny 1 as subsets of approved 5", sub)
+	}
+	if got.Granted != 0 || got.Dispatched != 0 || got.WouldDeny != 1 {
+		t.Fatalf("pulse = %+v, want only the would-deny sub-count", got)
+	}
 	if got.High != 2 || got.Threats != 3 {
 		t.Fatalf("pulse = %+v, want unknown decision high without counting it as rejected", got)
 	}
@@ -1937,5 +1944,20 @@ func TestInvalidTimestampRetainedByFilterAndPulse(t *testing.T) {
 	}
 	if !foundInvalid {
 		t.Fatalf("filterEvents: invalid-Ts event (Agent=kit) not found in returned slice")
+	}
+}
+
+func TestDemoStreamCoversEveryWallTile(t *testing.T) {
+	got := map[string]bool{}
+	for _, s := range demoRoutine {
+		got[s.decision] = true
+		if ev := classify(event{Decision: s.decision, Reason: s.reason}); ev.Bucket != "approved" {
+			t.Errorf("demo %s bucket = %q, want approved", s.decision, ev.Bucket)
+		}
+	}
+	for _, want := range []string{"approval-granted", "dispatch", "would-deny"} {
+		if !got[want] {
+			t.Errorf("demo stream never emits %s, so its tile stays empty", want)
+		}
 	}
 }

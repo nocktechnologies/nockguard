@@ -74,6 +74,7 @@
   .ptile .pl { font-size:10px; letter-spacing:1.5px; text-transform:uppercase; color:var(--dim); }
   .ptile.approved { border-left-color:var(--allow); } .ptile.approved .pn{ color:var(--allow); }
   .ptile.blocked  { border-left-color:var(--block); } .ptile.blocked .pn{ color:var(--block); }
+  .ptile.wouldDeny { border-left-color:var(--ratelimit); } .ptile.wouldDeny .pn{ color:var(--ratelimit); }
   .ptile.other    { border-left-color:var(--hide); } .ptile.other .pn{ color:var(--dim); }
   .ptile.limited  { border-left-color:var(--ratelimit); } .ptile.limited .pn{ color:var(--ratelimit); }
   .ptile.unreadable { border-left-color:var(--hide); } .ptile.unreadable .pn{ color:var(--dim); }
@@ -147,6 +148,11 @@
   .deny, .approval-denied { border-left-color:var(--deny); }
   .deny .badge, .approval-denied .badge { background:rgba(240,136,62,.15); color:var(--deny); }
   .ratelimit  { border-left-color:var(--ratelimit); } .ratelimit .badge{ background:rgba(210,153,34,.15); color:var(--ratelimit); }
+  .approval-granted, .dispatch { border-left-color:var(--allow); }
+  .approval-granted .badge, .dispatch .badge { background:rgba(63,185,80,.15); color:var(--allow); }
+  .would-deny { border-left-color:var(--ratelimit); border-left-style:dashed; } .would-deny .badge{ background:rgba(210,153,34,.15); color:var(--ratelimit); }
+  .observe, .state-write, .inject, .budget-ask, .downgrade { border-left-color:var(--hide); }
+  .observe .badge, .state-write .badge, .inject .badge, .budget-ask .badge, .downgrade .badge { background:rgba(110,118,129,.18); color:var(--dim); }
   .hide       { border-left-color:var(--hide); } .hide .badge{ background:rgba(110,118,129,.18); color:var(--dim); }
   .unknown    { border-left-color:var(--accent); } .unknown .badge{ background:rgba(88,166,255,.12); color:var(--text); text-transform:none; }
   .block {
@@ -278,6 +284,14 @@
         <option value="ratelimit">ratelimit</option>
         <option value="hide">hide</option>
         <option value="approval-denied">approval-denied</option>
+        <option value="approval-granted">approval-granted</option>
+        <option value="would-deny">would-deny (observe)</option>
+        <option value="dispatch">dispatch</option>
+        <option value="observe">observe</option>
+        <option value="state-write">state-write</option>
+        <option value="inject">inject</option>
+        <option value="budget-ask">budget-ask</option>
+        <option value="downgrade">downgrade</option>
       </select>
       <select id="f-severity" class="finput" title="filter by threat severity">
         <option value="">all severities</option>
@@ -310,6 +324,9 @@
     </div>
     <div class="pgroup">
       <div class="ptile approved"><span class="pn" id="p-approved">—</span><span class="pl">approved</span></div>
+      <div class="ptile approved" title="approvals a human granted (routine)"><span class="pn" id="p-granted">—</span><span class="pl">approvals granted</span></div>
+      <div class="ptile approved" title="calls dispatched after the required audit write (routine)"><span class="pn" id="p-dispatched">—</span><span class="pl">dispatched</span></div>
+      <div class="ptile wouldDeny" title="observe mode: a shadow allowlist miss that was NOT refused"><span class="pn" id="p-would-deny">—</span><span class="pl">would deny (observe)</span></div>
       <div class="ptile blocked"><span class="pn" id="p-blocked">—</span><span class="pl">rejected</span></div>
       <div class="ptile other"><span class="pn" id="p-hidden">—</span><span class="pl">tools hidden</span></div>
       <div class="ptile other"><span class="pn" id="p-other">—</span><span class="pl">other</span></div>
@@ -483,9 +500,12 @@
   const pThreats = document.getElementById('p-threats');
   const pCritical = document.getElementById('p-critical');
   const pHigh = document.getElementById('p-high');
+  const pGranted = document.getElementById('p-granted');
+  const pDispatched = document.getElementById('p-dispatched');
+  const pWouldDeny = document.getElementById('p-would-deny');
   const pAgents = document.getElementById('p-agents');
   function renderPulse() {
-    let approved = 0, blocked = 0, hidden = 0, other = 0, limited = 0, threats = 0, critical = 0, high = 0;
+    let approved = 0, blocked = 0, hidden = 0, other = 0, limited = 0, granted = 0, dispatched = 0, wouldDeny = 0, threats = 0, critical = 0, high = 0;
     let totalRows = 0, unreadable = 0, hasEvidence = false;
     const byAgent = new Map();
     for (const row of feed.children) {
@@ -500,6 +520,9 @@
       else if (b === 'unreadable') unreadable++;
       else other++;
       if (row.dataset.decision === 'ratelimit') limited++;
+      else if (row.dataset.decision === 'approval-granted') granted++;
+      else if (row.dataset.decision === 'dispatch') dispatched++;
+      else if (row.dataset.decision === 'would-deny') wouldDeny++;
       // Severity is classified server-side (forward.Severity); the wall only reads
       // the tag — it never re-derives "how bad is this?" in the browser.
       const sev = row.dataset.severity || 'none';
@@ -516,6 +539,9 @@
     document.getElementById('c-hidden').textContent = shown(hidden);
     pOther.textContent = shown(other);
     pLimited.textContent = shown(limited);
+    pGranted.textContent = shown(granted);
+    pDispatched.textContent = shown(dispatched);
+    pWouldDeny.textContent = shown(wouldDeny);
     pUnreadable.textContent = shown(unreadable);
     pThreats.textContent = shown(threats);
     pCritical.textContent = shown(critical);

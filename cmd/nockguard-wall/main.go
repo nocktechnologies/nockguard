@@ -289,7 +289,11 @@ type pulse struct {
 	Hidden      int `json:"hidden"`      // tools/list hides; discovery filtering, not refused calls
 	Pending     int `json:"pending"`     // held calls (none of the current decisions)
 	RateLimited int `json:"rateLimited"` // rejected by rate or spend limit; subset of Blocked
-	Total       int `json:"total"`
+	// Sub-counts inside Approved, like RateLimited inside Blocked.
+	Granted    int `json:"granted"`    // approval-granted records
+	Dispatched int `json:"dispatched"` // dispatch records (a forwarded call also writes allow)
+	WouldDeny  int `json:"wouldDeny"`  // observe-mode shadow misses that were not refused
+	Total      int `json:"total"`
 	// Threat breakdown by severity (forward.Severity). Threats counts audit
 	// records with a live tier (critical+high+low), not calls; hides are excluded.
 	// Critical/High are broken out so the wall's hero counter and critical/high
@@ -395,8 +399,15 @@ func computePulse(evs []event, q, decision, severity string, since, until *time.
 			continue
 		}
 		p.Total++
-		if ev.Decision == "ratelimit" {
+		switch ev.Decision {
+		case "ratelimit":
 			p.RateLimited++
+		case "approval-granted":
+			p.Granted++
+		case "dispatch":
+			p.Dispatched++
+		case "would-deny":
+			p.WouldDeny++
 		}
 		switch forward.DecisionBucket(ev.Decision) {
 		case "approved":
@@ -876,6 +887,9 @@ func demo(ctx context.Context, b *broker) {
 				continue
 			case n < 25+51: // mostly allows, with a steady drip of caught attempts
 				ev.Tool, ev.Decision = allows[r.Intn(len(allows))], "allow"
+			case n < 25+51+12: // routine and observe-mode rows, so every Wall tile shows in demo
+				s := demoRoutine[r.Intn(len(demoRoutine))]
+				ev.Tool, ev.Decision, ev.Reason = s.tool, s.decision, s.reason
 			default:
 				s := bads[r.Intn(len(bads))]
 				ev.Tool, ev.Decision, ev.Reason = s.tool, s.decision, s.reason
@@ -886,6 +900,15 @@ func demo(ctx context.Context, b *broker) {
 			t.Reset(time.Duration(350+r.Intn(900)) * time.Millisecond)
 		}
 	}
+}
+
+// demoRoutine are the synthetic routine and observe-mode decisions --demo mixes in.
+var demoRoutine = []struct{ tool, decision, reason string }{
+	{"mcp__billing__refund", "approval-granted", "approved by operator"},
+	{"mcp__deploy__ship", "dispatch", "required-audit-before-forward"},
+	{"mcp__crm__lookup", "would-deny", "would-deny shadow (no shadow-rule matched)"},
+	{"mcp__crm__lookup", "observe", "mcp-http-intercept"},
+	{"mcp__board__label", "state-write", "label done"},
 }
 
 // lockShots are the synthetic NockLock fence rows --demo mixes in.
