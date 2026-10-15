@@ -254,6 +254,40 @@ If a failure happens after forwarding, the response warns that the tool may have
 executed and must not be retried automatically. A dispatch row is not proof of
 execution or success. See the [gateway recovery contract](docs/design/hosted-gateway.md).
 
+#### Durable tool-call pairing (stdio, opt-in)
+
+The stdio proxy can attach a proxy-generated `action_id` to each parsed
+`tools/call`, its policy decisions, the required `dispatch`, and a terminal
+observation. Enable the v2 writer only after deploying a reader that understands
+the additive schema:
+
+```yaml
+audit:
+  enabled: true
+  action_pairing: true
+```
+
+The default remains v1. Pairing requires the durable audit writer and is limited
+to `proxy` over stdio; HTTP listeners continue writing v1. A matching upstream
+JSON-RPC response is recorded as `response_observed`; timeout, cancellation,
+disconnect, and shutdown are recorded as `outcome_unknown`. A response observed
+after cancellation is an additional `late_response_observed` fact and does not
+replace the unknown outcome. These rows contain no JSON-RPC request IDs, tool
+arguments, prompts, or response bodies. `mcp_is_error` is included only when the
+upstream returned a boolean value. A dispatch without its outcome is never
+success evidence, and an unknown outcome must not trigger an automatic retry.
+
+V2 rows are durably appended and assigned a per-run `run_seq`; the existing
+HMAC/Ed25519 verifier validates both strict v1 and v2 envelopes while retaining
+the historical v1 typed-marshal signature bytes. Older binaries cannot verify
+signed trails containing v2 rows, and their signed writer refuses to reopen
+such a trail after its startup verification fails. An older unsigned writer
+does not authenticate the v2 fields and may append legacy rows instead. Keep
+pairing on a dedicated audit path; a rollback must use a new path. Run
+open/close markers and completeness assessment are not emitted by this opt-in
+writer; v2 pairing provides action correlation, not a completeness verdict.
+`--audit-best-effort` cannot be combined with `action_pairing`.
+
 `reason` names the specific policy rule behind each decision — `deny-rule "…"`, `allow-rule "…"`, `no allow-rule matched`, `default-allow (no allow list)`, or `no policy for agent (fail-closed)` — so the trail is *explainable* rather than an opaque `policy`. The matched rule is recorded operator-side only; the error returned to the agent stays minimal (`denied by policy`), so a hostile agent cannot map the policy surface from rejections.
 
 **By design, NockGuard does not write raw tool-call parameters to the audit trail.** Logging arguments would persist exactly the secrets and injection payloads that Phase 2 exists to keep out, so the trail records the *decision* (agent, tool, outcome, reason), not the payload.

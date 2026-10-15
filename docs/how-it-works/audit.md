@@ -33,6 +33,36 @@ state before retrying. Source: `internal/proxy/stdio.go`,
 [internal/proxy/httplisten.go](../../internal/proxy/httplisten.go), `internal/proxy/required_audit.go`,
 [gateway contract](../design/hosted-gateway.md).
 
+The stdio writer has an opt-in schema v2 action-pairing mode:
+
+```yaml
+audit:
+  enabled: true
+  action_pairing: true
+```
+
+It assigns a fresh run nonce and an increasing action sequence before policy
+evaluation. Decision rows and the required dispatch share that `action_id`; a
+matching JSON-RPC response produces `response_observed`, while timeout,
+cancellation, disconnect, and shutdown produce `outcome_unknown`. A late reply
+after an unknown outcome is appended as `late_response_observed`, preserving
+the original uncertainty. No request IDs, tool arguments, or response bodies
+are written. Audit verification accepts historical v1 rows with their original
+typed-marshal signature bytes and strictly validates v2 rows; old binaries
+cannot verify signed v2 trails, and their signed writer refuses to reopen such
+a trail after startup verification fails. An older unsigned writer does not
+authenticate v2 fields and may append legacy rows instead. Keep pairing on a
+dedicated audit path; a rollback must use a new path. Pairing is disabled by
+default, requires required audit writes, applies to stdio only, and cannot be
+combined with `--audit-best-effort`. These action rows do not include run
+open/close records and therefore do not support a completeness verdict; the
+dispatch itself never proves execution or success. Source:
+`internal/audit/audit.go`, `internal/proxy/stdio.go`.
+
+When pairing is enabled, the writer resumes unsigned `run_seq` counters from
+valid v2 rows already in the trail. Unsigned audit opens without pairing retain
+the legacy path and do not scan the trail for sequence state.
+
 `evidence --framework soc2` maps verified rows into a local pack; other
 framework names are stubs ([cmd/nockguard/main.go](../../cmd/nockguard/main.go)). Optional NockCC
 ops-log forwarding is a second output, not the local proof source

@@ -147,13 +147,93 @@ func TestDuplicateDecisionKeyForgeryRejectedEd25519(t *testing.T) {
 // fix does not break legitimate trails.
 func TestCanonicalLinePassesDuplicateKeyCheck(t *testing.T) {
 	line := []byte(`{"ts":"2026-06-20T00:00:00Z","agent":"kit","tool":"x","decision":"allow","reason":"r","sig":"abc"}`)
-	if err := rejectDuplicateTopLevelKeys(line); err != nil {
+	if err := rejectDuplicateObjectKeys(line); err != nil {
 		t.Errorf("a canonical line must pass the duplicate-key check, got: %v", err)
 	}
-	// Nested duplicate keys (inside a value object) are NOT a top-level forgery
-	// and must not trip the check — only top-level duplicates matter here.
+	// Duplicate-looking text inside a string is not a JSON member and remains
+	// valid.
 	nested := []byte(`{"ts":"t","reason":"{\"decision\":\"deny\"}","decision":"allow","sig":"s"}`)
-	if err := rejectDuplicateTopLevelKeys(nested); err != nil {
+	if err := rejectDuplicateObjectKeys(nested); err != nil {
 		t.Errorf("a line with duplicate-looking text inside a string value must pass: %v", err)
+	}
+	// Actual duplicate names are rejected recursively, even inside an otherwise
+	// unknown extension object. The typed Event decoder would discard that object.
+	nestedDuplicate := []byte(`{"ts":"t","agent":"a","tool":"x","decision":"allow","extension":{"x":1,"x":2},"sig":"s"}`)
+	if err := rejectDuplicateObjectKeys(nestedDuplicate); err == nil {
+		t.Fatal("nested duplicate member must be rejected")
+	}
+}
+
+func TestAuditReaderRejectsUnknownCaseAliasesAndExplicitV1(t *testing.T) {
+	for _, line := range []string{
+		`{"ts":"t","agent":"a","tool":"x","decision":"allow","extension":true}`,
+		`{"ts":"t","agent":"a","tool":"x","decision":"allow","Tool":"y"}`,
+		`{"ts":"t","agent":"a","tool":"x","decision":"allow","schema_version":1}`,
+	} {
+		var ev Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("fixture should decode before strict envelope validation: %v", err)
+		}
+		if err := validateAuditLine([]byte(line), ev); err == nil {
+			t.Errorf("strict audit reader accepted %s", line)
+		}
+	}
+	legacy := []byte(`{"ts":"t","agent":"a","tool":"x","decision":"allow"}`)
+	var ev Event
+	if err := json.Unmarshal(legacy, &ev); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateAuditLine(legacy, ev); err != nil {
+		t.Fatalf("historical v1 shape rejected: %v", err)
+	}
+}
+
+func TestUnknownV1ExtensionForgeryRejectedByVerifiers(t *testing.T) {
+	hmacKey := []byte("legacy-envelope-key-0123456789")
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		create func(string) error
+		verify func(string) error
+	}{
+		{
+			name: "hmac",
+			create: func(path string) error {
+				a, err := New(path, WithSigningKey(hmacKey))
+				if err != nil {
+					return err
+				}
+				defer a.Close()
+				return a.Record(Event{Agent: "kit", Tool: "read", Decision: "allow"})
+			},
+			verify: func(path string) error { _, err := Verify(path, hmacKey); return err },
+		},
+		{
+			name: "ed25519",
+			create: func(path string) error {
+				a, err := New(path, WithEd25519Key(priv))
+				if err != nil {
+					return err
+				}
+				defer a.Close()
+				return a.Record(Event{Agent: "kit", Tool: "read", Decision: "allow"})
+			},
+			verify: func(path string) error { _, err := VerifyEd25519(path, pub); return err },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "audit.jsonl")
+			if err := tc.create(path); err != nil {
+				t.Fatal(err)
+			}
+			line := bytes.Replace(firstLine(t, path), []byte(`,"sig":`), []byte(`,"extension":true,"sig":`), 1)
+			writeFirstLine(t, path, line)
+			if err := tc.verify(path); err == nil {
+				t.Fatal("signed v1 row with an unknown extension was accepted")
+			}
+		})
 	}
 }

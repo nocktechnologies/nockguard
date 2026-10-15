@@ -3,8 +3,10 @@ package policy
 import (
 	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -128,6 +130,62 @@ agents:
 	}
 	if n != 1 {
 		t.Errorf("expected 1 entry, got %d", n)
+	}
+}
+
+func TestAuditorForAgentResumesRunSequenceWithActionPairing(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	t.Setenv(AgentKeyEnvName("kit"), hex.EncodeToString(priv.Seed()))
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := writePolicy(t, `
+audit:
+  enabled: true
+  action_pairing: true
+  path: `+auditPath+`
+agents:
+  kit:
+    allow: ["*"]
+`)
+	eng, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := "00112233445566778899aabbccddeeff"
+	for i := 1; i <= 2; i++ {
+		writer, err := eng.AuditorFor("kit")
+		if err != nil {
+			t.Fatal(err)
+		}
+		event := audit.Event{
+			Agent: "kit", Tool: "read_file", Decision: "allow", SchemaVersion: 2,
+			RecordType: "decision", RunID: runID, ActionID: runID + "." + strconv.Itoa(i),
+		}
+		if err := writer.RecordRequired(event); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	data, err := os.ReadFile(AgentAuditPath(auditPath, "kit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("audit rows = %d, want 2", len(lines))
+	}
+	for i, line := range lines {
+		var row struct {
+			RunSeq uint64 `json:"run_seq"`
+		}
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatal(err)
+		}
+		if want := uint64(i + 1); row.RunSeq != want {
+			t.Fatalf("row %d run_seq=%d, want %d", i, row.RunSeq, want)
+		}
 	}
 }
 

@@ -10,10 +10,8 @@ import (
 	"mime"
 	"net"
 	"net/http"
-	"reflect"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/extract"
@@ -210,7 +208,7 @@ func (l *HTTPListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	seq := atomic.AddUint64(&l.gate.auditSeq, 1) - 1
+	seq := l.gate.reserveAuditSequence()
 
 	// Guarantee exactly-once resolution per reserved seq: establish defer with flag
 	// that ensures even on early returns, the seq gets resolved exactly once.
@@ -277,9 +275,7 @@ func jsonRPCIDMatches(reqBody []byte, respID json.RawMessage) bool {
 	if err := json.Unmarshal(reqBody, &req); err != nil || req.ID == nil {
 		return false
 	}
-	reqID, ok1 := decodeIDNumberAware(req.ID)
-	respIDVal, ok2 := decodeIDNumberAware(respID)
-	return ok1 && ok2 && reflect.DeepEqual(reqID, respIDVal)
+	return jsonRPCIDsEqual(req.ID, respID)
 }
 
 // decodeIDNumberAware decodes a JSON-RPC id with UseNumber so a large integer id

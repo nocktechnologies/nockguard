@@ -260,7 +260,7 @@ func VerifyExport(data []byte, pub ed25519.PublicKey, expectedAgent string) (int
 			return 0, false, fmt.Errorf("export row index invalid")
 		}
 		raw := []byte(row.Raw)
-		if err := rejectDuplicateTopLevelKeys(raw); err != nil {
+		if err := rejectDuplicateObjectKeys(raw); err != nil {
 			return 0, false, fmt.Errorf("row %d: %w", i, err)
 		}
 		if err := rejectNonStringApprovalActor(raw); err != nil {

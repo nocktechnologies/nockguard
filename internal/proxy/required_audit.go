@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
@@ -16,7 +17,7 @@ const AuditBeforeForwardError = "nockguard: audit unavailable; request was not f
 const auditAfterForwardError = "nockguard: audit failed after forwarding; tool may have executed; do not retry automatically"
 const unverifiedToolResponseError = "nockguard: upstream response could not be verified; tool may have executed; do not retry automatically"
 
-func (p *StdioProxy) recordAudit(ev audit.Event) {
+func (p *StdioProxy) recordAudit(ev audit.Event) error {
 	var err error
 	if p.requiredAudit {
 		err = p.auditor.RecordRequired(ev)
@@ -26,6 +27,7 @@ func (p *StdioProxy) recordAudit(ev audit.Event) {
 	if err != nil {
 		p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, ev.Tool, err)
 	}
+	return err
 }
 
 func (l *HTTPListener) forwardRequiredToolSSE(w http.ResponseWriter, resp *http.Response, request []byte, seq uint64, tool string, refs *extract.References, resolved *bool) {
@@ -101,12 +103,20 @@ func (l *HTTPListener) writeRequestError(w http.ResponseWriter, request []byte, 
 // whether its result is successful enough to commit card state. Matching
 // JSON-RPC errors must still reach the caller, but malformed envelopes must not.
 func validToolResponse(request, response []byte) bool {
+	var req jsonrpc.Message
+	if json.Unmarshal(request, &req) != nil || req.ID == nil {
+		return false
+	}
+	return validToolResponseID(req.ID, response)
+}
+
+func validToolResponseID(requestID json.RawMessage, response []byte) bool {
 	var members map[string]json.RawMessage
 	if json.Unmarshal(response, &members) != nil {
 		return false
 	}
 	var version string
-	if json.Unmarshal(members["jsonrpc"], &version) != nil || version != "2.0" || !jsonRPCIDMatches(request, members["id"]) {
+	if json.Unmarshal(members["jsonrpc"], &version) != nil || version != "2.0" || !jsonRPCIDsEqual(requestID, members["id"]) {
 		return false
 	}
 	if _, hasMethod := members["method"]; hasMethod {
@@ -118,16 +128,31 @@ func validToolResponse(request, response []byte) bool {
 		return false // exactly one of result and error is required
 	}
 	if hasError {
-		var fields map[string]json.RawMessage
-		if json.Unmarshal(errRaw, &fields) != nil {
-			return false
-		}
-		var code *int
-		var message *string
-		return json.Unmarshal(fields["code"], &code) == nil && code != nil &&
-			json.Unmarshal(fields["message"], &message) == nil && message != nil
+		return validJSONRPCError(errRaw)
 	}
 	return true
+}
+
+// validJSONRPCError requires both error members with their JSON-RPC types.
+// Pointers keep explicit null distinct from a valid zero code or empty message.
+func validJSONRPCError(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return false
+	}
+	var code *int
+	var message *string
+	return json.Unmarshal(fields["code"], &code) == nil && code != nil &&
+		json.Unmarshal(fields["message"], &message) == nil && message != nil
+}
+
+func jsonRPCIDsEqual(left, right json.RawMessage) bool {
+	if len(left) == 0 || len(right) == 0 {
+		return false
+	}
+	a, okA := decodeIDNumberAware(left)
+	b, okB := decodeIDNumberAware(right)
+	return okA && okB && reflect.DeepEqual(a, b)
 }
 
 // commitToolResult preserves the existing state rule: only a matching genuine

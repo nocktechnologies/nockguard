@@ -97,19 +97,35 @@ import (
 // When present, both are part of the canonical payload and therefore covered
 // by the signature chain like every other field.
 type Event struct {
-	Time           string `json:"ts"`
-	Agent          string `json:"agent"`
-	Tool           string `json:"tool"`
-	Decision       string `json:"decision"` // dispatch | allow | deny | block | ratelimit | hide
-	Reason         string `json:"reason,omitempty"`
-	ApprovalActor  string `json:"approval_actor,omitempty"`   // local approver's kernel-authenticated uid; never a tool caller
-	NockID         int    `json:"nock_id,omitempty"`          // NockCC card id, extracted from nockcc_nock_* tools or set by session stamp
-	PR             string `json:"pr,omitempty"`               // GitHub PR reference owner/repo#n, extracted from gh_* tools
-	ReviewID       string `json:"review_id,omitempty"`        // NockCC review id, extracted from known tools
-	ParentAuditSeq int    `json:"parent_audit_seq,omitempty"` // Reserved for future use; never populated
-	SessionID      string `json:"session_id,omitempty"`       // nocklock session correlation, from NOCKLOCK_SESSION_ID
-	KeyID          string `json:"key_id,omitempty"`           // hex(sha256(pub)) of the Ed25519 signing key; empty for HMAC/unsigned
-	Sig            string `json:"sig,omitempty"`
+	Time               string `json:"ts"`
+	Agent              string `json:"agent"`
+	Tool               string `json:"tool"`
+	Decision           string `json:"decision"` // dispatch | allow | deny | block | ratelimit | hide
+	Reason             string `json:"reason,omitempty"`
+	ApprovalActor      string `json:"approval_actor,omitempty"`   // local approver's kernel-authenticated uid; never a tool caller
+	NockID             int    `json:"nock_id,omitempty"`          // NockCC card id, extracted from nockcc_nock_* tools or set by session stamp
+	PR                 string `json:"pr,omitempty"`               // GitHub PR reference owner/repo#n, extracted from gh_* tools
+	ReviewID           string `json:"review_id,omitempty"`        // NockCC review id, extracted from known tools
+	ParentAuditSeq     int    `json:"parent_audit_seq,omitempty"` // Reserved for future use; never populated
+	SessionID          string `json:"session_id,omitempty"`       // nocklock session correlation, from NOCKLOCK_SESSION_ID
+	KeyID              string `json:"key_id,omitempty"`           // hex(sha256(pub)) of the Ed25519 signing key; empty for HMAC/unsigned
+	SchemaVersion      int    `json:"schema_version,omitempty"`
+	RecordType         string `json:"record_type,omitempty"`
+	RunID              string `json:"run_id,omitempty"`
+	RunSeq             uint64 `json:"run_seq,omitempty"`
+	RunEvent           string `json:"run_event,omitempty"`
+	RunCount           uint64 `json:"run_count,omitempty"`
+	RunHead            string `json:"run_head,omitempty"`
+	ActionID           string `json:"action_id,omitempty"`
+	Observation        string `json:"observation,omitempty"`
+	Cause              string `json:"cause,omitempty"`
+	ResponseClass      string `json:"response_class,omitempty"`
+	MCPIsError         *bool  `json:"mcp_is_error,omitempty"`
+	ToolHashVersion    string `json:"tool_hash_version,omitempty"`
+	ToolDefinitionHash string `json:"tool_definition_hash,omitempty"`
+	ToolPinHash        string `json:"tool_pin_hash,omitempty"`
+	ToolPinStatus      string `json:"tool_pin_status,omitempty"`
+	Sig                string `json:"sig,omitempty"`
 }
 
 // nocklockSessionIDEnv is the environment variable nocklock's `wrap` exports
@@ -124,14 +140,16 @@ const nocklockSessionIDEnv = "NOCKLOCK_SESSION_ID"
 type Auditor struct {
 	clock func() time.Time
 
-	mu          sync.Mutex
-	f           *os.File
-	path        string             // audit file path; used to re-read the on-disk chain head under the flock
-	key         []byte             // HMAC signing key; empty = unsigned trail
-	edPriv      ed25519.PrivateKey // Ed25519 signing key; non-nil = non-repudiable trail (takes precedence over key)
-	keyID       string             // hex(sha256(pub)) of edPriv's public key; stamped on Events when edPriv is set
-	closed      bool
-	requiredErr error
+	mu            sync.Mutex
+	f             *os.File
+	path          string             // audit file path; used to re-read the on-disk chain head under the flock
+	key           []byte             // HMAC signing key; empty = unsigned trail
+	edPriv        ed25519.PrivateKey // Ed25519 signing key; non-nil = non-repudiable trail (takes precedence over key)
+	keyID         string             // hex(sha256(pub)) of edPriv's public key; stamped on Events when edPriv is set
+	runSeqs       map[string]uint64  // last durably appended v2 sequence per fresh process run id
+	actionPairing bool               // seed existing v2 run sequences only for the opt-in pairing writer
+	closed        bool
+	requiredErr   error
 }
 
 // Option configures an Auditor at construction.
@@ -165,6 +183,12 @@ func WithEd25519Key(priv ed25519.PrivateKey) Option {
 	}
 }
 
+// WithActionPairing enables resuming v2 run sequences from an existing trail.
+// The default audit path does not scan unsigned trails on open.
+func WithActionPairing() Option {
+	return func(a *Auditor) { a.actionPairing = true }
+}
+
 // signing reports whether any signing mode is active.
 func (a *Auditor) signing() bool {
 	return len(a.key) > 0 || a.edPriv != nil
@@ -184,7 +208,7 @@ func (a *Auditor) sign(canonical []byte, prev string) string {
 // is enabled, the chain is seeded from the last signature already in the file so
 // that appends across restarts stay verifiable.
 func New(path string, opts ...Option) (*Auditor, error) {
-	a := &Auditor{clock: time.Now}
+	a := &Auditor{clock: time.Now, runSeqs: make(map[string]uint64)}
 	for _, o := range opts {
 		o(a)
 	}
@@ -211,6 +235,12 @@ func New(path string, opts ...Option) (*Auditor, error) {
 		if err := a.verifyExisting(path); err != nil {
 			return nil, fmt.Errorf("audit trail %s failed verification on open — refusing to append onto a tampered or broken chain: %w", path, err)
 		}
+	} else if a.actionPairing {
+		// Unsigned v1 users retain the legacy open path. Only the opt-in v2
+		// pairing writer needs to scan for a run sequence to resume.
+		if err := a.seedRunSequences(path); err != nil {
+			return nil, fmt.Errorf("seed audit run sequences: %w", err)
+		}
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -226,9 +256,9 @@ func New(path string, opts ...Option) (*Auditor, error) {
 }
 
 // verifyExisting walks the existing trail and confirms the hash chain is intact
-// before the auditor seeds its prevSig from the tail and starts appending. A
-// missing file (nothing recorded yet) and unsigned mode are both no-ops. For
-// Ed25519 the public key is derived from the configured private key, so the same
+// before the auditor starts appending. When action pairing is enabled, it also
+// seeds the per-run v2 sequence counters. A missing file is a no-op. For Ed25519
+// the public key is derived from the configured private key, so the same
 // verification the external `audit verify` command runs is enforced at open time.
 func (a *Auditor) verifyExisting(path string) error {
 	if _, err := os.Stat(path); err != nil {
@@ -242,11 +272,49 @@ func (a *Auditor) verifyExisting(path string) error {
 		if !ok {
 			return fmt.Errorf("ed25519 private key has no usable public key")
 		}
-		_, err := VerifyEd25519(path, pub)
+		if _, err := VerifyEd25519(path, pub); err != nil {
+			return err
+		}
+	} else if _, err := Verify(path, a.key); err != nil {
 		return err
 	}
-	_, err := Verify(path, a.key)
-	return err
+	if a.actionPairing {
+		return a.seedRunSequences(path)
+	}
+	return nil
+}
+
+// seedRunSequences resumes each v2 run counter from its highest existing row.
+// Signed trails are verified before this scan. This also preserves sequence
+// continuity when an unsigned trail is reopened with the same run id.
+func (a *Auditor) seedRunSequences(path string) error {
+	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var ev Event
+		if err := json.Unmarshal(line, &ev); err != nil || ev.SchemaVersion != 2 || validateAuditLine(line, ev) != nil {
+			continue
+		}
+		if ev.RunSeq > a.runSeqs[ev.RunID] {
+			a.runSeqs[ev.RunID] = ev.RunSeq
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("seed audit run sequences: %w", err)
+	}
+	return nil
 }
 
 // Enabled reports whether the Auditor is writing to a file. Nil-safe, so callers
@@ -322,12 +390,13 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	latchRequiredFailure := true
 	if required {
 		defer func() {
 			// The trail cannot report its own failed write. Keep an operator
 			// signal beside it for status and the Wall. Enforcement relies on
 			// requiredErr, never on this best-effort marker.
-			if err != nil {
+			if err != nil && latchRequiredFailure {
 				if a.requiredErr == nil {
 					a.requiredErr = err
 				}
@@ -355,11 +424,6 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 	if err := validateApprovalActor(ev); err != nil {
 		return err
 	}
-	if required {
-		if err = a.checkPathIdentity(); err != nil {
-			return err
-		}
-	}
 	if a.signing() {
 		// Serialize the timestamp with signed appends across processes.
 		if err := lockExclusive(a.f.Fd()); err != nil {
@@ -370,6 +434,33 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 
 	ev.Time = a.clock().Format(time.RFC3339)
 	ev.Sig = "" // canonical content never includes the signature itself
+	if ev.SchemaVersion == 2 {
+		if !required {
+			latchRequiredFailure = false
+			return fmt.Errorf("schema v2 audit rows require durable writes")
+		}
+		if ev.RunSeq != 0 {
+			latchRequiredFailure = false
+			return fmt.Errorf("schema v2 run_seq is assigned by the auditor")
+		}
+		if a.runSeqs[ev.RunID] == ^uint64(0) {
+			latchRequiredFailure = false
+			return fmt.Errorf("schema v2 run_seq exhausted; start a new run")
+		}
+		ev.RunSeq = a.runSeqs[ev.RunID] + 1
+	} else if ev.SchemaVersion != 0 {
+		latchRequiredFailure = false
+		return fmt.Errorf("unsupported audit schema_version %d", ev.SchemaVersion)
+	}
+	if err := validateAuditEvent(ev); err != nil {
+		latchRequiredFailure = false
+		return err
+	}
+	if required {
+		if err = a.checkPathIdentity(); err != nil {
+			return err
+		}
+	}
 
 	// N10647: stamp correlation fields before the canonical bytes are computed
 	// (below and in the final marshal) so both are part of the signed payload
@@ -445,7 +536,12 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 	// tail-truncation high-water-mark so a later removal of this entry is
 	// detectable (N8154). ev.Sig is this entry's signature.
 	if a.signing() {
-		return a.updateHighWaterMark(checkpointCount+1, ev.Sig, required)
+		if err := a.updateHighWaterMark(checkpointCount+1, ev.Sig, required); err != nil {
+			return err
+		}
+	}
+	if ev.SchemaVersion == 2 {
+		a.runSeqs[ev.RunID] = ev.RunSeq
 	}
 	return nil
 }
@@ -851,9 +947,8 @@ func checkHighWaterMark(hwm *highWaterMark, n int, sigAtCount string, verifySig 
 	return nil
 }
 
-// rejectDuplicateTopLevelKeys returns an error if raw is not a single JSON
-// object, contains a duplicate top-level key, or uses a case-alias spelling for
-// approval_actor. This closes a forgery the typed
+// rejectDuplicateObjectKeys returns an error if raw is not a single JSON
+// object or contains a duplicate member name at any depth. This closes a forgery the typed
 // unmarshal + re-marshal verification path is blind to (N8179): Go's
 // encoding/json is LAST-WINS on duplicate keys, so a line such as
 //
@@ -861,16 +956,16 @@ func checkHighWaterMark(hwm *highWaterMark, n int, sigAtCount string, verifySig 
 //
 // decodes Decision="allow", re-canonicalizes to the originally-signed bytes, and
 // passes ed25519/HMAC verification — while a human reading the raw JSONL sees the
-// forged "deny". By rejecting duplicate top-level keys before signature checking,
+// forged "deny". By rejecting duplicate names before signature checking,
 // the verifier refuses any line that is not in canonical (one-key-each) form, so
 // the only bytes that can verify are the bytes that were actually signed. This
 // mirrors the proxy's canonicalToolCall defense in internal/proxy/stdio.go, which
 // collapses such parser differentials on the request path.
 //
 // It uses a streaming token decoder (not json.Unmarshal into a map, which would
-// itself silently collapse the duplicate) so the duplicate is observed before it
-// is discarded.
-func rejectDuplicateTopLevelKeys(raw []byte) error {
+// itself silently collapse the duplicate) so each duplicate is observed before
+// it is discarded.
+func rejectDuplicateObjectKeys(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	tok, err := dec.Token()
 	if err != nil {
@@ -880,42 +975,68 @@ func rejectDuplicateTopLevelKeys(raw []byte) error {
 	if !ok || delim != '{' {
 		return fmt.Errorf("audit line is not a JSON object")
 	}
+	if err := consumeObjectMembers(dec); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("trailing JSON after audit object")
+		}
+		return fmt.Errorf("invalid json: %w", err)
+	}
+	return nil
+}
+
+func consumeObjectMembers(dec *json.Decoder) error {
 	seen := make(map[string]struct{})
-	depth := 0 // depth of nested objects/arrays below the top-level object
-	for dec.More() || depth > 0 {
-		t, err := dec.Token()
+	for dec.More() {
+		tok, err := dec.Token()
 		if err != nil {
 			return fmt.Errorf("invalid json: %w", err)
 		}
-		if d, isDelim := t.(json.Delim); isDelim {
-			switch d {
-			case '{', '[':
-				depth++
-			case '}', ']':
-				depth--
-			}
-			continue
+		key, ok := tok.(string)
+		if !ok {
+			return fmt.Errorf("invalid JSON object member name")
 		}
-		// Object keys appear as strings at depth 0 in key position. At depth 0,
-		// the decoder alternates key, value, key, value; nested values are
-		// consumed under depth > 0, so a top-level string token here is a key.
-		if depth == 0 {
-			if key, isStr := t.(string); isStr {
-				if strings.EqualFold(key, "approval_actor") && key != "approval_actor" {
-					return fmt.Errorf("non-canonical approval_actor key %q — possible parser differential", key)
-				}
-				if _, dup := seen[key]; dup {
-					return fmt.Errorf("duplicate top-level key %q — non-canonical (possible forgery)", key)
-				}
-				seen[key] = struct{}{}
-				// Consume the value for this key.
-				if err := consumeValue(dec, &depth); err != nil {
-					return err
-				}
-			}
+		if _, dup := seen[key]; dup {
+			return fmt.Errorf("duplicate object key %q — non-canonical (possible forgery)", key)
+		}
+		seen[key] = struct{}{}
+		if err := consumeJSONValue(dec); err != nil {
+			return err
 		}
 	}
+	if _, err := dec.Token(); err != nil {
+		return fmt.Errorf("invalid json: %w", err)
+	}
 	return nil
+}
+
+func consumeJSONValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("invalid json: %w", err)
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		return consumeObjectMembers(dec)
+	case '[':
+		for dec.More() {
+			if err := consumeJSONValue(dec); err != nil {
+				return err
+			}
+		}
+		if _, err := dec.Token(); err != nil {
+			return fmt.Errorf("invalid json: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid JSON delimiter %q", delim)
+	}
 }
 
 // rejectNonStringApprovalActor prevents null or another JSON type from being
@@ -927,7 +1048,7 @@ func rejectNonStringApprovalActor(raw []byte) error {
 		return err
 	}
 	if tok != json.Delim('{') {
-		return nil // rejectDuplicateTopLevelKeys reports the more useful shape error.
+		return nil // rejectDuplicateObjectKeys reports the more useful shape error.
 	}
 	for dec.More() {
 		tok, err := dec.Token()
@@ -958,38 +1079,276 @@ func rejectNonStringApprovalActor(raw []byte) error {
 	return nil
 }
 
-// consumeValue reads exactly one JSON value from dec, tracking object/array
-// nesting through the shared depth counter so the caller's top-level key scan
-// resumes correctly after the value.
-func consumeValue(dec *json.Decoder, depth *int) error {
-	t, err := dec.Token()
-	if err != nil {
-		return fmt.Errorf("invalid json: %w", err)
+var auditFieldNames = map[string]struct{}{
+	"ts": {}, "agent": {}, "tool": {}, "decision": {}, "reason": {},
+	"approval_actor": {}, "nock_id": {}, "pr": {}, "review_id": {},
+	"parent_audit_seq": {}, "session_id": {}, "key_id": {}, "sig": {},
+	"schema_version": {}, "record_type": {}, "run_id": {}, "run_seq": {},
+	"run_event": {}, "run_count": {}, "run_head": {}, "action_id": {},
+	"observation": {}, "cause": {}, "response_class": {}, "mcp_is_error": {},
+	"tool_hash_version": {}, "tool_definition_hash": {}, "tool_pin_hash": {},
+	"tool_pin_status": {},
+}
+
+var v2OnlyAuditFields = []string{
+	"record_type", "run_id", "run_seq", "run_event", "run_count", "run_head",
+	"action_id", "observation", "cause", "response_class", "mcp_is_error",
+	"tool_hash_version", "tool_definition_hash", "tool_pin_hash", "tool_pin_status",
+}
+
+// validateAuditLine applies the lossless envelope rules before typed decoding.
+// Missing schema_version is the historical v1 format; explicit v1 and any
+// unrecognized extension are refused so encoding/json cannot silently discard
+// signed content. V1 canonical bytes still come from json.Marshal(Event).
+func validateAuditLine(raw []byte, ev Event) error {
+	if err := rejectDuplicateObjectKeys(raw); err != nil {
+		return err
 	}
-	d, isDelim := t.(json.Delim)
-	if !isDelim {
-		return nil // scalar value: nothing further to consume
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		if err == nil {
+			err = fmt.Errorf("audit line is not a JSON object")
+		}
+		return err
 	}
-	switch d {
-	case '{', '[':
-		// Recurse over the container until its matching close delimiter.
-		open := 1
-		for open > 0 {
-			tt, err := dec.Token()
-			if err != nil {
-				return fmt.Errorf("invalid json: %w", err)
+	if actorRaw, ok := fields["approval_actor"]; ok {
+		actorRaw = bytes.TrimSpace(actorRaw)
+		if len(actorRaw) == 0 || actorRaw[0] != '"' {
+			return fmt.Errorf("approval_actor must be a JSON string")
+		}
+		var actor string
+		if err := json.Unmarshal(actorRaw, &actor); err != nil {
+			return fmt.Errorf("approval_actor must be a JSON string")
+		}
+		if actor == "" {
+			return fmt.Errorf("empty approval_actor must be omitted")
+		}
+	}
+	for key := range fields {
+		if _, known := auditFieldNames[key]; !known {
+			for exact := range auditFieldNames {
+				if strings.EqualFold(key, exact) {
+					return fmt.Errorf("non-canonical audit field %q; use %q", key, exact)
+				}
 			}
-			if dd, ok := tt.(json.Delim); ok {
-				switch dd {
-				case '{', '[':
-					open++
-				case '}', ']':
-					open--
+			return fmt.Errorf("unknown audit field %q", key)
+		}
+	}
+	if _, hasVersion := fields["schema_version"]; !hasVersion {
+		for _, name := range v2OnlyAuditFields {
+			if _, present := fields[name]; present {
+				return fmt.Errorf("v2 field %q requires schema_version 2", name)
+			}
+		}
+		return validateApprovalActor(ev)
+	}
+	if ev.SchemaVersion != 2 {
+		return fmt.Errorf("unsupported audit schema_version %d", ev.SchemaVersion)
+	}
+	return validateV2Event(ev, fields)
+}
+
+func validateAuditEvent(ev Event) error {
+	if ev.SchemaVersion == 0 {
+		for _, name := range v2OnlyAuditFields {
+			if auditEventFieldSet(ev, name) {
+				return fmt.Errorf("v2 field %q requires schema_version 2", name)
+			}
+		}
+		return validateApprovalActor(ev)
+	}
+	if ev.SchemaVersion != 2 {
+		return fmt.Errorf("unsupported audit schema_version %d", ev.SchemaVersion)
+	}
+	return validateV2Event(ev, nil)
+}
+
+func auditEventFieldSet(ev Event, field string) bool {
+	switch field {
+	case "record_type":
+		return ev.RecordType != ""
+	case "run_id":
+		return ev.RunID != ""
+	case "run_seq":
+		return ev.RunSeq != 0
+	case "run_event":
+		return ev.RunEvent != ""
+	case "run_count":
+		return ev.RunCount != 0
+	case "run_head":
+		return ev.RunHead != ""
+	case "action_id":
+		return ev.ActionID != ""
+	case "observation":
+		return ev.Observation != ""
+	case "cause":
+		return ev.Cause != ""
+	case "response_class":
+		return ev.ResponseClass != ""
+	case "mcp_is_error":
+		return ev.MCPIsError != nil
+	case "tool_hash_version":
+		return ev.ToolHashVersion != ""
+	case "tool_definition_hash":
+		return ev.ToolDefinitionHash != ""
+	case "tool_pin_hash":
+		return ev.ToolPinHash != ""
+	case "tool_pin_status":
+		return ev.ToolPinStatus != ""
+	default:
+		return false
+	}
+}
+
+func validateV2Event(ev Event, fields map[string]json.RawMessage) error {
+	if fields != nil {
+		for _, name := range []string{"ts", "agent", "tool", "decision", "schema_version", "record_type", "run_id", "run_seq"} {
+			if _, ok := fields[name]; !ok {
+				return fmt.Errorf("schema v2 row is missing required field %q", name)
+			}
+		}
+		for _, name := range []string{
+			"ts", "agent", "tool", "decision", "reason", "approval_actor", "pr", "review_id", "session_id", "key_id", "sig", "record_type", "run_id", "run_event", "run_head", "action_id", "observation", "cause", "response_class", "tool_hash_version", "tool_definition_hash", "tool_pin_hash", "tool_pin_status",
+		} {
+			if raw, ok := fields[name]; ok {
+				if len(raw) == 0 || raw[0] != '"' {
+					return fmt.Errorf("%s must be a JSON string", name)
+				}
+				var value string
+				if err := json.Unmarshal(raw, &value); err != nil {
+					return fmt.Errorf("%s must be a JSON string", name)
+				}
+				if value == "" && name != "tool" && name != "decision" {
+					return fmt.Errorf("empty %s must be omitted", name)
 				}
 			}
 		}
+		for _, name := range []string{"run_seq", "run_count"} {
+			if raw, ok := fields[name]; ok {
+				var value uint64
+				if err := json.Unmarshal(raw, &value); err != nil || value == 0 {
+					return fmt.Errorf("%s must be a positive integer", name)
+				}
+			}
+		}
+		for _, name := range []string{"nock_id", "parent_audit_seq"} {
+			if raw, ok := fields[name]; ok {
+				var value int
+				if err := json.Unmarshal(raw, &value); err != nil || value <= 0 {
+					return fmt.Errorf("%s must be a positive integer", name)
+				}
+			}
+		}
+		if raw, ok := fields["mcp_is_error"]; ok && string(raw) != "true" && string(raw) != "false" {
+			return fmt.Errorf("mcp_is_error must be a JSON boolean")
+		}
 	}
-	return nil
+
+	if ev.SchemaVersion != 2 || len(ev.RunID) != 32 || strings.ToLower(ev.RunID) != ev.RunID {
+		return fmt.Errorf("schema v2 requires a lowercase 128-bit run_id and schema_version 2")
+	}
+	if _, err := hex.DecodeString(ev.RunID); err != nil || ev.RunSeq == 0 {
+		return fmt.Errorf("schema v2 requires a lowercase 128-bit run_id and positive run_seq")
+	}
+	if ev.Time == "" || ev.Agent == "" {
+		return fmt.Errorf("schema v2 requires non-empty ts and agent")
+	}
+	switch ev.RecordType {
+	case "run":
+		if ev.Tool != "" || ev.Decision != "" || ev.ActionID != "" || ev.Observation != "" || ev.Cause != "" || ev.ResponseClass != "" || ev.MCPIsError != nil {
+			return fmt.Errorf("run records cannot carry tool-call fields")
+		}
+		switch ev.RunEvent {
+		case "open":
+			if ev.RunSeq != 1 || ev.RunCount != 0 || ev.RunHead != "" {
+				return fmt.Errorf("run/open must be the first row and omit close fields")
+			}
+		case "heartbeat":
+			if ev.RunSeq < 2 || ev.RunCount != 0 || ev.RunHead != "" {
+				return fmt.Errorf("run/heartbeat has invalid sequence or close fields")
+			}
+		case "close":
+			if ev.RunSeq < 2 || ev.RunCount == 0 || ev.RunCount != ev.RunSeq-1 || ev.RunHead == "" {
+				return fmt.Errorf("run/close must commit its preceding count and head")
+			}
+		default:
+			return fmt.Errorf("invalid run_event %q", ev.RunEvent)
+		}
+	case "decision":
+		if ev.Decision == "" || ev.RunEvent != "" || ev.Observation != "" || ev.Cause != "" || ev.ResponseClass != "" || ev.MCPIsError != nil || ev.RunCount != 0 || ev.RunHead != "" {
+			return fmt.Errorf("decision record has invalid lifecycle or observation fields")
+		}
+		if ev.Decision == "dispatch" && ev.ActionID == "" {
+			return fmt.Errorf("schema v2 dispatch requires action_id")
+		}
+		if ev.Decision == "dispatch" && ev.Tool == "" {
+			return fmt.Errorf("schema v2 dispatch requires a tool")
+		}
+	case "action_observation":
+		if ev.Decision != "" || ev.RunEvent != "" || ev.RunCount != 0 || ev.RunHead != "" || ev.ActionID == "" {
+			return fmt.Errorf("action_observation requires action_id without a decision")
+		}
+		if ev.Observation != "not_forwarded" && ev.Observation != "response_observed" && ev.Observation != "outcome_unknown" && ev.Observation != "late_response_observed" {
+			return fmt.Errorf("invalid observation %q", ev.Observation)
+		}
+		if (ev.Observation == "response_observed" || ev.Observation == "late_response_observed") != (ev.ResponseClass != "") {
+			return fmt.Errorf("response_class is required only for observed responses")
+		}
+		if ev.ResponseClass != "" && ev.ResponseClass != "jsonrpc_result" && ev.ResponseClass != "jsonrpc_error" {
+			return fmt.Errorf("invalid response_class %q", ev.ResponseClass)
+		}
+		if ev.Observation == "late_response_observed" && ev.Cause != "late_response" {
+			return fmt.Errorf("late_response_observed requires cause late_response")
+		}
+	default:
+		return fmt.Errorf("invalid record_type %q", ev.RecordType)
+	}
+	if ev.ActionID != "" {
+		parts := strings.Split(ev.ActionID, ".")
+		if len(parts) != 2 || parts[0] != ev.RunID {
+			return fmt.Errorf("action_id must be <run_id>.<action_seq>")
+		}
+		seq, err := strconv.ParseUint(parts[1], 10, 64)
+		if err != nil || seq == 0 || strconv.FormatUint(seq, 10) != parts[1] {
+			return fmt.Errorf("action_id must use a positive canonical action_seq")
+		}
+	}
+	if ev.Cause != "" {
+		switch ev.Cause {
+		case "policy_denied", "validation_blocked", "approval_denied", "limit_reached", "audit_unavailable", "timeout", "client_cancel", "transport_lost", "upstream_exit", "shutdown", "late_response", "tool_catalog_refresh_required", "pin_mismatch", "pin_unverified":
+		default:
+			return fmt.Errorf("invalid cause %q", ev.Cause)
+		}
+	}
+	if ev.ToolHashVersion != "" && ev.ToolHashVersion != "jcs-rfc8785-v1" {
+		return fmt.Errorf("invalid tool_hash_version %q", ev.ToolHashVersion)
+	}
+	for field, digest := range map[string]string{"tool_definition_hash": ev.ToolDefinitionHash, "tool_pin_hash": ev.ToolPinHash} {
+		if digest != "" {
+			if len(digest) != 64 || strings.ToLower(digest) != digest {
+				return fmt.Errorf("%s must be lowercase SHA-256 hex", field)
+			}
+			if _, err := hex.DecodeString(digest); err != nil {
+				return fmt.Errorf("%s must be lowercase SHA-256 hex", field)
+			}
+		}
+	}
+	if ev.RunHead != "" {
+		if (len(ev.RunHead) != 64 && len(ev.RunHead) != 128) || strings.ToLower(ev.RunHead) != ev.RunHead {
+			return fmt.Errorf("run_head must be a lowercase chain signature")
+		}
+		if _, err := hex.DecodeString(ev.RunHead); err != nil {
+			return fmt.Errorf("run_head must be a lowercase chain signature")
+		}
+	}
+	if ev.ToolPinStatus != "" {
+		switch ev.ToolPinStatus {
+		case "matched", "mismatch", "unobserved", "unpinned", "unhashable":
+		default:
+			return fmt.Errorf("invalid tool_pin_status %q", ev.ToolPinStatus)
+		}
+	}
+	return validateApprovalActor(ev)
 }
 
 // Error classification for trail verification.
@@ -1139,18 +1498,12 @@ func verifyHMACStream(r io.Reader, hwm *highWaterMark, key []byte) (int, error) 
 			continue
 		}
 		n++
-		if err := rejectDuplicateTopLevelKeys(raw); err != nil {
-			return n, markTamper(n, fmt.Errorf("line %d: %w", n, err))
-		}
-		if err := rejectNonStringApprovalActor(raw); err != nil {
-			return n, markTamper(n, fmt.Errorf("line %d: %w", n, err))
-		}
 		var ev Event
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return n, markTamper(n, fmt.Errorf("line %d: invalid json: %w", n, err))
 		}
-		if err := validateApprovalActor(ev); err != nil {
-			return n, markTamper(n, fmt.Errorf("line %d: invalid approval_actor: %w", n, err))
+		if err := validateAuditLine(raw, ev); err != nil {
+			return n, markTamper(n, fmt.Errorf("line %d: invalid audit record: %w", n, err))
 		}
 		got := ev.Sig
 		if got == "" {
@@ -1253,18 +1606,12 @@ func verifyEd25519Stream(r io.Reader, hwm *highWaterMark, pub ed25519.PublicKey)
 			continue
 		}
 		n++
-		if err := rejectDuplicateTopLevelKeys(raw); err != nil {
-			return n, markTamper(n, fmt.Errorf("line %d: %w", n, err))
-		}
-		if err := rejectNonStringApprovalActor(raw); err != nil {
-			return n, markTamper(n, fmt.Errorf("line %d: %w", n, err))
-		}
 		var ev Event
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return n, markTamper(n, fmt.Errorf("line %d: invalid json: %w", n, err))
 		}
-		if err := validateApprovalActor(ev); err != nil {
-			return n, markTamper(n, fmt.Errorf("line %d: invalid approval_actor: %w", n, err))
+		if err := validateAuditLine(raw, ev); err != nil {
+			return n, markTamper(n, fmt.Errorf("line %d: invalid audit record: %w", n, err))
 		}
 		if ev.Sig == "" {
 			return n, markTamper(n, fmt.Errorf("line %d: entry is not signed", n))
