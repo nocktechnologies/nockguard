@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -161,9 +162,11 @@ func LoadBytes(data []byte) (*Engine, error) {
 	return loadFrom(bytes.NewReader(data), "<bytes>")
 }
 
-// loadFrom decodes and validates a policy from r. name is used only in error
-// messages. Load and LoadBytes both delegate here so the on-disk and in-memory
-// paths share identical glob/category validation.
+// isGlobPattern reports whether a pattern contains path.Match syntax.
+func isGlobPattern(pattern string) bool {
+	return strings.ContainsAny(pattern, "*?[")
+}
+
 // isGlobPatternDisjoint reports whether two tool patterns are proven disjoint
 // (no tool name can match both). Returns true only in two safe cases:
 //   - Both are literals (no wildcard chars) and differ, OR
@@ -171,8 +174,8 @@ func LoadBytes(data []byte) (*Engine, error) {
 //
 // Returns false for all other cases (globs vs globs, overlapping literals).
 func isGlobPatternDisjoint(pattern1, pattern2 string) bool {
-	isGlobA := strings.ContainsAny(pattern1, "*?[")
-	isGlobB := strings.ContainsAny(pattern2, "*?[")
+	isGlobA := isGlobPattern(pattern1)
+	isGlobB := isGlobPattern(pattern2)
 
 	if !isGlobA && !isGlobB {
 		// Both literals: disjoint if different
@@ -182,14 +185,14 @@ func isGlobPatternDisjoint(pattern1, pattern2 string) bool {
 	if !isGlobA && isGlobB {
 		// pattern1 is literal, pattern2 is glob
 		// Disjoint if glob does not match the literal
-		matched, _ := filepath.Match(pattern2, pattern1)
+		matched, _ := path.Match(pattern2, pattern1)
 		return !matched
 	}
 
 	if isGlobA && !isGlobB {
 		// pattern1 is glob, pattern2 is literal
 		// Disjoint if glob does not match the literal
-		matched, _ := filepath.Match(pattern1, pattern2)
+		matched, _ := path.Match(pattern1, pattern2)
 		return !matched
 	}
 
@@ -197,6 +200,9 @@ func isGlobPatternDisjoint(pattern1, pattern2 string) bool {
 	return false
 }
 
+// loadFrom decodes and validates a policy from r. name is used only in error
+// messages. Load and LoadBytes both delegate here so the on-disk and in-memory
+// paths share identical glob/category validation.
 func loadFrom(r io.Reader, name string) (*Engine, error) {
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
@@ -209,7 +215,7 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 	}
 	// Validate every glob pattern at load time so a malformed wildcard fails
 	// LOUD here rather than silently voiding a control at evaluate time (N8180).
-	// A malformed DENY glob is the dangerous case — filepath.Match returning an
+	// A malformed DENY glob is the dangerous case — path.Match returning an
 	// error was discarded, so the deny silently no-matched and a broad allow let
 	// the call through (fail-open in the engine's strongest control). This makes
 	// the policy engine match the fail-loud posture of LimiterFor and
@@ -346,19 +352,17 @@ func (e *Engine) ActionPairingEnabled() bool {
 	return e != nil && e.config.Audit != nil && e.config.Audit.Enabled && e.config.Audit.ActionPairing
 }
 
-// validateGlob confirms a policy pattern is a usable glob. A literal (no '*') is
-// always valid; a wildcard pattern is validated with filepath.Match so a
-// malformed glob (e.g. an unclosed character class like "nockcc_[spend*") is
-// rejected at Load() instead of silently failing to match — and, for a deny rule,
-// silently failing OPEN — at evaluate time.
+// validateGlob confirms a policy pattern is usable. Literals are always valid;
+// glob syntax is validated with path.Match so malformed patterns fail during
+// Load instead of silently failing to match.
 func validateGlob(pattern string) error {
 	// Validate syntax for EVERY glob pattern (*, ?, [) to catch malformed wildcards
 	// early. A malformed pattern like "github_[" would silently never match at
 	// eval time if not validated here.
-	if strings.ContainsAny(pattern, "*?[") {
-		// The candidate string is irrelevant for syntax validation; filepath.Match
+	if isGlobPattern(pattern) {
+		// The candidate string is irrelevant for syntax validation; path.Match
 		// reports ErrBadPattern on a malformed pattern regardless of the name.
-		if _, err := filepath.Match(pattern, ""); err != nil {
+		if _, err := path.Match(pattern, ""); err != nil {
 			return fmt.Errorf("malformed glob %q: %w", pattern, err)
 		}
 	}
@@ -998,15 +1002,15 @@ func matchPattern(pattern, tool string) bool {
 	return matched
 }
 
-// matchPatternErr is matchPattern that surfaces a filepath.Match error instead
+// matchPatternErr is matchPattern that surfaces a path.Match error instead
 // of discarding it. The deny path uses this to fail CLOSED on a malformed glob:
 // a deny rule that errors must be treated as a MATCH (deny the call), never
 // silently skipped into a fail-open. Load() validates globs up front (see
 // validateGlob), so this is defense-in-depth for any pattern that slips past
 // validation.
 func matchPatternErr(pattern, tool string) (bool, error) {
-	if strings.Contains(pattern, "*") {
-		return filepath.Match(pattern, tool)
+	if isGlobPattern(pattern) {
+		return path.Match(pattern, tool)
 	}
 	return pattern == tool, nil
 }

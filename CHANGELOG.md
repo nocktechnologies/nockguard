@@ -5,6 +5,7 @@ All notable changes to NockGuard are documented here.
 ## [Unreleased]
 
 ### Fixed
+- Policy patterns using `?` and character classes now work in deny, ask, require_approval, allow, and shadow rules.
 - Evidence packs now parse audit entries and verify their chain and checkpoint from the same in-memory snapshot, keeping the contents and integrity verdict consistent during file replacement.
 
 ### Changed

@@ -7,14 +7,14 @@ import (
 
 // N8180 regression — a malformed glob in a deny rule silently failed OPEN.
 //
-// matchPattern did `matched, _ := filepath.Match(pattern, tool)`, discarding the
+// matchPattern did `matched, _ := path.Match(pattern, tool)`, discarding the
 // error. A malformed wildcard deny (e.g. "nockcc_[spend*", an unclosed character
 // class followed by a wildcard) returned ErrBadPattern, was swallowed to
 // matched=false, so the deny silently voided and a broad allow let the call
 // through — fail-open in the policy engine's strongest control, while LimiterFor
 // and validate.New both fail LOUD on misconfiguration.
 //
-// Fix: validate every glob at Load() (fail loud) AND treat a filepath.Match
+// Fix: validate every glob at Load() (fail loud) AND treat a path.Match
 // error at evaluate-time as fail-CLOSED for deny.
 
 // TestMalformedGlobRejectedAtLoad — Load() must error on a malformed glob rather
