@@ -14,7 +14,7 @@ import (
 // at the Wall (the unknown value lands in "other"); a new value at a matched
 // site fails this test until decisionBuckets and the Wall filter learn it.
 var emitPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`appendAudit\([^,]+,[^,]+,\s*"([a-z-]+)"`),
+	regexp.MustCompile(`appendAudit\w*\([^,]+,[^,]+,\s*"([a-z-]+)"`),
 	regexp.MustCompile(`\.audit\([^,]+,\s*"([a-z-]+)"`),
 	regexp.MustCompile(`enqueueBudgetEvent\([^,]+,[^,]+,\s*"([a-z-]+)"`),
 	regexp.MustCompile(`deferredAudit\{"([a-z-]+)"`),
