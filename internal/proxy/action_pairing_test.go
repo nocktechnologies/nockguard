@@ -961,8 +961,11 @@ func TestInvalidActionResponseIDHandlesLargeEnvelopeQuickly(t *testing.T) {
 	if invalid || string(id) != "1" {
 		t.Fatalf("large valid envelope was rejected: id=%s invalid=%t", id, invalid)
 	}
-	if elapsed := time.Since(start); elapsed >= time.Second {
-		t.Fatalf("100,000-key response took %s to parse; want under one second", elapsed)
+	// A quadratic parse needs about 5e9 key comparisons at this size. The
+	// linear parse takes about 0.3s locally and about 1s on a shared macOS
+	// runner under -race, so a one-second bound flaked there.
+	if elapsed := time.Since(start); elapsed >= 5*time.Second {
+		t.Fatalf("100,000-key response took %s to parse; want under five seconds", elapsed)
 	}
 }
 
