@@ -3,8 +3,10 @@ package policy
 import (
 	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -21,8 +23,8 @@ func TestAgentKeyEnvName(t *testing.T) {
 		wantPub string
 	}{
 		{"kit", "NOCKGUARD_AGENT_KIT_ED25519_KEY", "NOCKGUARD_AGENT_KIT_ED25519_PUB"},
-		{"mira-nockos", "NOCKGUARD_AGENT_MIRA_NOCKOS_ED25519_KEY", "NOCKGUARD_AGENT_MIRA_NOCKOS_ED25519_PUB"},
-		{"mar-nockos", "NOCKGUARD_AGENT_MAR_NOCKOS_ED25519_KEY", "NOCKGUARD_AGENT_MAR_NOCKOS_ED25519_PUB"},
+		{"reviewer-1", "NOCKGUARD_AGENT_REVIEWER_1_ED25519_KEY", "NOCKGUARD_AGENT_REVIEWER_1_ED25519_PUB"},
+		{"auditor-2", "NOCKGUARD_AGENT_AUDITOR_2_ED25519_KEY", "NOCKGUARD_AGENT_AUDITOR_2_ED25519_PUB"},
 		{"UPPER", "NOCKGUARD_AGENT_UPPER_ED25519_KEY", "NOCKGUARD_AGENT_UPPER_ED25519_PUB"},
 	}
 	for _, tc := range cases {
@@ -37,7 +39,7 @@ func TestAgentKeyEnvName(t *testing.T) {
 
 // TestAgentAuditPath verifies that the per-agent audit file is derived from the
 // base audit path by inserting the agent name as a path-segment prefix:
-// ~/.nockguard/logs/audit.jsonl → ~/.nockguard/logs/mira-nockos.audit.jsonl
+// ~/.nockguard/logs/audit.jsonl → ~/.nockguard/logs/reviewer-1.audit.jsonl
 func TestAgentAuditPath(t *testing.T) {
 	cases := []struct {
 		base  string
@@ -45,7 +47,7 @@ func TestAgentAuditPath(t *testing.T) {
 		want  string
 	}{
 		{"/home/user/.nockguard/logs/audit.jsonl", "kit", "/home/user/.nockguard/logs/kit.audit.jsonl"},
-		{"/home/user/.nockguard/logs/audit.jsonl", "mira-nockos", "/home/user/.nockguard/logs/mira-nockos.audit.jsonl"},
+		{"/home/user/.nockguard/logs/audit.jsonl", "reviewer-1", "/home/user/.nockguard/logs/reviewer-1.audit.jsonl"},
 		{"/tmp/test.jsonl", "wren", "/tmp/wren.test.jsonl"},
 	}
 	for _, tc := range cases {
@@ -131,6 +133,62 @@ agents:
 	}
 }
 
+func TestAuditorForAgentResumesRunSequenceWithActionPairing(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	t.Setenv(AgentKeyEnvName("kit"), hex.EncodeToString(priv.Seed()))
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := writePolicy(t, `
+audit:
+  enabled: true
+  action_pairing: true
+  path: `+auditPath+`
+agents:
+  kit:
+    allow: ["*"]
+`)
+	eng, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := "00112233445566778899aabbccddeeff"
+	for i := 1; i <= 2; i++ {
+		writer, err := eng.AuditorFor("kit")
+		if err != nil {
+			t.Fatal(err)
+		}
+		event := audit.Event{
+			Agent: "kit", Tool: "read_file", Decision: "allow", SchemaVersion: 2,
+			RecordType: "decision", RunID: runID, ActionID: runID + "." + strconv.Itoa(i),
+		}
+		if err := writer.RecordRequired(event); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	data, err := os.ReadFile(AgentAuditPath(auditPath, "kit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("audit rows = %d, want 2", len(lines))
+	}
+	for i, line := range lines {
+		var row struct {
+			RunSeq uint64 `json:"run_seq"`
+		}
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatal(err)
+		}
+		if want := uint64(i + 1); row.RunSeq != want {
+			t.Fatalf("row %d run_seq=%d, want %d", i, row.RunSeq, want)
+		}
+	}
+}
+
 // TestAuditorForBadKeyFails verifies that a malformed per-agent key env var
 // causes AuditorFor to return an error.
 func TestAuditorForBadKeyFails(t *testing.T) {
@@ -192,9 +250,9 @@ func TestSigningKeyEnvNamesForOtherAgents(t *testing.T) {
 		name, value string
 		strip       bool
 	}{
-		{AgentKeyEnvName("mira-nockos"), "test-only-seed", true},
+		{AgentKeyEnvName("reviewer-1"), "test-only-seed", true},
 		{AgentKeyEnvName("not-in-policy"), "", true},
-		{AgentPubKeyEnvName("mira-nockos"), "public", false},
+		{AgentPubKeyEnvName("reviewer-1"), "public", false},
 		{"NOCKGUARD_AGENT_LABEL", "label", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -258,7 +316,7 @@ func TestAgentKeyEnvNameNormalization(t *testing.T) {
 // TestValidAgentName verifies the name allowlist: alphanumerics, hyphens, dots
 // accepted; slashes, dots-only traversal, empty, and control characters rejected.
 func TestValidAgentName(t *testing.T) {
-	valid := []string{"kit", "mira-nockos", "mar-nockos", "my.agent", "Agent1"}
+	valid := []string{"kit", "reviewer-1", "auditor-2", "my.agent", "Agent1"}
 	for _, name := range valid {
 		if !ValidAgentName(name) {
 			t.Errorf("ValidAgentName(%q) = false, want true", name)

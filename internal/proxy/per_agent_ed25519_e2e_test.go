@@ -112,18 +112,18 @@ func TestPerAgentEd25519EndToEnd(t *testing.T) {
 // agent-namespaced variable names and a comment identifying the agent.
 func TestKeygenAgentOutputFormat(t *testing.T) {
 	binary := buildBinary(t)
-	out, err := exec.Command(binary, "keygen", "--print-env", "--agent", "mira-nockos").Output()
+	out, err := exec.Command(binary, "keygen", "--print-env", "--agent", "reviewer-1").Output()
 	if err != nil {
-		t.Fatalf("keygen --agent mira-nockos: %v", err)
+		t.Fatalf("keygen --agent reviewer-1: %v", err)
 	}
 	s := string(out)
-	if !strings.Contains(s, "NOCKGUARD_AGENT_MIRA_NOCKOS_ED25519_KEY=") {
+	if !strings.Contains(s, "NOCKGUARD_AGENT_REVIEWER_1_ED25519_KEY=") {
 		t.Errorf("missing private key line, got:\n%s", s)
 	}
-	if !strings.Contains(s, "NOCKGUARD_AGENT_MIRA_NOCKOS_ED25519_PUB=") {
+	if !strings.Contains(s, "NOCKGUARD_AGENT_REVIEWER_1_ED25519_PUB=") {
 		t.Errorf("missing public key line, got:\n%s", s)
 	}
-	if !strings.Contains(s, "mira-nockos") {
+	if !strings.Contains(s, "reviewer-1") {
 		t.Errorf("output should identify agent name in comments, got:\n%s", s)
 	}
 }

@@ -4,10 +4,46 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-15
+
+v0.8.0 fixes policy patterns that use `?` or character classes, which loaded without error but matched only as literal text. The Wall now checks the Host of every request and serves only on loopback unless you opt in. Local approvals record the approver's UID in the signed trail, and an opt-in audit mode pairs each tool call with its observed outcome.
+
+### Upgrade notes
+
+- Policy rules that contain `?` or `[` now act as glob patterns in deny, ask, require_approval, allow, shadow and inject rules. Before this release they loaded as globs but matched as literal text. In a pattern that contains `*`, `?` or `[`, a backslash escapes the next character. Review any rule that uses these characters for a literal tool name.
+- The Wall refuses a non-loopback `--addr` unless you pass `--allow-remote`. Remote clients also need `--allow-host`.
+
+### Security
+
+- Policy patterns with `?` and character classes now match as globs. A deny rule such as `exec?` loaded without error but did not deny `exec1`. Validation, evaluation and inject conflict checks now share one glob test. `*` and `?` do not match `/`.
+- The Wall validates the Host header on every route, with one optional extra host from `--allow-host`. Event and export routes also check the browser `Origin` and `Sec-Fetch-Site` headers. A remote bind needs `--allow-remote` and prints a warning. A named port is rejected at startup.
+
+### Added
+
+- Local approvals record a signed `approval_actor` (`local:uid:<n>`) taken from the kernel peer-UID check. It identifies the UID of the approving process, not a person. Ordinary tool-call rows and non-local approvals do not carry it. Local decision JSON with unknown identity fields is rejected before the held call is consumed.
+- Opt-in action pairing for stdio (`audit.action_pairing: true`). The decision, the dispatch and the observed result of each `tools/call` share one action ID. A matching response is recorded as `response_observed`; a timeout, cancellation, disconnect or shutdown is recorded as `outcome_unknown`. No request IDs, arguments or response bodies are written. Pairing needs required audit writes and cannot be combined with `--audit-best-effort`. Older binaries cannot verify trails that contain these rows, so use a dedicated audit path. See `docs/how-it-works/audit.md`.
+
+### Fixed
+
+- Evidence packs parse audit entries and verify their chain and checkpoint from the same snapshot, so contents and verdict agree while the file is being replaced.
+
+### Changed
+
+- The Wall decision filter lists every decision the audit log writes. It adds tiles for approvals granted, dispatched and would-deny (observe), with matching `/pulse` counts and an "other" bucket for unknown values. `--demo` shows each tile.
+- The public repository no longer carries internal launchers, tool names, local paths or host examples. The quickstart demo uses a self-contained local MCP stub.
+
+### Documentation
+
+- The README quickstart uses a physical fixture path, absolute executable paths and an explicit client `PATH`.
+- The CLI reference and `--help` match current behavior, including `--audit-best-effort`, the optional egress policy and when `--agent` may be omitted.
+- Warden policy suggestions cite a primary source for each proposed rule, or say that none was found.
+- New design note for the additive action and lifecycle audit contract.
+
 ## [0.7.1] - 2026-10-14
 
 ### Documentation
 - README shows the Live Wall over a real signed trail, CONTRIBUTING lists the checks CI runs (`gofmt`, `go test -race`, the Wall browser test and the quickstart acceptance), and the approvals page links to the README policy rules section.
+- CI runs Linux and macOS checks on `next`; contributor and release guides define exact-head PR checks and the `next` to `main` release promotion (N11741).
 
 ### Fixed
 - `mcp-gateway` releases an SSE initialize session before delivering its matching result, so an immediate follow-up does not receive a spurious `429 gateway busy`.

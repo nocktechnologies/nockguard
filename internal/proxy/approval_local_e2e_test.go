@@ -2,17 +2,20 @@ package proxy
 
 import (
 	"bufio"
+	"crypto/ed25519"
 	"encoding/json"
 	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/approval"
+	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 )
 
@@ -133,6 +136,104 @@ func TestLocalApproverDenyBlocks(t *testing.T) {
 	m := runLocalApproval(t, "deny")
 	if msg := errorMessage(t, m); !strings.Contains(msg, "denied by approval gate") {
 		t.Errorf("denied call should be blocked, got %q", msg)
+	}
+}
+
+func TestLocalApprovalActorIsSignedFromKernelPeerUID(t *testing.T) {
+	home, err := os.MkdirTemp("/tmp", "ngha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(home)
+
+	engine, err := policy.LoadBytes([]byte(`audit:
+  enabled: true
+agents:
+  kit:
+    allow: [deploy_prod]
+    ask: [deploy_prod]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator, err := engine.ValidatorFor("kit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approver, err := approval.NewLocalApprover(filepath.Join(home, "approvals"), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer approver.Close()
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditPath := filepath.Join(home, "audit.jsonl")
+	auditor, err := audit.New(auditPath, audit.WithEd25519Key(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := NewStdioProxy(nil, "kit", engine, validator, nil, auditor, nil, log.New(io.Discard, "", 0)).WithApprover(approver)
+	type probeResult struct {
+		forwarded bool
+		reply     []byte
+		err       error
+	}
+	probe := make(chan probeResult, 1)
+	go func() {
+		forwarded, reply, probeErr := gate.Probe([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"deploy_prod","arguments":{}}}`))
+		probe <- probeResult{forwarded: forwarded, reply: reply, err: probeErr}
+	}()
+	approvalsDir := filepath.Join(home, "approvals")
+	var heldID string
+	for i := 0; i < 300 && heldID == ""; i++ {
+		pending, listErr := approval.ListPending(approvalsDir)
+		if listErr != nil {
+			t.Fatal(listErr)
+		}
+		if len(pending) > 0 {
+			heldID = pending[0].ID
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if heldID == "" {
+		t.Fatal("held call never appeared in local approval socket")
+	}
+	if err := approval.Decide(approvalsDir, heldID, true); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-probe:
+		if result.err != nil || !result.forwarded {
+			t.Fatalf("approved probe forwarded=%v reply=%s err=%v", result.forwarded, result.reply, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("approved probe did not finish")
+	}
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rows := readAuditFile(t, auditPath)
+	wantActor := "local:uid:" + strconv.Itoa(os.Getuid())
+	found := false
+	for _, row := range rows {
+		if row["decision"] == "approval-granted" {
+			found = true
+			if row["approval_actor"] != wantActor {
+				t.Fatalf("approval actor = %q, want kernel peer identity %q", row["approval_actor"], wantActor)
+			}
+		} else if _, ok := row["approval_actor"]; ok {
+			t.Fatalf("non-approval row unexpectedly has approval_actor: %v", row)
+		}
+	}
+	if !found {
+		t.Fatalf("approval-granted audit row missing: %v", rows)
+	}
+	if _, err := audit.VerifyEd25519(auditPath, pub); err != nil {
+		t.Fatalf("signed approval actor trail failed verification: %v", err)
 	}
 }
 

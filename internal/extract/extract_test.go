@@ -39,7 +39,7 @@ func TestFromToolCall_NockccNockClaim(t *testing.T) {
 		{
 			name:     "nockcc_nock_claim without id",
 			tool:     "nockcc_nock_claim",
-			params:   `{"name":"nockcc_nock_claim","arguments":{"agent_name":"mira"}}`,
+			params:   `{"name":"nockcc_nock_claim","arguments":{"agent_name":"demo"}}`,
 			expected: References{},
 		},
 		{

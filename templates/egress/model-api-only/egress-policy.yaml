@@ -9,4 +9,4 @@ agents:
       - "*.anthropic.com"
       - "api.openai.com"
       - "*.openai.com"
-      - "cc.nocktechnologies.io"
+      - "command.example.com" # Replace with your Command Center host.

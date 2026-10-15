@@ -174,6 +174,9 @@ func TestAskVerdictAppliesWithheldWritesOnlyOnApprove(t *testing.T) {
 			decisions := make([]string, 0, len(lines))
 			for _, ev := range lines {
 				decisions = append(decisions, ev["decision"])
+				if _, ok := ev["approval_actor"]; ok {
+					t.Errorf("test-seam approval must not claim a local kernel approver: %v", ev)
+				}
 			}
 			if strings.Join(decisions, ",") != strings.Join(tc.wantDecisions, ",") {
 				t.Errorf("audit decisions = %v, want %v; rows=%v", decisions, tc.wantDecisions, lines)

@@ -98,7 +98,7 @@ func runCLI(args []string) int {
 	}
 
 	if args[0] == "version" {
-		fmt.Println("nockguard v0.7.1")
+		fmt.Println("nockguard v0.8.0")
 		return 0
 	}
 
@@ -610,7 +610,7 @@ func runMCPListen(args []string) int {
 		return 1
 	}
 	if upstream == "" {
-		fmt.Fprintln(os.Stderr, "error: --upstream is required (the HTTP MCP upstream URL, e.g. https://cc.nocktechnologies.io/mcp)")
+		fmt.Fprintln(os.Stderr, "error: --upstream is required (the HTTP MCP upstream URL, e.g. https://command.example.com/mcp)")
 		return 1
 	}
 	parsedUpstream, err := url.Parse(upstream)
@@ -1474,7 +1474,7 @@ func runMCPHTTP(args []string) int {
 		}
 	}
 	if upstreamURL == "" {
-		fmt.Fprintln(os.Stderr, "error: --upstream is required (the HTTP MCP upstream URL, e.g. https://cc.nocktechnologies.io/mcp)")
+		fmt.Fprintln(os.Stderr, "error: --upstream is required (the HTTP MCP upstream URL, e.g. https://command.example.com/mcp)")
 		return 1
 	}
 	if agent == "" {
@@ -1542,7 +1542,7 @@ Usage:
   nockguard mcp-http --upstream <url> --agent <name> [--policy <path>] [--auth-env <ENV>] [--audit-best-effort]
   nockguard mcp-listen --listen 127.0.0.1:<port> --upstream <url> --agent <name> [--policy <path>] [--audit <path>] [--audit-best-effort]
   nockguard mcp-gateway --config <path>  (OAuth resource behind a loopback HTTPS ingress)
-  nockguard egress-proxy --listen <addr> --agent <name> --policy <path> [--audit <path>] [--enforce]
+  nockguard egress-proxy --listen <addr> --agent <name> [--policy <path>] [--audit <path>] [--enforce]
   nockguard verify (--all | --agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
   nockguard verify --session <id> --lock-db <path> --guard-trail <path> (--pub-env <ENV> | --lock-pub-env <ENV> --guard-pub-env <ENV>) [--json]
   nockguard verify --export <wall.proof.json> (--agent <name> | --ed25519-pub-env <ENV>)
@@ -1568,7 +1568,7 @@ Options:
   --force            Overwrite an existing policy (for: init) or existing key files (for: keygen)
   --print-env        Print the keygen env lines, INCLUDING the secret seed, to stdout instead of writing key files (for: keygen)
   --key-env          Env var holding the HMAC signing key (tamper-evident verify)
-  --ed25519-pub-env  Env var holding the hex Ed25519 public key (non-repudiable verify)
+  --ed25519-pub-env  Env var holding the hex Ed25519 public key (public-key verification)
   --audit            Path to the audit JSONL (default: ~/.nockguard/logs/audit.jsonl)
   --audit-best-effort  Permit local tool calls when enabled audit writes fail; off by default (proxy, mcp-http, mcp-listen)
   --audit-dir        Directory holding per-agent audit files (for: audit verify / evidence --agent)
@@ -1585,7 +1585,9 @@ Options:
 Per-agent signing:
   Each agent gets its own Ed25519 keypair. The trail is signed with the agent's
   private key and written to <agent>.audit.jsonl, verifiable with only that
-  agent's public key — non-repudiable: proves which agent did what.
+  agent's public key. Verification checks the recorded bytes against that key.
+  A private-key holder can sign new records; identifying the software that
+  performed an action requires additional evidence.
   keygen writes ~/.nockguard/keys/<agent>.ed25519 (seed, 0600) and <agent>.pub;
   proxy and verify --agent find them by name when the NOCKGUARD_AGENT_<NAME>_*
   env vars are unset (the env vars win when set).
@@ -1598,7 +1600,7 @@ Evidence packs:
 
 Examples:
   nockguard init                                        # scaffold a default-deny starter policy
-  nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project"   # zero-config: OBSERVE mode + signed audit trail, no policy file needed
+  nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project"   # zero-config observe: no --policy flag and no ~/.nockguard/policy.yaml
   nockguard proxy --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project" --agent coder --policy policy.yaml
   nockguard mcp-http --upstream https://mcp.example.com/mcp --agent coder --auth-env MCP_AUTH
   nockguard mcp-listen --listen 127.0.0.1:8790 --upstream https://mcp.example.com/mcp --agent coder --policy policy.yaml

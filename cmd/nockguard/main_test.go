@@ -482,7 +482,7 @@ func TestMCPListenRejectsNonLoopbackBind(t *testing.T) {
 		"mcp-listen",
 		"--listen", "0.0.0.0:8790",
 		"--upstream", "http://127.0.0.1:1/mcp",
-		"--agent", "mira",
+		"--agent", "demo",
 		"--policy", policyPath,
 		"--audit", filepath.Join(dir, "audit.jsonl"),
 	)
@@ -497,7 +497,7 @@ func TestMCPListenRejectsNonLoopbackBind(t *testing.T) {
 func TestMCPListenSubcommandForwardsAuditsAndShutsDown(t *testing.T) {
 	binary := buildNockguardBinary(t)
 	dir := t.TempDir()
-	auditPath := filepath.Join(dir, "mira.audit.jsonl")
+	auditPath := filepath.Join(dir, "demo.audit.jsonl")
 	policyPath := writeMCPListenPolicy(t, dir, auditPath)
 
 	var gotBody string
@@ -518,7 +518,7 @@ func TestMCPListenSubcommandForwardsAuditsAndShutsDown(t *testing.T) {
 		"mcp-listen",
 		"--listen", listenAddr,
 		"--upstream", upstream.URL,
-		"--agent", "mira",
+		"--agent", "demo",
 		"--policy", policyPath,
 		"--audit", auditPath,
 	)
@@ -565,8 +565,8 @@ func TestMCPListenSubcommandForwardsAuditsAndShutsDown(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("audit rows = %d, want dispatch and allow: %+v", len(events), events)
 	}
-	if events[0].Decision != "dispatch" || events[1].Agent != "mira" || events[1].Tool != "nockcc_nock_list" || events[1].Decision != "allow" {
-		t.Fatalf("audit rows = %+v, want dispatch then mira/nockcc_nock_list/allow", events)
+	if events[0].Decision != "dispatch" || events[1].Agent != "demo" || events[1].Tool != "nockcc_nock_list" || events[1].Decision != "allow" {
+		t.Fatalf("audit rows = %+v, want dispatch then demo/nockcc_nock_list/allow", events)
 	}
 }
 
@@ -575,14 +575,14 @@ func TestStatusShowsAuditFailure(t *testing.T) {
 	if err := os.Mkdir(path+".audit-failing", 0700); err != nil {
 		t.Fatal(err)
 	}
-	code, out, _ := runCommandForTest(t, "status", "--agent", "mira", "--audit", path)
+	code, out, _ := runCommandForTest(t, "status", "--agent", "demo", "--audit", path)
 	if code != 2 || !strings.Contains(out, "last required audit write failed") || strings.Contains(out, "calls refused") {
 		t.Fatalf("status = (%d, %q), want visible degraded state", code, out)
 	}
 	if err := os.Remove(path + ".audit-failing"); err != nil {
 		t.Fatal(err)
 	}
-	code, out, _ = runCommandForTest(t, "doctor", "--agent", "mira", "--audit", path)
+	code, out, _ = runCommandForTest(t, "doctor", "--agent", "demo", "--audit", path)
 	if code != 0 || strings.Contains(out, "last required audit write failed") {
 		t.Fatalf("doctor after recovery = (%d, %q)", code, out)
 	}
@@ -646,7 +646,7 @@ func writeMCPListenPolicy(t *testing.T, dir, auditPath string) string {
 	if auditPath != "" {
 		content = "audit:\n  enabled: true\n  path: " + auditPath + "\n"
 	}
-	content += "agents:\n  mira:\n    mode: allow\n"
+	content += "agents:\n  demo:\n    mode: allow\n"
 	if err := os.WriteFile(policyPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}

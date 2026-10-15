@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -44,6 +45,227 @@ func TestEd25519SignAndVerify(t *testing.T) {
 	}
 	if n != 3 {
 		t.Errorf("expected 3 entries verified, got %d", n)
+	}
+}
+
+func TestApprovalActorIsSignedAndTamperingIsRejected(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	a, err := New(path, WithEd25519Key(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Record(Event{Agent: "kit", Tool: "deploy", Decision: "approval-granted", ApprovalActor: "local:uid:501"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyEd25519(path, pub); err != nil {
+		t.Fatalf("valid approval actor trail did not verify: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(string(data), `"approval_actor":"local:uid:501"`, `"approval_actor":"local:uid:502"`, 1)
+	if tampered == string(data) {
+		t.Fatal("approval_actor field was not serialized")
+	}
+	if err := os.WriteFile(path, []byte(tampered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyEd25519(path, pub); err == nil {
+		t.Fatal("tampering with approval_actor must break Ed25519 verification")
+	}
+}
+
+func TestApprovalActorAliasesAndDuplicatesAreRejected(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	a, err := New(path, WithEd25519Key(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Record(Event{Agent: "kit", Tool: "deploy", Decision: "approval-granted", ApprovalActor: "local:uid:501"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const field = `"approval_actor":"local:uid:501"`
+	for name, mutated := range map[string]string{
+		"case-alias": strings.Replace(string(original), `"approval_actor"`, `"Approval_Actor"`, 1),
+		"duplicate":  strings.Replace(string(original), field, field+`,`+field, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if mutated == string(original) {
+				t.Fatal("test mutation did not match signed approval actor")
+			}
+			if err := os.WriteFile(path, []byte(mutated), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := VerifyEd25519(path, pub); !errors.Is(err, ErrTamper) {
+				t.Fatalf("non-canonical actor key must be classified as tampering, got %v", err)
+			}
+		})
+	}
+}
+
+func TestApprovalActorNullCannotCollapseToOmittedField(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	// This actor-free signed row is valid before the additive field existed.
+	recordN(t, path, priv, 1)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{"null": "null", "empty-string": `""`} {
+		t.Run(name, func(t *testing.T) {
+			mutated := strings.Replace(string(data), `,"sig":`, `,"approval_actor":`+value+`,"sig":`, 1)
+			if mutated == string(data) {
+				t.Fatal("could not insert approval_actor into signed row")
+			}
+			if err := os.WriteFile(path, []byte(mutated), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := VerifyEd25519(path, pub); !errors.Is(err, ErrTamper) {
+				t.Fatalf("%s approval_actor must not collapse to omitted field: %v", name, err)
+			}
+		})
+	}
+}
+
+func TestInvalidRequiredApprovalActorLatchesWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	a, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RecordRequired(Event{Agent: "kit", Tool: "deploy", Decision: "approval-granted", ApprovalActor: "local:uid:01"}); err == nil {
+		t.Fatal("RecordRequired accepted non-canonical approval_actor")
+	}
+	if err := a.RecordRequired(Event{Agent: "kit", Tool: "deploy", Decision: "dispatch"}); err == nil || !strings.Contains(err.Error(), "failed") {
+		t.Fatalf("required writer did not stay latched after invalid event: %v", err)
+	}
+}
+
+func TestApprovalActorValidationAppliesToRecordAndVerifiers(t *testing.T) {
+	invalid := []Event{
+		{Agent: "kit", Tool: "deploy", Decision: "approval-granted", ApprovalActor: "local:uid:01"},
+		{Agent: "kit", Tool: "deploy", Decision: "approval-granted", ApprovalActor: "local:uid:4294967296"},
+		{Agent: "kit", Tool: "deploy", Decision: "approval-granted", ApprovalActor: "caller:uid:501"},
+		{Agent: "kit", Tool: "deploy", Decision: "allow", ApprovalActor: "local:uid:501"},
+	}
+	for _, ev := range invalid {
+		t.Run(ev.Decision+"/"+ev.ApprovalActor, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "audit.jsonl")
+			writer, err := New(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Record(ev); err == nil {
+				t.Fatalf("Record accepted invalid approval actor event %+v", ev)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			// A signer must not be able to create a syntactically valid chain
+			// that makes a malformed/non-approval actor look trustworthy.
+			for _, mode := range []string{"hmac", "ed25519"} {
+				t.Run(mode, func(t *testing.T) {
+					line := ev
+					line.Time = "2026-06-03T18:30:00Z"
+					var verifierErr error
+					if mode == "hmac" {
+						key := []byte("test signing key")
+						canonical, marshalErr := json.Marshal(line)
+						if marshalErr != nil {
+							t.Fatal(marshalErr)
+						}
+						line.Sig = signLine(key, canonical, "")
+						data, marshalErr := json.Marshal(line)
+						if marshalErr != nil {
+							t.Fatal(marshalErr)
+						}
+						path := filepath.Join(t.TempDir(), "audit.jsonl")
+						if writeErr := os.WriteFile(path, append(data, '\n'), 0o600); writeErr != nil {
+							t.Fatal(writeErr)
+						}
+						_, verifierErr = Verify(path, key)
+					} else {
+						_, priv, keyErr := ed25519.GenerateKey(nil)
+						if keyErr != nil {
+							t.Fatal(keyErr)
+						}
+						canonical, marshalErr := json.Marshal(line)
+						if marshalErr != nil {
+							t.Fatal(marshalErr)
+						}
+						line.Sig = signLineEd25519(priv, canonical, "")
+						data, marshalErr := json.Marshal(line)
+						if marshalErr != nil {
+							t.Fatal(marshalErr)
+						}
+						path := filepath.Join(t.TempDir(), "audit.jsonl")
+						if writeErr := os.WriteFile(path, append(data, '\n'), 0o600); writeErr != nil {
+							t.Fatal(writeErr)
+						}
+						pub := priv.Public().(ed25519.PublicKey)
+						_, verifierErr = VerifyEd25519(path, pub)
+					}
+					if !errors.Is(verifierErr, ErrTamper) {
+						t.Fatalf("%s verifier accepted invalid actor: %v", mode, verifierErr)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestLegacyHMACTrailWithoutApprovalActorStillVerifies(t *testing.T) {
+	key := []byte("legacy hmac key")
+	ev := Event{Time: "2026-06-03T18:30:00Z", Agent: "kit", Tool: "deploy", Decision: "allow"}
+	canonical, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.Sig = signLine(key, canonical, "")
+	line, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mark := highWaterMark{Count: 1, LastSig: ev.Sig}
+	mark.Sig = signLine(key, hwmSignedBytes(mark.Count, mark.LastSig), "")
+	markBytes, err := json.Marshal(mark)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "legacy.jsonl")
+	if err := os.WriteFile(path, append(line, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+hwmSuffix, append(markBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := Verify(path, key); err != nil || n != 1 {
+		t.Fatalf("legacy HMAC trail without approval_actor did not verify: n=%d err=%v", n, err)
 	}
 }
 

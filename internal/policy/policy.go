@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -32,6 +33,9 @@ type Config struct {
 type AuditPolicy struct {
 	Enabled bool   `yaml:"enabled"`
 	Path    string `yaml:"path"`
+	// ActionPairing opts the stdio proxy into schema v2 tool-call correlation.
+	// It requires enabled, required auditing; the default remains v1.
+	ActionPairing bool `yaml:"action_pairing"`
 	// SignKeyEnv names the environment variable holding the HMAC key that makes
 	// the trail tamper-evident (Phase 4 3/3). Empty = unsigned. The key is never
 	// stored in the policy file; an enabled value that does not resolve fails loud.
@@ -158,9 +162,11 @@ func LoadBytes(data []byte) (*Engine, error) {
 	return loadFrom(bytes.NewReader(data), "<bytes>")
 }
 
-// loadFrom decodes and validates a policy from r. name is used only in error
-// messages. Load and LoadBytes both delegate here so the on-disk and in-memory
-// paths share identical glob/category validation.
+// isGlobPattern reports whether a pattern contains path.Match syntax.
+func isGlobPattern(pattern string) bool {
+	return strings.ContainsAny(pattern, "*?[")
+}
+
 // isGlobPatternDisjoint reports whether two tool patterns are proven disjoint
 // (no tool name can match both). Returns true only in two safe cases:
 //   - Both are literals (no wildcard chars) and differ, OR
@@ -168,8 +174,8 @@ func LoadBytes(data []byte) (*Engine, error) {
 //
 // Returns false for all other cases (globs vs globs, overlapping literals).
 func isGlobPatternDisjoint(pattern1, pattern2 string) bool {
-	isGlobA := strings.ContainsAny(pattern1, "*?[")
-	isGlobB := strings.ContainsAny(pattern2, "*?[")
+	isGlobA := isGlobPattern(pattern1)
+	isGlobB := isGlobPattern(pattern2)
 
 	if !isGlobA && !isGlobB {
 		// Both literals: disjoint if different
@@ -179,14 +185,14 @@ func isGlobPatternDisjoint(pattern1, pattern2 string) bool {
 	if !isGlobA && isGlobB {
 		// pattern1 is literal, pattern2 is glob
 		// Disjoint if glob does not match the literal
-		matched, _ := filepath.Match(pattern2, pattern1)
+		matched, _ := path.Match(pattern2, pattern1)
 		return !matched
 	}
 
 	if isGlobA && !isGlobB {
 		// pattern1 is glob, pattern2 is literal
 		// Disjoint if glob does not match the literal
-		matched, _ := filepath.Match(pattern1, pattern2)
+		matched, _ := path.Match(pattern1, pattern2)
 		return !matched
 	}
 
@@ -194,6 +200,9 @@ func isGlobPatternDisjoint(pattern1, pattern2 string) bool {
 	return false
 }
 
+// loadFrom decodes and validates a policy from r. name is used only in error
+// messages. Load and LoadBytes both delegate here so the on-disk and in-memory
+// paths share identical glob/category validation.
 func loadFrom(r io.Reader, name string) (*Engine, error) {
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
@@ -201,9 +210,12 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("policy %s: %w", name, err)
 	}
+	if cfg.Audit != nil && cfg.Audit.ActionPairing && !cfg.Audit.Enabled {
+		return nil, fmt.Errorf("policy %s: audit.action_pairing requires audit.enabled: true", name)
+	}
 	// Validate every glob pattern at load time so a malformed wildcard fails
 	// LOUD here rather than silently voiding a control at evaluate time (N8180).
-	// A malformed DENY glob is the dangerous case — filepath.Match returning an
+	// A malformed DENY glob is the dangerous case — path.Match returning an
 	// error was discarded, so the deny silently no-matched and a broad allow let
 	// the call through (fail-open in the engine's strongest control). This makes
 	// the policy engine match the fail-loud posture of LimiterFor and
@@ -334,19 +346,23 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 	return &Engine{config: cfg, warnings: warnings}, nil
 }
 
-// validateGlob confirms a policy pattern is a usable glob. A literal (no '*') is
-// always valid; a wildcard pattern is validated with filepath.Match so a
-// malformed glob (e.g. an unclosed character class like "nockcc_[spend*") is
-// rejected at Load() instead of silently failing to match — and, for a deny rule,
-// silently failing OPEN — at evaluate time.
+// ActionPairingEnabled reports whether the policy opts the stdio proxy into
+// durable schema v2 action correlation. Other transports remain on v1.
+func (e *Engine) ActionPairingEnabled() bool {
+	return e != nil && e.config.Audit != nil && e.config.Audit.Enabled && e.config.Audit.ActionPairing
+}
+
+// validateGlob confirms a policy pattern is usable. Literals are always valid;
+// glob syntax is validated with path.Match so malformed patterns fail during
+// Load instead of silently failing to match.
 func validateGlob(pattern string) error {
 	// Validate syntax for EVERY glob pattern (*, ?, [) to catch malformed wildcards
 	// early. A malformed pattern like "github_[" would silently never match at
 	// eval time if not validated here.
-	if strings.ContainsAny(pattern, "*?[") {
-		// The candidate string is irrelevant for syntax validation; filepath.Match
+	if isGlobPattern(pattern) {
+		// The candidate string is irrelevant for syntax validation; path.Match
 		// reports ErrBadPattern on a malformed pattern regardless of the name.
-		if _, err := filepath.Match(pattern, ""); err != nil {
+		if _, err := path.Match(pattern, ""); err != nil {
 			return fmt.Errorf("malformed glob %q: %w", pattern, err)
 		}
 	}
@@ -761,6 +777,9 @@ func (e *Engine) auditorAt(path string) (*audit.Auditor, error) {
 		return nil, err
 	}
 	var opts []audit.Option
+	if e.config.Audit != nil && e.config.Audit.ActionPairing {
+		opts = append(opts, audit.WithActionPairing())
+	}
 	// Ed25519 (non-repudiable) takes precedence over HMAC when both are configured.
 	if e.config.Audit != nil && e.config.Audit.SignEd25519KeyEnv != "" {
 		env := e.config.Audit.SignEd25519KeyEnv
@@ -786,8 +805,8 @@ func (e *Engine) auditorAt(path string) (*audit.Auditor, error) {
 
 // ValidAgentName reports whether an agent name is safe to embed in environment
 // variable names and file-system paths. Only alphanumerics, hyphens, and dots
-// are accepted — this matches every real fleet agent name (kit, mira-nockos,
-// mar-nockos, …) and excludes path separators or traversal sequences.
+// are accepted, including names like coder and reviewer-1, while path
+// separators and traversal sequences are excluded.
 func ValidAgentName(agent string) bool {
 	if agent == "" || agent == "." || strings.Contains(agent, "..") {
 		return false
@@ -804,7 +823,7 @@ func ValidAgentName(agent string) bool {
 // agent's Ed25519 private key seed. Hyphens and dots in the agent name are
 // replaced with underscores and the result is uppercased:
 //
-//	mira-nockos → NOCKGUARD_AGENT_MIRA_NOCKOS_ED25519_KEY
+//	reviewer-1 → NOCKGUARD_AGENT_REVIEWER_1_ED25519_KEY
 func AgentKeyEnvName(agent string) string {
 	upper := strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(agent))
 	return "NOCKGUARD_AGENT_" + upper + "_ED25519_KEY"
@@ -915,7 +934,11 @@ func (e *Engine) AuditorForAgent(agent string, requirePerAgent bool) (*audit.Aud
 	} else if path, err = expandTilde(path); err != nil {
 		return nil, false, err
 	}
-	a, err := audit.New(AgentAuditPath(path, agent), audit.WithEd25519Key(priv))
+	opts := []audit.Option{audit.WithEd25519Key(priv)}
+	if e.config.Audit.ActionPairing {
+		opts = append(opts, audit.WithActionPairing())
+	}
+	a, err := audit.New(AgentAuditPath(path, agent), opts...)
 	return a, err == nil, err
 }
 
@@ -979,15 +1002,15 @@ func matchPattern(pattern, tool string) bool {
 	return matched
 }
 
-// matchPatternErr is matchPattern that surfaces a filepath.Match error instead
+// matchPatternErr is matchPattern that surfaces a path.Match error instead
 // of discarding it. The deny path uses this to fail CLOSED on a malformed glob:
 // a deny rule that errors must be treated as a MATCH (deny the call), never
 // silently skipped into a fail-open. Load() validates globs up front (see
 // validateGlob), so this is defense-in-depth for any pattern that slips past
 // validation.
 func matchPatternErr(pattern, tool string) (bool, error) {
-	if strings.Contains(pattern, "*") {
-		return filepath.Match(pattern, tool)
+	if isGlobPattern(pattern) {
+		return path.Match(pattern, tool)
 	}
 	return pattern == tool, nil
 }

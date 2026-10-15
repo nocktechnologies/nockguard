@@ -13,7 +13,7 @@ import (
 )
 
 const requiredDiscoveryPolicy = `agents:
-  mira:
+  demo:
     mode: deny
     allow: [read_safe]
 `

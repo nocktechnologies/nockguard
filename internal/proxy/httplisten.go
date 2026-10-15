@@ -10,10 +10,8 @@ import (
 	"mime"
 	"net"
 	"net/http"
-	"reflect"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/extract"
@@ -99,7 +97,7 @@ func (l *HTTPListener) WithUpstreamAgentToken(token string) *HTTPListener {
 // NewHTTPListener builds a listener that binds listen (must be a loopback
 // host:port, e.g. 127.0.0.1:8790), gates traffic through gate, and forwards
 // allowed calls to the upstream MCP endpoint (e.g.
-// https://cc.nocktechnologies.io/mcp).
+// https://command.example.com/mcp).
 func NewHTTPListener(listen, upstream string, gate *StdioProxy, logger *log.Logger) *HTTPListener {
 	// Clone DefaultTransport rather than build a bare one, so we inherit its
 	// DialContext timeout, TLSHandshakeTimeout, and HTTP(S)_PROXY/NO_PROXY
@@ -210,7 +208,7 @@ func (l *HTTPListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	seq := atomic.AddUint64(&l.gate.auditSeq, 1) - 1
+	seq := l.gate.reserveAuditSequence()
 
 	// Guarantee exactly-once resolution per reserved seq: establish defer with flag
 	// that ensures even on early returns, the seq gets resolved exactly once.
@@ -277,9 +275,7 @@ func jsonRPCIDMatches(reqBody []byte, respID json.RawMessage) bool {
 	if err := json.Unmarshal(reqBody, &req); err != nil || req.ID == nil {
 		return false
 	}
-	reqID, ok1 := decodeIDNumberAware(req.ID)
-	respIDVal, ok2 := decodeIDNumberAware(respID)
-	return ok1 && ok2 && reflect.DeepEqual(reqID, respIDVal)
+	return jsonRPCIDsEqual(req.ID, respID)
 }
 
 // decodeIDNumberAware decodes a JSON-RPC id with UseNumber so a large integer id

@@ -23,7 +23,7 @@ import (
 )
 
 // httpTestAgent is the agent identity every listener test gates as.
-const httpTestAgent = "mira"
+const httpTestAgent = "demo"
 
 // newGate builds a StdioProxy carrying only the enforcement pipeline (no stdio
 // upstream — the HTTP listener never calls Run/agentToUpstream, only decide()).
@@ -41,14 +41,14 @@ func newGate(t *testing.T, policyYAML string, limiter *ratelimit.Limiter, audito
 }
 
 // newEd25519Auditor returns an Ed25519-signing Auditor writing to a temp
-// mira.audit.jsonl, plus the path and public key for chain verification.
+// demo.audit.jsonl, plus the path and public key for chain verification.
 func newEd25519Auditor(t *testing.T) (*audit.Auditor, string, ed25519.PublicKey) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "mira.audit.jsonl")
+	path := filepath.Join(t.TempDir(), "demo.audit.jsonl")
 	auditor, err := audit.New(path, audit.WithEd25519Key(priv))
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +140,7 @@ func TestHTTPListener_AllowForwardsAndAudits(t *testing.T) {
 	defer upstream.Close()
 
 	auditor, auditPath, pub := newEd25519Auditor(t)
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, auditor)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
 	defer lsrv.Close()
 
@@ -169,8 +169,8 @@ func TestHTTPListener_AllowForwardsAndAudits(t *testing.T) {
 	if n != len(evs) || len(evs) != 2 {
 		t.Fatalf("expected dispatch and allow rows, got n=%d rows=%d", n, len(evs))
 	}
-	if evs[0].Decision != "dispatch" || evs[1].Decision != "allow" || evs[1].Tool != "nockcc_nock_list" || evs[1].Agent != "mira" {
-		t.Errorf("audit rows = %+v, want dispatch then allow/nockcc_nock_list/mira", evs)
+	if evs[0].Decision != "dispatch" || evs[1].Decision != "allow" || evs[1].Tool != "nockcc_nock_list" || evs[1].Agent != "demo" {
+		t.Errorf("audit rows = %+v, want dispatch then allow/nockcc_nock_list/demo", evs)
 	}
 }
 
@@ -189,7 +189,7 @@ func TestHTTPListener_ScrubsInjectedCredentialFromResponse(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    inject:\n      - tools: [test_tool]\n        ref: env:TEST_SECRET\n        arg: auth\n", nil, nil).
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n    inject:\n      - tools: [test_tool]\n        ref: env:TEST_SECRET\n        arg: auth\n", nil, nil).
 		WithResolver(&mockResolver{values: map[string]string{"env:TEST_SECRET": secret}})
 	listener := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
 	defer listener.Close()
@@ -231,7 +231,7 @@ func TestHTTPListener_RequiredAuditScrubsInjectedCredentialFromResponse(t *testi
 			}))
 			defer upstream.Close()
 
-			gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    inject:\n      - tools: [test_tool]\n        ref: env:TEST_SECRET\n        arg: auth\n", nil, auditor).
+			gate := newGate(t, "agents:\n  demo:\n    mode: allow\n    inject:\n      - tools: [test_tool]\n        ref: env:TEST_SECRET\n        arg: auth\n", nil, auditor).
 				WithResolver(&mockResolver{values: map[string]string{"env:TEST_SECRET": secret}})
 			listener := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithRequiredAudit())
 			defer listener.Close()
@@ -253,7 +253,7 @@ func TestHTTPListener_RequiredAuditScrubsInjectedCredentialFromResponse(t *testi
 
 func TestHTTPListener_StreamBodyScrubsCredentialAcrossChunks(t *testing.T) {
 	const secret = "split-response-secret-0001"
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    inject:\n      - tools: [test_tool]\n        ref: env:TEST_SECRET\n        arg: auth\n", nil, nil).
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n    inject:\n      - tools: [test_tool]\n        ref: env:TEST_SECRET\n        arg: auth\n", nil, nil).
 		WithResolver(&mockResolver{values: map[string]string{"env:TEST_SECRET": secret}})
 	if d := gate.decide([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{}}}`), 0); d.reject {
 		t.Fatalf("injected call was rejected: %s", d.rejectMsg)
@@ -277,7 +277,7 @@ func TestHTTPListener_StreamBodyScrubsCredentialAcrossChunks(t *testing.T) {
 
 func TestHTTPListener_StreamBodyDeliversCompleteSSEEventWithoutTailHold(t *testing.T) {
 	const secret = "split-response-secret-0001"
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    inject:\n      - tools: [test_tool]\n        ref: env:TEST_SECRET\n        arg: auth\n", nil, nil).
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n    inject:\n      - tools: [test_tool]\n        ref: env:TEST_SECRET\n        arg: auth\n", nil, nil).
 		WithResolver(&mockResolver{values: map[string]string{"env:TEST_SECRET": secret}})
 	if d := gate.decide([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{}}}`), 0); d.reject {
 		t.Fatalf("injected call was rejected: %s", d.rejectMsg)
@@ -327,7 +327,7 @@ func TestHTTPListener_DenyReturnsErrorNoUpstream(t *testing.T) {
 	defer upstream.Close()
 
 	auditor, auditPath, _ := newEd25519Auditor(t)
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    deny:\n      - nockcc_kill_switch_set\n", nil, auditor)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n    deny:\n      - nockcc_kill_switch_set\n", nil, auditor)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
 	defer lsrv.Close()
 
@@ -372,7 +372,7 @@ func TestHTTPListener_RateLimitReturnsError(t *testing.T) {
 	defer upstream.Close()
 
 	limiter := ratelimit.New(ratelimit.Config{SpendCap: 1})
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", limiter, nil)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", limiter, nil)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
 	defer lsrv.Close()
 
@@ -415,7 +415,7 @@ func TestHTTPListener_SSEPassthroughStreamedUnchanged(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, nil)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
 	defer lsrv.Close()
 
@@ -483,7 +483,7 @@ func readSSEEvent(t *testing.T, br *bufio.Reader) string {
 // transports share one enforcement path so `nockguard verify` / the Live Wall
 // read one consistent trail.
 func TestHTTPListener_AuditRowShapeMatchesStdio(t *testing.T) {
-	const pol = "agents:\n  mira:\n    mode: allow\n    deny:\n      - nockcc_kill_switch_set\n"
+	const pol = "agents:\n  demo:\n    mode: allow\n    deny:\n      - nockcc_kill_switch_set\n"
 	call := toolCall("7", "nockcc_kill_switch_set")
 
 	// stdio path via Probe.
@@ -524,7 +524,7 @@ func TestHTTPListener_DeniedNotificationAccepted(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
 	defer upstream.Close()
 
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n    deny:\n      - nockcc_kill_switch_set\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n    deny:\n      - nockcc_kill_switch_set\n", nil, nil)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
 	defer lsrv.Close()
 
@@ -553,7 +553,7 @@ func TestHTTPListener_NonToolsCallForwardedVerbatim(t *testing.T) {
 	defer upstream.Close()
 
 	// default-deny policy: even so, initialize is non-gated and must forward.
-	gate := newGate(t, "agents:\n  mira:\n    mode: deny\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    mode: deny\n", nil, nil)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
 	defer lsrv.Close()
 
@@ -580,7 +580,7 @@ func TestHTTPListener_AuthAndSessionPassthrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, nil)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
 	defer lsrv.Close()
 
@@ -618,7 +618,7 @@ func TestHTTPListener_MCPProtocolHeadersPassthrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, nil)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
 	defer lsrv.Close()
 
@@ -652,7 +652,7 @@ func TestHTTPListener_UpstreamErrorNotEchoed(t *testing.T) {
 	deadAddr := strings.TrimPrefix(dead.URL, "http://") // capture before Close, for the leak check
 	dead.Close()
 
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, nil)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", dead.URL+"/mcp", gate, log.New(io.Discard, "", 0)))
 	defer lsrv.Close()
 
@@ -697,7 +697,7 @@ func TestRequireLoopback(t *testing.T) {
 
 // TestHTTPListener_MethodNotAllowed: only POST carries JSON-RPC; GET is refused.
 func TestHTTPListener_MethodNotAllowed(t *testing.T) {
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, nil)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", "http://127.0.0.1:1", gate, log.New(io.Discard, "", 0)))
 	defer lsrv.Close()
 
@@ -723,7 +723,7 @@ func TestHTTPListener_CardStateNotCommittedOnJSONRPCError(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, nil)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
 	defer lsrv.Close()
 
@@ -750,7 +750,7 @@ func TestHTTPListener_CardStateCommittedOnJSONRPCSuccess(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, nil)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
 	defer lsrv.Close()
 
@@ -776,7 +776,7 @@ func TestHTTPListener_CardStateNotCommittedOnToolLevelIsError(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	gate := newGate(t, "agents:\n  mira:\n    mode: allow\n", nil, nil)
+	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, nil)
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)))
 	defer lsrv.Close()
 

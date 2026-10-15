@@ -82,6 +82,14 @@ type localMsg struct {
 	Error   string    `json:"error,omitempty"`
 }
 
+// localRequest is intentionally limited to operator commands. Unknown fields
+// are rejected so a request cannot smuggle an identity claim into a decision.
+type localRequest struct {
+	Op      string `json:"op"`
+	ID      string `json:"id,omitempty"`
+	Approve bool   `json:"approve,omitempty"`
+}
+
 // DefaultLocalDir is ~/.nockguard/approvals unless that would make the longest
 // local socket name exceed the safe Unix socket path length. Long home or temp
 // paths use a private per-uid directory under the resolved /tmp instead.
@@ -254,8 +262,10 @@ func (a *LocalApprover) handle(c net.Conn) {
 	if err != nil || peer != a.uid {
 		return // wrong or unknowable peer: say nothing, decide nothing
 	}
-	var m localMsg
-	if json.NewDecoder(io.LimitReader(c, 4096)).Decode(&m) != nil {
+	var m localRequest
+	dec := json.NewDecoder(io.LimitReader(c, 4096))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&m) != nil {
 		return
 	}
 	var resp localMsg
@@ -283,7 +293,11 @@ func (a *LocalApprover) handle(c net.Conn) {
 		if m.Approve {
 			verb = "approved"
 		}
-		h.decide <- Verdict{Approved: m.Approve, Reason: verb + " by " + who}
+		h.decide <- Verdict{
+			Approved:      m.Approve,
+			Reason:        verb + " by " + who,
+			ApprovalActor: fmt.Sprintf("local:uid:%d", peer),
+		}
 		resp.OK = true
 	default:
 		resp.Error = "unknown op"

@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"time"
@@ -124,17 +125,23 @@ func BuildPack(opts PackOptions) (Pack, error) {
 		return Pack{}, err
 	}
 
-	// 1) Read every line from every file (in order) so the raw appendix and the
-	// control buckets reflect exactly what's on disk. Reading is independent of
-	// verification: a tampered file still yields its (now-suspect) entries, which
-	// is the point — the attestation flags them, the evidence shows them.
+	// 1) Snapshot each trail and checkpoint under the audit writer's shared
+	// lock. Parse the trail snapshot for the raw appendix and control buckets; a
+	// tampered trail still yields its now-suspect entries, which the attestation
+	// flags and the evidence shows.
+	snapshots := make([]auditSnapshot, 0, len(opts.AuditFiles))
 	var allEntries []audit.Event
 	for _, path := range opts.AuditFiles {
-		entries, rerr := readEntries(path)
+		snapshot, rerr := readAuditSnapshot(path)
+		if rerr != nil {
+			return Pack{}, fmt.Errorf("reading audit file %s: %w", path, rerr)
+		}
+		entries, rerr := parseEntries(snapshot.trail)
 		if rerr != nil {
 			return Pack{}, fmt.Errorf("reading audit file %s: %w", path, rerr)
 		}
 		allEntries = append(allEntries, entries...)
+		snapshots = append(snapshots, snapshot)
 	}
 
 	// 2) Verify each file's chain via the existing audit package. Harden the
@@ -149,14 +156,14 @@ func BuildPack(opts PackOptions) (Pack, error) {
 	if mode == ModeEd25519 {
 		vr.PubKeyHex = opts.Ed25519PubHex
 	}
-	for _, path := range opts.AuditFiles {
-		fv := verifyFile(path, mode, opts.HMACKey, pub)
+	for _, snapshot := range snapshots {
+		fv := verifyFile(snapshot, mode, opts.HMACKey, pub)
 		vr.FileResults = append(vr.FileResults, fv)
 		vr.EntriesVerified += fv.EntriesVerified
 		if !fv.Intact {
 			vr.ChainIntact = false
 			if vr.Detail == "" {
-				vr.Detail = fmt.Sprintf("%s: %s", path, fv.Error)
+				vr.Detail = fmt.Sprintf("%s: %s", snapshot.path, fv.Error)
 			}
 		}
 	}
@@ -222,22 +229,70 @@ func resolveMode(opts PackOptions) (VerifyMode, ed25519.PublicKey, error) {
 	}
 }
 
-// verifyFile runs the existing audit verifier for one file and never panics:
-// a missing/unreadable file or a broken chain both yield Intact=false with the
-// error captured, so the failure surfaces in the attestation instead of crashing
-// the pack.
-func verifyFile(path string, mode VerifyMode, key []byte, pub ed25519.PublicKey) FileVerification {
+// auditSnapshot holds one trail read and its corresponding checkpoint read.
+type auditSnapshot struct {
+	path          string
+	trail         []byte
+	checkpoint    []byte
+	checkpointErr error
+}
+
+// readAuditSnapshot reads the checkpoint first, then the trail through one open
+// file. Regular trails use the shared flock signed writers take exclusively.
+func readAuditSnapshot(path string) (snapshot auditSnapshot, err error) {
+	snapshot.path = path
+	f, err := os.Open(path)
+	if err != nil {
+		return snapshot, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		snapshot.checkpointErr = fmt.Errorf("stating audit snapshot: %w", err)
+	} else if info.Mode().IsRegular() {
+		if err := audit.LockShared(f.Fd()); err != nil {
+			snapshot.checkpointErr = fmt.Errorf("locking audit snapshot: %w", err)
+		} else {
+			defer func() {
+				if err := audit.UnlockFile(f.Fd()); err != nil && snapshot.checkpointErr == nil {
+					snapshot.checkpointErr = fmt.Errorf("unlocking audit snapshot: %w", err)
+				}
+			}()
+		}
+	}
+
+	checkpoint, checkpointErr := os.ReadFile(path + ".hwm")
+	if errors.Is(checkpointErr, os.ErrNotExist) {
+		checkpoint = nil
+		checkpointErr = nil
+	}
+	snapshot.checkpoint = checkpoint
+	if snapshot.checkpointErr == nil {
+		snapshot.checkpointErr = checkpointErr
+	}
+	snapshot.trail, err = io.ReadAll(f)
+	return snapshot, err
+}
+
+// verifyFile checks a trail snapshot and captures verification failures in the
+// attestation so they remain visible in the pack.
+func verifyFile(snapshot auditSnapshot, mode VerifyMode, key []byte, pub ed25519.PublicKey) FileVerification {
 	var (
 		n               int
 		checkpointCount int
 		err             error
 	)
-	if mode == ModeEd25519 {
-		n, checkpointCount, err = audit.VerifyEd25519WithCheckpoint(path, pub)
-	} else {
-		n, checkpointCount, err = audit.VerifyWithCheckpoint(path, key)
+	fv := FileVerification{Path: snapshot.path}
+	if snapshot.checkpointErr != nil {
+		fv.Error = snapshot.checkpointErr.Error()
+		return fv
 	}
-	fv := FileVerification{Path: path, EntriesVerified: n}
+	if mode == ModeEd25519 {
+		n, checkpointCount, err = audit.VerifyEd25519WithCheckpointBytes(snapshot.trail, snapshot.checkpoint, pub)
+	} else {
+		n, checkpointCount, err = audit.VerifyWithCheckpointBytes(snapshot.trail, snapshot.checkpoint, key)
+	}
+	fv.EntriesVerified = n
 	if err != nil {
 		fv.Error = err.Error()
 		return fv
@@ -253,16 +308,10 @@ func verifyFile(path string, mode VerifyMode, key []byte, pub ed25519.PublicKey)
 	return fv
 }
 
-// readEntries parses every non-empty JSONL line of an audit file into Events,
-// in order. Used for the raw appendix and control bucketing — distinct from
-// verification, which is the audit package's job.
-func readEntries(path string) ([]audit.Event, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
+// parseEntries parses every non-empty JSONL line of an audit snapshot into
+// Events, in order. Verification remains the audit package's job.
+func parseEntries(data []byte) ([]audit.Event, error) {
+	sc := bufio.NewScanner(bytes.NewReader(data))
 	sc.Buffer(make([]byte, 0, 64*1024), audit.MaxTrailLineBytes)
 	var out []audit.Event
 	line := 0

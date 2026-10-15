@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,13 @@ func writePolicy(t *testing.T, content string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func policyWithPatternRule(field, pattern string) []byte {
+	if field == "allow" {
+		return []byte(fmt.Sprintf("agents:\n  kit:\n    mode: allow\n    allow: [%q]\n", pattern))
+	}
+	return []byte(fmt.Sprintf("agents:\n  kit:\n    mode: allow\n    allow: [\"*\"]\n    %s: [%q]\n", field, pattern))
 }
 
 func TestAllowDenyExact(t *testing.T) {
@@ -905,6 +913,38 @@ agents:
 `,
 			wantErr: true,
 		},
+		{
+			name: "question mark glob matching literal rejected",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["exec?"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["exec1"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
+		{
+			name: "character class glob matching literal rejected",
+			yaml: `
+agents:
+  test:
+    mode: allow
+    inject:
+      - tools: ["deploy_[ab]"]
+        ref: "env:SECRET1"
+        arg: "auth"
+      - tools: ["deploy_b"]
+        ref: "env:SECRET2"
+        arg: "auth"
+`,
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -915,6 +955,93 @@ agents:
 				t.Errorf("Load() wantErr=%v, got err=%v", tt.wantErr, err)
 			}
 		})
+	}
+}
+
+func TestPolicyPatternMatchingAcrossRuleFields(t *testing.T) {
+	rules := []string{"deny", "ask", "require_approval", "allow", "shadow"}
+	patterns := []struct {
+		name        string
+		pattern     string
+		match       string
+		nonMatching string
+	}{
+		{name: "question mark", pattern: "exec?", match: "exec1", nonMatching: "exec12"},
+		{name: "character class", pattern: "deploy_[ab]", match: "deploy_a", nonMatching: "deploy_c"},
+		{name: "asterisk", pattern: "read_*", match: "read_file", nonMatching: "write_file"},
+		{name: "literal", pattern: "nockcc_nock_claim", match: "nockcc_nock_claim", nonMatching: "nockcc_nock_claims"},
+	}
+
+	for _, rule := range rules {
+		t.Run(rule, func(t *testing.T) {
+			for _, pattern := range patterns {
+				t.Run(pattern.name, func(t *testing.T) {
+					engine, err := LoadBytes(policyWithPatternRule(rule, pattern.pattern))
+					if err != nil {
+						t.Fatalf("LoadBytes: %v", err)
+					}
+
+					for _, candidate := range []struct {
+						tool string
+						want bool
+					}{{pattern.match, true}, {pattern.nonMatching, false}} {
+						var got bool
+						switch rule {
+						case "deny":
+							got = engine.Evaluate("kit", candidate.tool).Verdict == Deny
+						case "ask":
+							got = engine.Evaluate("kit", candidate.tool).Verdict == Ask
+						case "require_approval":
+							got = engine.RequiresApproval("kit", candidate.tool)
+						case "allow":
+							got = engine.Evaluate("kit", candidate.tool).Verdict == Allow
+						case "shadow":
+							got = !engine.Evaluate("kit", candidate.tool).ShadowWouldDeny
+						}
+						if got != candidate.want {
+							t.Errorf("rule %q with pattern %q on %q matched = %v, want %v", rule, pattern.pattern, candidate.tool, got, candidate.want)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestPolicyPatternMalformedClassRejectedForEveryRuleField(t *testing.T) {
+	for _, field := range []string{"deny", "ask", "require_approval", "allow", "shadow"} {
+		t.Run(field, func(t *testing.T) {
+			if _, err := LoadBytes(policyWithPatternRule(field, "deploy_[ab")); err == nil {
+				t.Fatalf("LoadBytes accepted malformed class in %s rules", field)
+			}
+		})
+	}
+}
+
+// This negative control failed before Nock #11811: `?` was validated as glob
+// syntax at load time but evaluated as literal text, letting exec1 through.
+func TestDenyQuestionMarkGlobMatchesExecNumber(t *testing.T) {
+	engine, err := LoadBytes([]byte(`
+agents:
+  kit:
+    mode: allow
+    allow: ["*"]
+    deny: ["exec?"]
+`))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	if decision := engine.Evaluate("kit", "exec1"); decision.Verdict != Deny {
+		t.Fatalf("deny [\"exec?\"] let exec1 through: %+v", decision)
+	}
+}
+
+func TestPolicyGlobSlashBoundary(t *testing.T) {
+	if matchPattern("*", "read/subtool") {
+		t.Fatal("path.Match star should not cross a slash in a tool name")
+	}
+	if !matchPattern("read/*", "read/subtool") {
+		t.Fatal("path.Match pattern with an explicit slash should match the tool name")
 	}
 }
 

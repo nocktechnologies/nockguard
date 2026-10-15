@@ -36,9 +36,8 @@ func TestExpandTilde(t *testing.T) {
 }
 
 // TestAuditorTildePathPortable proves a committed policy with a ~-prefixed audit
-// path resolves under the current machine's home — the fix for the hardcoded
-// /Users/kevin path that made livedemo/policy.yaml non-portable off the author's
-// Mac (broke the flagship VPS dogfood dry-run).
+// path resolves under the current machine's home. An absolute path made the
+// demo policy non-portable across machines.
 func TestAuditorTildePathPortable(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
