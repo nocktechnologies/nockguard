@@ -20,26 +20,36 @@ First [install NockGuard](#install), then run:
 
 ```bash
 QS=$(mktemp -d)                                  # private fixture directory (not a predictable /tmp path)
-printf 'NockGuard read succeeded\n' > "$QS/hello.txt"
-echo "$QS"                                        # substitute this path for <QS> below
+cd "$QS"
+printf 'NockGuard read succeeded\n' > hello.txt
+pwd -P                                            # copy this physical path for <QS> below
 nockguard init                                   # writes ~/.nockguard/policy.yaml (coder policy, audit enabled; never clobbers an existing one)
 nockguard keygen --agent coder                   # writes ~/.nockguard/keys/coder.ed25519 and coder.pub
 ```
 
-The generated policy allows `coder` to call the filesystem server's `read_file` and `read_text_file` tools and denies `write_file`. Auditing is enabled, and the key generated above signs `coder`'s trail. Point your MCP client at NockGuard:
+The generated policy lets `coder` call `read_file` and `read_text_file`, and denies `write_file`. Auditing is enabled, and the key you generated signs `coder`'s trail. The filesystem server example needs Node.js and `npx`. Use fixture and executable paths without spaces in this example. Run these commands in the same terminal to collect the absolute executable paths and `PATH` for your client configuration:
+
+```bash
+command -v nockguard
+command -v npx
+printf '%s\n' "$PATH"
+```
+
+Configure your client to route a filesystem server through NockGuard. Replace `<NOCKGUARD_PATH>` and `<NPX_PATH>` with the absolute executable paths, `<SHELL_PATH>` with the `PATH` value, and `<QS>` with the physical folder path printed by `pwd -P`:
 
 ```json
 {
   "mcpServers": {
     "files": {
-      "command": "nockguard",
-      "args": ["proxy", "--upstream", "npx -y @modelcontextprotocol/server-filesystem <QS>", "--agent", "coder"]
+      "command": "<NOCKGUARD_PATH>",
+      "args": ["proxy", "--upstream", "<NPX_PATH> -y @modelcontextprotocol/server-filesystem <QS>", "--agent", "coder"],
+      "env": {"PATH": "<SHELL_PATH>"}
     }
   }
 }
 ```
 
-Ask your MCP client to call `read_file` with `{"path":"<QS>/hello.txt"}`: it should return `NockGuard read succeeded`. Each `tools/call` routed through this proxy is policy-checked; with auditing enabled and the per-agent key available, its decision is recorded in a signed audit trail. After the call, run:
+Save the config and restart or reload your client. Ask it to call `read_file` with `{"path":"<QS>/hello.txt"}`: it should return `NockGuard read succeeded`. Each `tools/call` routed through this proxy is policy-checked; with auditing enabled and the per-agent key available, its decision is recorded in a signed audit trail. After the call, run:
 
 ```bash
 nockguard verify --agent coder        # reads ~/.nockguard/keys/coder.pub; exit 0 and PROTECTED for a non-empty, fully checkpointed trail
