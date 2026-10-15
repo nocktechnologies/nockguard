@@ -10,7 +10,6 @@ import (
 	"mime"
 	"net"
 	"net/http"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -277,9 +276,7 @@ func jsonRPCIDMatches(reqBody []byte, respID json.RawMessage) bool {
 	if err := json.Unmarshal(reqBody, &req); err != nil || req.ID == nil {
 		return false
 	}
-	reqID, ok1 := decodeIDNumberAware(req.ID)
-	respIDVal, ok2 := decodeIDNumberAware(respID)
-	return ok1 && ok2 && reflect.DeepEqual(reqID, respIDVal)
+	return jsonRPCIDsEqual(req.ID, respID)
 }
 
 // decodeIDNumberAware decodes a JSON-RPC id with UseNumber so a large integer id

@@ -72,3 +72,46 @@ agents:
 		t.Fatal("audit.enabled=true with a path should enable the auditor")
 	}
 }
+
+func TestActionPairingRequiresDurableAuditAndDefaultsOff(t *testing.T) {
+	path := writePolicy(t, `
+agents:
+  kit:
+    allow: ["*"]
+`)
+	eng, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eng.ActionPairingEnabled() {
+		t.Fatal("action pairing must default off")
+	}
+
+	path = writePolicy(t, `
+audit:
+  enabled: false
+  action_pairing: true
+agents:
+  kit:
+    allow: ["*"]
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("action_pairing without enabled required audit was accepted")
+	}
+
+	path = writePolicy(t, `
+audit:
+  enabled: true
+  action_pairing: true
+agents:
+  kit:
+    allow: ["*"]
+`)
+	eng, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !eng.ActionPairingEnabled() {
+		t.Fatal("explicit enabled action_pairing should be available")
+	}
+}

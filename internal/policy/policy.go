@@ -32,6 +32,9 @@ type Config struct {
 type AuditPolicy struct {
 	Enabled bool   `yaml:"enabled"`
 	Path    string `yaml:"path"`
+	// ActionPairing opts the stdio proxy into schema v2 tool-call correlation.
+	// It requires enabled, required auditing; the default remains v1.
+	ActionPairing bool `yaml:"action_pairing"`
 	// SignKeyEnv names the environment variable holding the HMAC key that makes
 	// the trail tamper-evident (Phase 4 3/3). Empty = unsigned. The key is never
 	// stored in the policy file; an enabled value that does not resolve fails loud.
@@ -201,6 +204,9 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("policy %s: %w", name, err)
 	}
+	if cfg.Audit != nil && cfg.Audit.ActionPairing && !cfg.Audit.Enabled {
+		return nil, fmt.Errorf("policy %s: audit.action_pairing requires audit.enabled: true", name)
+	}
 	// Validate every glob pattern at load time so a malformed wildcard fails
 	// LOUD here rather than silently voiding a control at evaluate time (N8180).
 	// A malformed DENY glob is the dangerous case — filepath.Match returning an
@@ -332,6 +338,12 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 		}
 	}
 	return &Engine{config: cfg, warnings: warnings}, nil
+}
+
+// ActionPairingEnabled reports whether the policy opts the stdio proxy into
+// durable schema v2 action correlation. Other transports remain on v1.
+func (e *Engine) ActionPairingEnabled() bool {
+	return e != nil && e.config.Audit != nil && e.config.Audit.Enabled && e.config.Audit.ActionPairing
 }
 
 // validateGlob confirms a policy pattern is a usable glob. A literal (no '*') is
