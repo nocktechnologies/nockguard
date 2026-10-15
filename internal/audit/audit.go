@@ -1475,15 +1475,27 @@ func VerifyWithCheckpoint(path string, key []byte) (n, checkpointCount int, err 
 // VerifyBytes is Verify over an immutable in-memory snapshot. trail holds the
 // audit bytes and hwm the bytes of its .hwm sidecar (nil when absent).
 func VerifyBytes(trail, hwm, key []byte) (int, error) {
+	n, _, err := VerifyWithCheckpointBytes(trail, hwm, key)
+	return n, err
+}
+
+// VerifyWithCheckpointBytes is VerifyWithCheckpoint over an immutable
+// in-memory snapshot. It returns the checkpoint count loaded from hwm, or zero
+// when hwm is absent.
+func VerifyWithCheckpointBytes(trail, hwm, key []byte) (n, checkpointCount int, err error) {
 	var mark *highWaterMark
 	if hwm != nil {
 		m, err := parseHighWaterMark(hwm, "(snapshot)")
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		mark = m
 	}
-	return verifyHMACStream(bytes.NewReader(trail), mark, key)
+	n, err = verifyHMACStream(bytes.NewReader(trail), mark, key)
+	if mark != nil {
+		checkpointCount = mark.Count
+	}
+	return n, checkpointCount, err
 }
 
 func verifyHMACStream(r io.Reader, hwm *highWaterMark, key []byte) (int, error) {
@@ -1581,15 +1593,27 @@ func VerifyEd25519WithCheckpoint(path string, pub ed25519.PublicKey) (n, checkpo
 // here, so nothing can be swapped between verification and use. Checks and
 // error classification are identical to VerifyEd25519.
 func VerifyEd25519Bytes(trail, hwm []byte, pub ed25519.PublicKey) (int, error) {
+	n, _, err := VerifyEd25519WithCheckpointBytes(trail, hwm, pub)
+	return n, err
+}
+
+// VerifyEd25519WithCheckpointBytes is VerifyEd25519WithCheckpoint over an
+// immutable in-memory snapshot. It returns the checkpoint count loaded from
+// hwm, or zero when hwm is absent.
+func VerifyEd25519WithCheckpointBytes(trail, hwm []byte, pub ed25519.PublicKey) (n, checkpointCount int, err error) {
 	var mark *highWaterMark
 	if hwm != nil {
 		m, err := parseHighWaterMark(hwm, "(snapshot)")
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		mark = m
 	}
-	return verifyEd25519Stream(bytes.NewReader(trail), mark, pub)
+	n, err = verifyEd25519Stream(bytes.NewReader(trail), mark, pub)
+	if mark != nil {
+		checkpointCount = mark.Count
+	}
+	return n, checkpointCount, err
 }
 
 // verifyEd25519Stream is the shared Ed25519 chain walk plus high-water-mark

@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -77,6 +78,73 @@ func TestBuildPackCleanTrailAttestsIntact(t *testing.T) {
 	}
 	if pack.Framework != FrameworkSOC2 || pack.FrameworkName == "" {
 		t.Errorf("framework metadata not populated: %+v / %q", pack.Framework, pack.FrameworkName)
+	}
+}
+
+func TestBuildPackPairsContentsAndVerdictFromSameSnapshot(t *testing.T) {
+	snapshotPath := writeSignedTrail(t, []audit.Event{{Agent: "kit", Tool: "snapshot", Decision: "allow"}})
+	replacementPath := writeSignedTrail(t, []audit.Event{{Agent: "kit", Tool: "replacement", Decision: "deny"}})
+	snapshot, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := os.ReadFile(snapshotPath + ".hwm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := audit.VerifyWithCheckpoint(snapshotPath, testHMACKey); err != nil {
+		t.Fatalf("snapshot positive control did not verify: %v", err)
+	}
+	if _, _, err := audit.VerifyWithCheckpoint(replacementPath, testHMACKey); err != nil {
+		t.Fatalf("replacement positive control did not verify: %v", err)
+	}
+
+	// Negative control: reproduce BuildPack's old two-open sequence. The first
+	// read gets the FIFO's snapshot bytes; after that read is opened, the path is
+	// replaced with a different, independently valid trail before verification.
+	var oldEntries []audit.Event
+	var oldReadErr, oldVerifyErr error
+	var oldVerified int
+	withAuditPathReplacement(t, snapshot, replacementPath, checkpoint, func(path string) {
+		var raw []byte
+		raw, oldReadErr = os.ReadFile(path)
+		if oldReadErr != nil {
+			return
+		}
+		oldEntries, oldReadErr = parseEntries(raw)
+		if oldReadErr != nil {
+			return
+		}
+		oldVerified, _, oldVerifyErr = audit.VerifyWithCheckpoint(path, testHMACKey)
+	})
+	if oldReadErr != nil {
+		t.Fatalf("negative control could not read original snapshot: %v", oldReadErr)
+	}
+	if len(oldEntries) != 1 || oldEntries[0].Tool != "snapshot" {
+		t.Fatalf("negative control entries = %+v, want the original snapshot entry", oldEntries)
+	}
+	if oldVerified != 1 || oldVerifyErr == nil {
+		t.Fatalf("negative control verdict = (%d, %v), want one verified row plus checkpoint mismatch", oldVerified, oldVerifyErr)
+	}
+
+	var pack Pack
+	var buildErr error
+	withAuditPathReplacement(t, snapshot, replacementPath, checkpoint, func(path string) {
+		pack, buildErr = BuildPack(PackOptions{
+			Framework:  FrameworkSOC2,
+			AuditFiles: []string{path},
+			HMACKey:    testHMACKey,
+			Now:        fixedNow(),
+		})
+	})
+	if buildErr != nil {
+		t.Fatalf("BuildPack: %v", buildErr)
+	}
+	if len(pack.AllEvents) != 1 || pack.AllEvents[0].Tool != "snapshot" {
+		t.Fatalf("BuildPack contents = %+v, want the original snapshot entry", pack.AllEvents)
+	}
+	if !pack.Verification.ChainIntact || pack.Verification.EntriesVerified != 1 {
+		t.Fatalf("BuildPack verification = %+v, want the original snapshot's intact one-row chain", pack.Verification)
 	}
 }
 
@@ -305,7 +373,11 @@ func TestBuildPackDateFilter(t *testing.T) {
 	// All entries are stamped at the same instant (fixed run time); pick a
 	// window strictly AFTER it and confirm everything is filtered out — proving
 	// the To bound excludes. Then a window around it keeps all.
-	entries, err := readEntries(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := parseEntries(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,5 +510,60 @@ func TestKnownFramework(t *testing.T) {
 	}
 	if KnownFramework("bogus") {
 		t.Error("bogus framework should not be known")
+	}
+}
+
+func withAuditPathReplacement(t *testing.T, snapshot []byte, replacementPath string, checkpoint []byte, run func(string)) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	if err := exec.Command("mkfifo", path).Run(); err != nil {
+		t.Fatalf("create audit FIFO: %v", err)
+	}
+	if err := os.WriteFile(path+".hwm", checkpoint, 0o600); err != nil {
+		t.Fatalf("write snapshot checkpoint: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		run(path)
+	}()
+	type openResult struct {
+		file *os.File
+		err  error
+	}
+	opened := make(chan openResult, 1)
+	go func() {
+		file, err := os.OpenFile(path, os.O_WRONLY, 0)
+		opened <- openResult{file: file, err: err}
+	}()
+
+	var writer *os.File
+	select {
+	case result := <-opened:
+		if result.err != nil {
+			t.Fatalf("open audit FIFO writer: %v", result.err)
+		}
+		writer = result.file
+	case <-time.After(5 * time.Second):
+		t.Fatal("BuildPack did not open the audit FIFO")
+	}
+	defer writer.Close()
+	if _, err := writer.Write(snapshot); err != nil {
+		t.Fatalf("write original audit snapshot: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove audit FIFO path: %v", err)
+	}
+	if err := os.Symlink(replacementPath, path); err != nil {
+		t.Fatalf("replace audit path with symlink: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close audit FIFO writer: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("audit read did not finish after the FIFO writer closed")
 	}
 }
