@@ -13,7 +13,9 @@ import (
 // session verdict computed by internal/sessionverify (shared with the Live Wall).
 // Exit codes follow `verify`: 0 = PROTECTED, 2 = TAMPERED, 1 = anything else.
 
-const sessionUsage = "usage: nockguard verify --session <id> --lock-db <path> --guard-trail <path> (--pub-env <ENV> | --lock-pub-env <ENV> --guard-pub-env <ENV>) [--json]"
+const sessionIDTrustNote = "Session IDs come from NOCKLOCK_SESSION_ID in the launching process's environment and are not authenticated."
+
+const sessionUsage = "usage: nockguard verify --session <id> --lock-db <path> --guard-trail <path> (--pub-env <ENV> | --lock-pub-env <ENV> --guard-pub-env <ENV>) [--json]\n" + sessionIDTrustNote
 
 // hasSessionFlag reports whether a verify invocation is the --session form.
 func hasSessionFlag(args []string) bool {
@@ -109,7 +111,10 @@ func runVerifySession(args []string) int {
 
 	res := sessionverify.Verify(session, lockDB, lockPub, guardTrail, guardPub)
 	if jsonOutput {
-		writeJSON(res)
+		writeJSON(struct {
+			sessionverify.Result
+			SessionIDNote string `json:"session_id_note"`
+		}{res, sessionIDTrustNote})
 	} else {
 		printSessionResult(res)
 	}
@@ -129,6 +134,7 @@ func sessionExitCode(verdict string) int {
 
 func printSessionResult(res sessionverify.Result) {
 	fmt.Printf("Session %s\n", res.SessionID)
+	fmt.Println(sessionIDTrustNote)
 	tail := func(c sessionverify.ChainResult, what string) string {
 		if c.TailVerified {
 			return "tail verified (" + what + ")"

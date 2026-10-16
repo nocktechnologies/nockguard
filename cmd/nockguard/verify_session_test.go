@@ -155,7 +155,7 @@ func TestSessionVerify_BothIntactIsProtected(t *testing.T) {
 	f := newSessionFixture(t)
 	out := requireVerdict(t, f.args(sessA), "PROTECTED", 0)
 	lockPub, _ := hex.DecodeString(os.Getenv(lockEnv))
-	for _, want := range []string{fp(lockPub), fp(f.guardPub), "--against-remote-anchor", "3 rows", "3 of 4"} {
+	for _, want := range []string{fp(lockPub), fp(f.guardPub), "--against-remote-anchor", "3 rows", "3 of 4", sessionIDTrustNote} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("PROTECTED output missing %q:\n%s", want, out)
 		}
@@ -406,6 +406,10 @@ func TestSessionVerify_MissingFlagIsError(t *testing.T) {
 			t.Fatalf("%s: usage error must explain itself on stderr", name)
 		}
 	}
+	code, _, stderr := runCommandForTest(t, "verify", "--session", "--unknown")
+	if code != 1 || !strings.Contains(stderr, sessionIDTrustNote) {
+		t.Fatalf("usage text must explain that session IDs are unauthenticated: exit=%d\nstderr:\n%s", code, stderr)
+	}
 }
 
 func TestSessionVerify_JSON(t *testing.T) {
@@ -418,11 +422,12 @@ func TestSessionVerify_JSON(t *testing.T) {
 		Reason       string `json:"reason"`
 	}
 	type out struct {
-		Verdict      string `json:"verdict"`
-		SessionID    string `json:"session_id"`
-		Lock         chain  `json:"lock"`
-		Guard        chain  `json:"guard"`
-		RollbackNote string `json:"rollback_note"`
+		Verdict       string `json:"verdict"`
+		SessionID     string `json:"session_id"`
+		SessionIDNote string `json:"session_id_note"`
+		Lock          chain  `json:"lock"`
+		Guard         chain  `json:"guard"`
+		RollbackNote  string `json:"rollback_note"`
 	}
 	f := newSessionFixture(t)
 	lockPub, _ := hex.DecodeString(os.Getenv(lockEnv))
@@ -432,7 +437,7 @@ func TestSessionVerify_JSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s\n%s", err, stdout, stderr)
 	}
-	if code != 0 || got.Verdict != "PROTECTED" || got.SessionID != sessA {
+	if code != 0 || got.Verdict != "PROTECTED" || got.SessionID != sessA || got.SessionIDNote != sessionIDTrustNote {
 		t.Fatalf("json intact: exit=%d %+v", code, got)
 	}
 	if got.Lock.Verdict != "INTACT" || got.Lock.Rows != 3 || !got.Lock.TailVerified || got.Lock.KeyID != fp(lockPub) || got.Lock.Path != f.lockDB {

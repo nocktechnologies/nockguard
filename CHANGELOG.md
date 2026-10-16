@@ -4,6 +4,8 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+- Clarify that `verify --session` session IDs come from the launching process's environment and are not authenticated.
+
 ### Changed
 
 - `egress-proxy` requires a loopback listen address unless `--allow-remote` is passed; remote binds print a warning.
