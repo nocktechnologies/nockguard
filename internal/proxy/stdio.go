@@ -1367,6 +1367,24 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 		var canonicalMsg *jsonrpc.Message
 		if p.actionPairing {
 			canonicalTopLevel, canonicalLine, canonicalMsg, canonicalFailure = canonicalizeMessage(scanner.Bytes())
+			// Check before action creation and duplicate-ID auditing, which also record names.
+			if canonicalFailure == canonicalMessageOK && canonicalMsg != nil {
+				kind, name := "method", canonicalMsg.Method
+				if name == "tools/call" {
+					kind = "tool"
+					name, _, _ = canonicalToolCall(canonicalMsg.Params)
+				}
+				if d, rejected := p.rejectOversizedName(kind, name, canonicalMsg.ID); rejected {
+					p.resolveAudit(seq)
+					if p.requiredAudit && p.auditor.RequiredError() != nil {
+						d.rejectCode, d.rejectMsg = -32603, AuditBeforeForwardError
+					}
+					if err := p.rejectToAgent(d.rejectID, d.rejectCode, d.rejectMsg); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			if canonicalFailure == canonicalMessageOK && canonicalMsg != nil && canonicalMsg.Method == "tools/call" {
 				var err error
 				actionID, err = p.newActionID()
@@ -1590,6 +1608,20 @@ func (p *StdioProxy) decide(line []byte, seq uint64) mcpDecision {
 	return p.decideCanonical(topLevel, canonicalLine, msg, failure, seq)
 }
 
+// maxRequestNameBytes bounds agent-controlled method and tool names before audit or dispatch.
+const maxRequestNameBytes = 256
+
+func (p *StdioProxy) rejectOversizedName(kind, name string, id json.RawMessage) (mcpDecision, bool) {
+	if len(name) <= maxRequestNameBytes {
+		return mcpDecision{}, false
+	}
+	// Keep the diagnostic small and valid UTF-8 so signed bytes survive JSON decoding.
+	prefix := strings.ToValidUTF8(name[:32], "�")
+	p.auditMethod(prefix, "method-deny", fmt.Sprintf("oversized-%s-name bytes=%d prefix=%q", kind, len(name), prefix))
+	return mcpDecision{reject: true, rejectID: id, rejectCode: -32600,
+		rejectMsg: "nockguard: method or tool name exceeds 256 bytes"}, true
+}
+
 func (p *StdioProxy) decideCanonical(topLevel map[string]json.RawMessage, canonicalLine []byte, msg *jsonrpc.Message, failure canonicalMessageFailure, seq uint64) mcpDecision {
 	switch failure {
 	case canonicalMessageUndecodable:
@@ -1611,6 +1643,10 @@ func (p *StdioProxy) decideCanonical(topLevel map[string]json.RawMessage, canoni
 		p.logger.Printf("REJECT agent=%s reason=undecodable-after-canonicalize", p.agent)
 		return mcpDecision{reject: true, rejectID: json.RawMessage("null"), rejectCode: -32700,
 			rejectMsg: "nockguard: rejected — message is not a well-formed JSON-RPC object"}
+	}
+
+	if d, rejected := p.rejectOversizedName("method", msg.Method, msg.ID); rejected {
+		return d
 	}
 
 	// Gate tools/call by METHOD, regardless of id: a notification-form call
@@ -1648,6 +1684,9 @@ func (p *StdioProxy) decideCanonical(topLevel map[string]json.RawMessage, canoni
 // re-marshaled bytes (used verbatim on the fail-closed unextractable-name path).
 func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]json.RawMessage, canonicalLine []byte, seq uint64) mcpDecision {
 	toolName, canonicalParams, ok := canonicalToolCall(msg.Params)
+	if d, rejected := p.rejectOversizedName("tool", toolName, msg.ID); rejected {
+		return d
+	}
 	// Extract auditable references from tool arguments.
 	refs := extract.FromToolCall(toolName, canonicalParams)
 	if !ok || toolName == "" {
