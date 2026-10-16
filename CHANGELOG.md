@@ -4,19 +4,28 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
-- Clarify that `verify --session` session IDs come from the launching process's environment and are not authenticated.
+## [0.9.0] - 2026-10-16
+
+v0.9.0 tightens Telegram approvals: only listed users in the configured chat can decide held calls, callbacks use random nonces, rejected taps get a reply without stalling, and polling respects the hold deadline. The MCP listener validates loopback Host headers, rejects any `Origin` header and requires `application/json` on POST requests; remote egress proxy binds now need explicit opt-in. Non-tool MCP methods get distinct audit decisions and optional denials, the HTTP bridge forwards canonical messages, the upstream child no longer inherits the audit-forwarder key, and policy proposals verify their audit input.
+
+### Upgrade notes
+
+- `egress-proxy` now refuses a non-loopback listen address unless `--allow-remote` is passed. Existing remote binds must add this flag to start; remote binds print a warning.
+- Telegram approval now needs `NOCKGUARD_APPROVER_IDS`, a comma-separated list of numeric Telegram user IDs. `NOCKGUARD_APPROVAL_CHAT_ID` must be a numeric chat ID; a `@channel` name no longer works. If either is missing or invalid, the Telegram approver does not start and every `ask` and `require_approval` call is denied. A v0.8.0 setup with only the bot token and chat ID must add the approver IDs.
+- `mcp-listen` returns 415 for a POST unless it sends one `Content-Type` header with media type `application/json` (parameters such as `charset` are allowed), and the local listener returns 403 for any request with an `Origin` header, including `null`. Methods other than POST get 405. Native MCP clients omit `Origin`; browser-based or custom clients may need changes.
+- Audit trails now contain `method-allow` and `method-deny` rows for non-tool MCP methods. Scripts that count audit rows or match on decision values will see these new values.
 
 ### Changed
 
+- Clarify that `verify --session` session IDs come from the launching process's environment and are not authenticated.
 - `egress-proxy` requires a loopback listen address unless `--allow-remote` is passed; remote binds print a warning.
 
 ### Fixed
 
 - Telegram approval polling respects the hold deadline and preserves in-time approvals when callback replies are slow.
-
 - Telegram approvals require listed user IDs and the configured chat, and use random callback nonces.
 - `policy propose` verifies its audit input and lists tool names containing glob characters as comments instead of rules.
-- `mcp-listen` validates loopback Host headers, rejects browser Origin headers and requires `application/json` requests before forwarding.
+- `mcp-listen` validates loopback Host headers, rejects any `Origin` header and requires `application/json` POST requests before forwarding.
 - Non-tool MCP methods now record distinct `method-allow` / `method-deny` audit decisions, excluded from tool proposals and tool decision counts. Method rows are written immediately; denied requests return JSON-RPC `-32601`. The optional per-agent `deny_methods` list refuses exact method names before forwarding; other methods continue to pass through by default.
 - The HTTP MCP bridge forwards canonical messages so forwarded tool calls and their audit records agree, and returns an invalid-request error for rejected requests with an ID instead of leaving clients waiting.
 - Stdio MCP rejection messages use "ambiguous message key" for conflicting method or params aliases.
