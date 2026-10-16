@@ -872,3 +872,27 @@ func TestPolicyCheckLoadOnly(t *testing.T) {
 		t.Fatalf("no --policy exit = %d, want 1", code)
 	}
 }
+
+func TestEgressProxyRemoteBindOptIn(t *testing.T) {
+	dir := t.TempDir()
+	policyPath := writeMCPListenPolicy(t, dir, "")
+	for _, allow := range []bool{false, true} {
+		args := []string{"egress-proxy", "--listen", "0.0.0.0:65536", "--agent", "demo", "--policy", policyPath}
+		if allow {
+			args = append(args, "--allow-remote")
+		}
+		code, _, stderr := runCommandForTest(t, args...)
+		if code != 1 {
+			t.Fatalf("exit code=%d, want 1; stderr: %s", code, stderr)
+		}
+		// An out-of-range port avoids opening a remote socket while proving the flag
+		// reaches Run: opt-in must warn before the bind fails.
+		if allow {
+			if !strings.Contains(stderr, "WARNING: --allow-remote") || !strings.Contains(stderr, "unauthenticated") {
+				t.Fatalf("remote opt-in did not warn: %s", stderr)
+			}
+		} else if !strings.Contains(stderr, "must use a loopback host") {
+			t.Fatalf("missing loopback refusal: %s", stderr)
+		}
+	}
+}

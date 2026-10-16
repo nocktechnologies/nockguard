@@ -17,13 +17,14 @@ import (
 )
 
 type Proxy struct {
-	listen  string
-	agent   string
-	engine  *policy.Engine
-	auditor *audit.Auditor
-	logger  *log.Logger
-	client  *http.Transport
-	enforce bool
+	listen      string
+	agent       string
+	engine      *policy.Engine
+	auditor     *audit.Auditor
+	logger      *log.Logger
+	client      *http.Transport
+	enforce     bool
+	allowRemote bool
 }
 
 func New(listen, agent string, engine *policy.Engine, auditor *audit.Auditor, logger *log.Logger) *Proxy {
@@ -48,9 +49,32 @@ func (p *Proxy) WithEnforce(enforce bool) *Proxy {
 	return p
 }
 
+// WithAllowRemote permits a non-loopback listener. Run logs a warning for it.
+func (p *Proxy) WithAllowRemote(allow bool) *Proxy {
+	p.allowRemote = allow
+	return p
+}
+
 func (p *Proxy) Run(ctx context.Context) error {
+	remote, err := validateListen(p.listen, p.allowRemote)
+	if err != nil {
+		return err
+	}
+	if remote {
+		logger := p.logger
+		if logger == nil {
+			logger = log.Default()
+		}
+		logger.Printf("WARNING: --allow-remote exposes an unauthenticated HTTP/CONNECT proxy on %s; restrict access with external network controls", p.listen)
+	}
+	listen := p.listen
+	host, port, _ := net.SplitHostPort(listen)
+	if host == "localhost" {
+		listen = net.JoinHostPort("127.0.0.1", port)
+	}
+
 	srv := &http.Server{
-		Addr:              p.listen,
+		Addr:              listen,
 		Handler:           p,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -414,9 +438,12 @@ func guardedDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	return dialer.DialContext(ctx, network, net.JoinHostPort(safe.String(), port))
 }
 
-func ValidateConfig(listen, agent string, engine *policy.Engine) error {
+func ValidateConfig(listen, agent string, engine *policy.Engine, allowRemote bool) error {
 	if listen == "" {
 		return fmt.Errorf("--listen is required")
+	}
+	if _, err := validateListen(listen, allowRemote); err != nil {
+		return err
 	}
 	if agent == "" {
 		return fmt.Errorf("--agent is required")
@@ -425,4 +452,18 @@ func ValidateConfig(listen, agent string, engine *policy.Engine) error {
 		return fmt.Errorf("policy engine is required")
 	}
 	return nil
+}
+
+// validateListen accepts only explicit loopback hosts unless remote access is enabled.
+func validateListen(addr string, allowRemote bool) (bool, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false, fmt.Errorf("listen address %q must be host:port: %w", addr, err)
+	}
+	ip := net.ParseIP(host)
+	remote := host != "localhost" && (ip == nil || !ip.IsLoopback())
+	if remote && !allowRemote {
+		return false, fmt.Errorf("listen address %q must use a loopback host; pass --allow-remote to permit a non-loopback bind", addr)
+	}
+	return remote, nil
 }

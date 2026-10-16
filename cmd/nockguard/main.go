@@ -477,11 +477,12 @@ func parsePolicyAuditArgs(args []string) (agent, auditPath string, ok bool) {
 
 func runEgressProxy(args []string) int {
 	var (
-		listen     string
-		agent      string
-		policyPath string
-		auditPath  string
-		enforce    bool
+		listen      string
+		agent       string
+		policyPath  string
+		auditPath   string
+		enforce     bool
+		allowRemote bool
 	)
 
 	for i := 0; i < len(args); i++ {
@@ -506,6 +507,8 @@ func runEgressProxy(args []string) int {
 				i++
 				auditPath = args[i]
 			}
+		case "--allow-remote":
+			allowRemote = true
 		case "--enforce":
 			enforce = true
 		}
@@ -527,7 +530,7 @@ func runEgressProxy(args []string) int {
 	for _, warn := range engine.Warnings() {
 		fmt.Fprintf(os.Stderr, "warning policy: %s\n", warn)
 	}
-	if err := forwardhttp.ValidateConfig(listen, agent, engine); err != nil {
+	if err := forwardhttp.ValidateConfig(listen, agent, engine, allowRemote); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
@@ -556,7 +559,7 @@ func runEgressProxy(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := forwardhttp.New(listen, agent, engine, auditor, logger).WithEnforce(enforce).Run(ctx); err != nil {
+	if err := forwardhttp.New(listen, agent, engine, auditor, logger).WithEnforce(enforce).WithAllowRemote(allowRemote).Run(ctx); err != nil {
 		logger.Printf("egress proxy error: %v", err)
 		return 1
 	}
@@ -1542,7 +1545,7 @@ Usage:
   nockguard mcp-http --upstream <url> --agent <name> [--policy <path>] [--auth-env <ENV>] [--audit-best-effort]
   nockguard mcp-listen --listen 127.0.0.1:<port> --upstream <url> --agent <name> [--policy <path>] [--audit <path>] [--audit-best-effort]
   nockguard mcp-gateway --config <path>  (OAuth resource behind a loopback HTTPS ingress)
-  nockguard egress-proxy --listen <addr> --agent <name> [--policy <path>] [--audit <path>] [--enforce]
+  nockguard egress-proxy --listen <addr> --agent <name> [--policy <path>] [--audit <path>] [--enforce] [--allow-remote]
   nockguard verify (--all | --agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
   nockguard verify --session <id> --lock-db <path> --guard-trail <path> (--pub-env <ENV> | --lock-pub-env <ENV> --guard-pub-env <ENV>) [--json]
   nockguard verify --export <wall.proof.json> (--agent <name> | --ed25519-pub-env <ENV>)
@@ -1561,7 +1564,8 @@ Usage:
 Options:
   --upstream         MCP server command to proxy (for: proxy) or HTTP MCP upstream URL (for: mcp-http, mcp-listen)
   --auth-env         Env var whose value is sent as the Authorization header to the HTTP upstream (for: mcp-http)
-  --listen           Listen address (for: mcp-listen use explicit loopback only; for: egress-proxy)
+  --allow-remote     Permit a non-loopback egress-proxy bind (warns; no caller authentication)
+  --listen           Listen address (for: mcp-listen use explicit loopback only; for: egress-proxy loopback unless --allow-remote)
   --agent            Agent identity for policy lookup / per-agent keypair flow
   --policy           Path to policy YAML (default: ~/.nockguard/policy.yaml)
   --enforce          Block denied egress hosts (returns 403); default is observe-only (logs but allows)
