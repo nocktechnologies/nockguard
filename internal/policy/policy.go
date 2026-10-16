@@ -978,6 +978,15 @@ func (e *Engine) SigningKeyEnvNamesFor(_ string) []string {
 	return names
 }
 
+// ForwarderKeyEnvNames returns the configured forwarder credential variable,
+// even when forwarding is disabled. Upstream children do not need this key.
+func (e *Engine) ForwarderKeyEnvNames() []string {
+	if e.config.Audit == nil || e.config.Audit.Forward == nil || e.config.Audit.Forward.APIKeyEnv == "" {
+		return nil
+	}
+	return []string{e.config.Audit.Forward.APIKeyEnv}
+}
+
 // Forwarder builds the NockCC ops-log forwarder from config. Returns a disabled
 // (nil-safe) forwarder when forwarding is absent or disabled. An enabled forward
 // block must specify a url and, if api_key_env is given, that variable must

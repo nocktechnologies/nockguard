@@ -115,3 +115,30 @@ agents:
 		t.Fatal("api_key_env pointing at an unset variable should fail loud")
 	}
 }
+
+func TestForwarderKeyEnvNames(t *testing.T) {
+	for _, tc := range []struct{ name, body, want string }{
+		{"no audit", "", ""},
+		{"no forwarder", "audit: {}", ""},
+		{"no key", "audit: {forward: {enabled: true}}", ""},
+		{"enabled", "audit: {forward: {enabled: true, api_key_env: CUSTOM_FORWARD_KEY}}", "CUSTOM_FORWARD_KEY"},
+		{"disabled", "audit: {forward: {enabled: false, api_key_env: CUSTOM_FORWARD_KEY}}", "CUSTOM_FORWARD_KEY"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eng, err := Load(writePolicy(t, "agents: {test: {allow: [\"*\"]}}\n"+tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := eng.ForwarderKeyEnvNames()
+			if tc.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("got %v, want no names", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("got %v, want [%s]", got, tc.want)
+			}
+		})
+	}
+}
