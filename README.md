@@ -171,7 +171,7 @@ agents:
 
 Policy verdict precedence is `deny` first, then `ask`, then normal allow/mode logic. An `Ask` verdict is not a warning or "flag but pass" result: the call is withheld until approval. Any state-write intents attached to the policy decision are also withheld; NockGuard applies them only after approval, and drops them on denial or timeout. The legacy `require_approval` key remains accepted for existing policies, but new policies should use `ask`. An `ask` call needs an approver: the dedicated Telegram bot, or the network-free local approver (`NOCKGUARD_APPROVER=local`, see "Local approver" under Phase 5 below). With neither, every `ask` call is denied.
 
-For Telegram approval, set `NOCKGUARD_APPROVAL_BOT_TOKEN`, `NOCKGUARD_APPROVAL_CHAT_ID`, and `NOCKGUARD_APPROVER_IDS` (a comma-separated list of numeric Telegram user IDs). A callback approves or denies only when its sender is listed and its message belongs to the configured chat. Missing or invalid approver IDs prevent the Telegram approver from starting; gated calls fail closed. Rejected taps are ignored and recorded as `block` audit events when auditing is enabled.
+For Telegram approval, set `NOCKGUARD_APPROVAL_BOT_TOKEN`, `NOCKGUARD_APPROVAL_CHAT_ID`, and `NOCKGUARD_APPROVER_IDS` (a comma-separated list of numeric Telegram user IDs). A callback approves or denies only when its sender is listed and its message belongs to the configured chat. Missing or invalid approver IDs prevent the Telegram approver from starting; gated calls fail closed. Rejected taps receive a short refusal and leave the call held. The stdio proxy and HTTP enforcement listener share the approval gate, so the first rejected tap on each held request records one `block` audit row and forwards one `high` severity NockCC event when forwarding is enabled. Later taps are counted in a local summary log without adding audit rows or alerts. The `mcp-http` bridge is observe-only and does not ask for approval.
 
 Rate limiting and spend caps are opt-in and independent — set one, both, or neither. NockGuard sits at the MCP layer and sees tool *calls*, not upstream API token spend, so the spend cap is denominated in tool calls (a proxy for cost), enforced before the call reaches the server. When a call clears the allowlist and input validation but exceeds a limit, the agent receives a JSON-RPC error (`rate limit exceeded` / `spend cap exceeded`); policy-denied or input-blocked calls never consume budget. Ask calls are metered before the approval prompt, preserving the existing Phase 5 gate order.
 
@@ -242,7 +242,7 @@ Each decision is one JSON object per line (JSON Lines):
 {"ts":"2026-06-03T18:30:01Z","agent":"coder","tool":"read_file","decision":"allow","reason":"allow-rule \"read_*\""}
 ```
 
-`decision` is one of `allow`, `deny`, `would-deny` (shadow dry-run miss), `block` (input validation), `ratelimit`, `approval-granted`, `approval-denied`, `state-write`, `hide` (filtered from `tools/list`), or `dispatch` (required-audit permission to forward).
+`decision` is one of `allow`, `deny`, `would-deny` (shadow dry-run miss), `block` (input validation or a rejected Telegram approval tap), `ratelimit`, `approval-granted`, `approval-denied`, `state-write`, `hide` (filtered from `tools/list`), or `dispatch` (required-audit permission to forward).
 
 When auditing is enabled, `proxy`, `mcp-http`, and `mcp-listen` persist a decision
 before forwarding a tool call. A pre-forward write failure refuses that call;
@@ -314,7 +314,7 @@ audit:
     api_key_env: NOCKCC_API_KEY   # the key is read from this env var, never stored in the policy file
 ```
 
-Forwarding is **asynchronous and fail-open**: events post on a background worker, `Enqueue` never blocks (it drops if the buffer saturates), and any HTTP/transport error is swallowed — a slow or unreachable NockCC can never stall or fail a tool call. Severity maps as `block → high` (an injection / secret-exfil attempt), `would-deny → info`, and `deny` / `ratelimit → warn`. Misconfiguration (forwarding enabled with no `url`, or an `api_key_env` that doesn't resolve) fails loud at startup rather than silently dropping every event.
+Forwarding is **asynchronous and fail-open**: events post on a background worker, `Enqueue` never blocks (it drops if the buffer saturates), and any HTTP/transport error is swallowed — a slow or unreachable NockCC can never stall or fail a tool call. Severity maps as `block → high` (an input-validation block or the first rejected Telegram approval tap), `would-deny → info`, and `deny` / `ratelimit → warn`. Misconfiguration (forwarding enabled with no `url`, or an `api_key_env` that doesn't resolve) fails loud at startup rather than silently dropping every event.
 
 Replace `command.example.com` with the base URL of your own Command Center.
 

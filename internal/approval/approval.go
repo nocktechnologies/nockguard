@@ -14,7 +14,7 @@ type Request struct {
 	Tool          string
 	Params        json.RawMessage     // MCP tools/call params, including name and arguments
 	Reason        string              // why the call is held (policy reason); never arguments
-	OnRejectedTap func(reason string) // records an ignored Telegram callback while the call stays held
+	OnRejectedTap func(reason string) // call synchronously during Ask for a rejected Telegram callback
 }
 
 // Verdict is the human (or fail-safe) answer. Reason is recorded in the audit

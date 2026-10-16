@@ -284,8 +284,10 @@ func (p *StdioProxy) appendAuditWithApprovalActor(seq uint64, tool, decision, re
 	}
 	p.auditTodo[seq] = append(p.auditTodo[seq], ev)
 
-	// Apply trust outcome and forward to ops-log immediately (not deferred).
-	if p.trust.Enabled() {
+	// A rejected Telegram tap is an outside actor's action, not agent behavior.
+	// Keep its audit and alert without lowering the agent's trust score.
+	// Other block producers use fixed validator names or their own prefixes.
+	if p.trust.Enabled() && !(decision == "block" && strings.HasPrefix(reason, "telegram-callback-")) {
 		if outcome, ok := trust.DecisionToOutcome(decision); ok {
 			p.trust.ApplyOutcome(outcome)
 		}
@@ -1794,12 +1796,19 @@ func (p *StdioProxy) approveAsk(tool string, params json.RawMessage, refs *extra
 		p.resolveAudit(seq)
 		return false
 	}
+	var rejectedTaps int
 	v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: tool, Params: params, Reason: dec.Reason,
 		OnRejectedTap: func(reason string) {
-			p.logger.Printf("APPROVAL-CALLBACK-BLOCKED agent=%s tool=%s reason=%s", p.agent, tool, reason)
-			p.appendAudit(seq, tool, "block", reason, refs)
+			rejectedTaps++
+			if rejectedTaps == 1 {
+				p.logger.Printf("APPROVAL-CALLBACK-BLOCKED agent=%s tool=%s reason=%s", p.agent, tool, reason)
+				p.appendAudit(seq, tool, "block", reason, refs)
+			}
 		},
 	})
+	if rejectedTaps > 1 {
+		p.logger.Printf("APPROVAL-CALLBACK-BLOCKED-SUMMARY agent=%s tool=%s rejected-taps=%d", p.agent, tool, rejectedTaps)
+	}
 	if !v.Approved {
 		p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)
 		p.appendAuditWithApprovalActor(seq, tool, "approval-denied", v.Reason, refs, v.ApprovalActor)
