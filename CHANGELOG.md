@@ -4,16 +4,22 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
-- Clarify that `verify --session` session IDs come from the launching process's environment and are not authenticated.
+## [0.9.0] - 2026-10-16
+
+v0.9.0 tightens Telegram approvals: only listed users in the configured chat can decide held calls, callbacks use random nonces, rejected taps get a reply without stalling, and polling respects the hold deadline. The MCP listener validates loopback Host headers, rejects browser Origin headers and requires `application/json`; remote egress proxy binds now need explicit opt-in. Non-tool MCP methods get distinct audit decisions and optional denials, the HTTP bridge forwards canonical messages, the upstream child no longer inherits the audit-forwarder key, and policy proposals verify their audit input.
+
+### Upgrade notes
+
+- `egress-proxy` now refuses a non-loopback listen address unless `--allow-remote` is passed. Existing remote binds must add this flag to start; remote binds print a warning.
 
 ### Changed
 
+- Clarify that `verify --session` session IDs come from the launching process's environment and are not authenticated.
 - `egress-proxy` requires a loopback listen address unless `--allow-remote` is passed; remote binds print a warning.
 
 ### Fixed
 
 - Telegram approval polling respects the hold deadline and preserves in-time approvals when callback replies are slow.
-
 - Telegram approvals require listed user IDs and the configured chat, and use random callback nonces.
 - `policy propose` verifies its audit input and lists tool names containing glob characters as comments instead of rules.
 - `mcp-listen` validates loopback Host headers, rejects browser Origin headers and requires `application/json` requests before forwarding.
