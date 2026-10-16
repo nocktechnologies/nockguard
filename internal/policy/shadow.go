@@ -2,12 +2,15 @@ package policy
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
+	"github.com/nocktechnologies/nockguard/internal/sessionverify"
 )
 
 type ShadowMiss struct {
@@ -15,10 +18,38 @@ type ShadowMiss struct {
 	Count int
 }
 
-func ProposeShadowFromAudit(agent, path string) ([]string, error) {
-	events, err := readAuditEvents(path)
+type ShadowProposal struct {
+	Tools   []string
+	Skipped []string
+}
+
+func ProposeShadowFromAudit(agent, path string) (ShadowProposal, error) {
+	key, _, err := ResolveAgentPub(agent)
 	if err != nil {
-		return nil, err
+		return ShadowProposal{}, err
+	}
+	if key == "" {
+		return ShadowProposal{}, fmt.Errorf("no public key configured for agent %q", agent)
+	}
+	pub, err := audit.PublicKeyFromHex(key)
+	if err != nil {
+		return ShadowProposal{}, err
+	}
+	// Reuse the verifier's bounded, single-read snapshot for verification and selection.
+	trail, hwm, err := sessionverify.ReadGuard(path, 64*audit.MaxTrailLineBytes)
+	if err != nil {
+		return ShadowProposal{}, err
+	}
+	n, checkpoint, err := audit.VerifyEd25519WithCheckpointBytes(trail, hwm, pub)
+	if err != nil {
+		return ShadowProposal{}, fmt.Errorf("verify audit trail: %w", err)
+	}
+	if n == 0 || checkpoint != n {
+		return ShadowProposal{}, fmt.Errorf("proposal requires a non-empty, fully checkpointed audit trail")
+	}
+	events, err := decodeAuditEvents(bytes.NewReader(trail), path)
+	if err != nil {
+		return ShadowProposal{}, err
 	}
 	seen := map[string]struct{}{}
 	for _, ev := range events {
@@ -27,11 +58,17 @@ func ProposeShadowFromAudit(agent, path string) ([]string, error) {
 		}
 	}
 	tools := make([]string, 0, len(seen))
+	var skipped []string
 	for tool := range seen {
-		tools = append(tools, tool)
+		if isGlobPattern(tool) {
+			skipped = append(skipped, tool)
+		} else {
+			tools = append(tools, tool)
+		}
 	}
 	sort.Strings(tools)
-	return tools, nil
+	sort.Strings(skipped)
+	return ShadowProposal{Tools: tools, Skipped: skipped}, nil
 }
 
 func ShadowReportFromAudit(agent, path string) ([]ShadowMiss, error) {
@@ -65,8 +102,13 @@ func readAuditEvents(path string) ([]audit.Event, error) {
 	}
 	defer f.Close()
 
+	return decodeAuditEvents(f, path)
+}
+
+func decodeAuditEvents(r io.Reader, path string) ([]audit.Event, error) {
 	var out []audit.Event
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), audit.MaxTrailLineBytes)
 	for line := 1; sc.Scan(); line++ {
 		var ev audit.Event
 		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {

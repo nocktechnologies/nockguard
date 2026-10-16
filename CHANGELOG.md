@@ -8,6 +8,10 @@ All notable changes to NockGuard are documented here.
 
 - `egress-proxy` requires a loopback listen address unless `--allow-remote` is passed; remote binds print a warning.
 
+### Fixed
+
+- `policy propose` verifies its audit input and lists tool names containing glob characters as comments instead of rules.
+
 ## [0.8.0] - 2026-10-15
 
 v0.8.0 fixes policy patterns that use `?` or character classes, which loaded without error but matched only as literal text. The Wall now checks the Host of every request and serves only on loopback unless you opt in. Local approvals record the approver's UID in the signed trail, and an opt-in audit mode pairs each tool call with its observed outcome.

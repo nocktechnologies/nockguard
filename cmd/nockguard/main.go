@@ -372,7 +372,7 @@ func runPolicyPropose(args []string) int {
 	if !ok {
 		return 1
 	}
-	tools, err := policy.ProposeShadowFromAudit(agent, auditPath)
+	proposal, err := policy.ProposeShadowFromAudit(agent, auditPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error reading audit trail: %v\n", err)
 		return 1
@@ -385,7 +385,7 @@ func runPolicyPropose(args []string) int {
 		Agents map[string]proposedAgentPolicy `yaml:"agents"`
 	}{
 		Agents: map[string]proposedAgentPolicy{
-			agent: {Mode: "allow", Shadow: tools},
+			agent: {Mode: "allow", Shadow: proposal.Tools},
 		},
 	}
 	data, err := yaml.Marshal(out)
@@ -394,6 +394,9 @@ func runPolicyPropose(args []string) int {
 		return 1
 	}
 	fmt.Print(string(data))
+	for _, tool := range proposal.Skipped {
+		fmt.Printf("# Skipped tool name containing glob characters: %q\n", tool)
+	}
 	return 0
 }
 
