@@ -13,6 +13,8 @@ All notable changes to NockGuard are documented here.
 - `policy propose` verifies its audit input and lists tool names containing glob characters as comments instead of rules.
 - `mcp-listen` validates loopback Host headers, rejects browser Origin headers and requires `application/json` requests before forwarding.
 - Non-tool MCP methods now record distinct `method-allow` / `method-deny` audit decisions, excluded from tool proposals and tool decision counts. Method rows are written immediately; denied requests return JSON-RPC `-32601`. The optional per-agent `deny_methods` list refuses exact method names before forwarding; other methods continue to pass through by default.
+- The HTTP MCP bridge forwards canonical messages so forwarded tool calls and their audit records agree, and returns an invalid-request error for rejected requests with an ID instead of leaving clients waiting.
+- Stdio MCP rejection messages use "ambiguous message key" for conflicting method or params aliases.
 
 ## [0.8.0] - 2026-10-15
 

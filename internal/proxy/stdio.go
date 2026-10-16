@@ -1529,7 +1529,7 @@ type canonicalMessageFailure int
 const (
 	canonicalMessageOK canonicalMessageFailure = iota
 	canonicalMessageUndecodable
-	canonicalMessageAmbiguousParams
+	canonicalMessageAmbiguousKey
 	canonicalMessageMarshalFailed
 	canonicalMessageDecodeFailed
 )
@@ -1539,15 +1539,22 @@ func canonicalizeMessage(line []byte) (map[string]json.RawMessage, []byte, *json
 	if err := json.Unmarshal(line, &topLevel); err != nil {
 		return nil, nil, nil, canonicalMessageUndecodable
 	}
-	for key, value := range topLevel {
-		if key == "params" || !strings.EqualFold(key, "params") {
-			continue
+	for _, field := range []string{"params", "method"} {
+		_, exactPresent := topLevel[field]
+		for key, value := range topLevel {
+			if key == field || !strings.EqualFold(key, field) {
+				continue
+			}
+			if _, exists := topLevel[field]; exists {
+				if field == "method" && exactPresent {
+					delete(topLevel, key)
+					continue
+				}
+				return nil, nil, nil, canonicalMessageAmbiguousKey
+			}
+			topLevel[field] = value
+			delete(topLevel, key)
 		}
-		if _, exists := topLevel["params"]; exists {
-			return nil, nil, nil, canonicalMessageAmbiguousParams
-		}
-		topLevel["params"] = value
-		delete(topLevel, key)
 	}
 	canonicalLine, err := json.Marshal(topLevel)
 	if err != nil {
@@ -1569,7 +1576,7 @@ func canonicalizeMessage(line []byte) (map[string]json.RawMessage, []byte, *json
 func (p *StdioProxy) decide(line []byte, seq uint64) mcpDecision {
 	// Canonicalize the TOP-LEVEL message before doing anything else. Unmarshal
 	// into a map so any duplicate top-level keys (method, id, params, ...)
-	// collapse to Go's last-wins value. Canonicalize case-folded params aliases
+	// collapse to Go's last-wins value. Canonicalize case-folded method and params aliases
 	// (or reject a conflict) before re-marshaling, so the bytes the proxy
 	// gates and the bytes the upstream receives are now identical, so a
 	// first-key-wins upstream cannot read a different "method" (e.g. a second
@@ -1585,10 +1592,10 @@ func (p *StdioProxy) decideCanonical(topLevel map[string]json.RawMessage, canoni
 		p.logger.Printf("REJECT agent=%s reason=undecodable-or-batch", p.agent)
 		return mcpDecision{reject: true, rejectID: json.RawMessage("null"), rejectCode: -32700,
 			rejectMsg: "nockguard: rejected — only single well-formed JSON-RPC objects are accepted (batch arrays are not gated)"}
-	case canonicalMessageAmbiguousParams:
-		p.logger.Printf("REJECT agent=%s reason=ambiguous-params-key", p.agent)
+	case canonicalMessageAmbiguousKey:
+		p.logger.Printf("REJECT agent=%s reason=ambiguous-message-key", p.agent)
 		return mcpDecision{reject: true, rejectID: json.RawMessage("null"), rejectCode: -32600,
-			rejectMsg: "nockguard: rejected — ambiguous params key"}
+			rejectMsg: "nockguard: rejected — ambiguous message key"}
 	case canonicalMessageMarshalFailed:
 		p.handleFailModeAsk("", nil, "canonical-marshal-failed", seq)
 		p.logger.Printf("REJECT agent=%s reason=canonical-marshal-failed", p.agent)
@@ -2124,7 +2131,8 @@ func sanitizedEnv(strip []string) []string {
 // call the proxy cannot interpret, which the caller fails closed. Top-level
 // duplicate keys collapse to the last value (the value the name gate sees), so
 // the forwarded bytes carry exactly one of each key and the upstream cannot
-// resolve a shadow name. Canonicalize nested objects too: a typed upstream may
+// resolve a shadow name. Case variants of name are removed when an exact
+// name is present. Canonicalize nested objects too: a typed upstream may
 // merge duplicate objects that the validator's map decoder replaces. UseNumber
 // preserves numeric literals without passing them through float64.
 func canonicalToolCall(params json.RawMessage) (name string, canonical json.RawMessage, ok bool) {
@@ -2147,6 +2155,13 @@ func canonicalToolCall(params json.RawMessage) (name string, canonical json.RawM
 	dec.UseNumber()
 	if err := dec.Decode(&value); err != nil {
 		return "", nil, false
+	}
+	// The exact name is authoritative; remove aliases so typed upstreams
+	// cannot select a different name through case-insensitive decoding.
+	for key := range value {
+		if key != "name" && strings.EqualFold(key, "name") {
+			delete(value, key)
+		}
 	}
 	out, err := json.Marshal(value)
 	if err != nil {
