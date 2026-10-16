@@ -12,6 +12,8 @@ All notable changes to NockGuard are documented here.
 
 ### Fixed
 
+- Telegram approval polling respects the hold deadline and preserves in-time approvals when callback replies are slow.
+
 - Telegram approvals require listed user IDs and the configured chat, and use random callback nonces.
 - `policy propose` verifies its audit input and lists tool names containing glob characters as comments instead of rules.
 - `mcp-listen` validates loopback Host headers, rejects browser Origin headers and requires `application/json` requests before forwarding.
