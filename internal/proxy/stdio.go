@@ -1794,12 +1794,24 @@ func (p *StdioProxy) approveAsk(tool string, params json.RawMessage, refs *extra
 		p.resolveAudit(seq)
 		return false
 	}
+	var rejectedTaps int
+	var firstRejectedReason string
 	v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: tool, Params: params, Reason: dec.Reason,
 		OnRejectedTap: func(reason string) {
-			p.logger.Printf("APPROVAL-CALLBACK-BLOCKED agent=%s tool=%s reason=%s", p.agent, tool, reason)
-			p.appendAudit(seq, tool, "block", reason, refs)
+			rejectedTaps++
+			if rejectedTaps == 1 {
+				firstRejectedReason = reason
+				p.logger.Printf("APPROVAL-CALLBACK-BLOCKED agent=%s tool=%s reason=%s", p.agent, tool, reason)
+			}
 		},
 	})
+	if rejectedTaps > 0 {
+		reason := firstRejectedReason
+		if rejectedTaps > 1 {
+			reason = fmt.Sprintf("%s; rejected-taps=%d", reason, rejectedTaps)
+		}
+		p.appendAudit(seq, tool, "block", reason, refs)
+	}
 	if !v.Approved {
 		p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)
 		p.appendAuditWithApprovalActor(seq, tool, "approval-denied", v.Reason, refs, v.ApprovalActor)

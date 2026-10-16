@@ -125,12 +125,14 @@ func (t *TelegramApprover) Ask(req Request) Verdict {
 				continue
 			}
 			if u.Callback.Message.Chat.ID != t.chatNumericID {
+				t.answer(u.Callback.ID, "Approval not allowed")
 				if req.OnRejectedTap != nil {
 					req.OnRejectedTap("telegram-callback-wrong-chat")
 				}
 				continue
 			}
 			if _, allowed := t.approverIDs[u.Callback.From.ID]; !allowed {
+				t.answer(u.Callback.ID, "Approval not allowed")
 				if req.OnRejectedTap != nil {
 					req.OnRejectedTap("telegram-callback-unlisted-sender")
 				}
