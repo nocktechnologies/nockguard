@@ -37,6 +37,12 @@ func TestHTTPListener_RequestBoundary(t *testing.T) {
 		{name: "duplicate content types", host: "127.0.0.1:8790", contentTypes: []string{"application/json", "text/plain"}, status: http.StatusUnsupportedMediaType},
 		{name: "IPv4 JSON", host: "127.0.0.1:8790", contentTypes: []string{"application/json"}, status: http.StatusOK},
 		{name: "localhost JSON", host: "localhost:8790", contentTypes: []string{"application/json; charset=utf-8"}, status: http.StatusOK},
+		{name: "IPv6 no port", host: "[::1]", contentTypes: []string{"application/json"}, status: http.StatusOK},
+		{name: "IPv6 non-loopback", host: "[::2]", contentTypes: []string{"application/json"}, status: http.StatusMisdirectedRequest},
+		{name: "bracketed hostname", host: "[localhost]", contentTypes: []string{"application/json"}, status: http.StatusMisdirectedRequest},
+		{name: "bracketed IPv4", host: "[127.0.0.1]", contentTypes: []string{"application/json"}, status: http.StatusMisdirectedRequest},
+		{name: "IPv6 bare", host: "::1", contentTypes: []string{"application/json"}, status: http.StatusMisdirectedRequest},
+		{name: "localhost no port", host: "localhost", contentTypes: []string{"application/json"}, status: http.StatusOK},
 		{name: "IPv6 JSON", host: "[::1]:8790", contentTypes: []string{"application/json"}, status: http.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
