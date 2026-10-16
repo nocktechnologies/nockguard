@@ -112,9 +112,13 @@ func (t *TelegramApprover) Ask(req Request) Verdict {
 	deadline := time.Now().Add(t.timeout)
 	offset := 0
 	for time.Now().Before(deadline) {
-		updates, next, ok := t.getUpdates(offset)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Until(deadline))
+		updates, next, ok := t.getUpdates(ctx, offset)
+		cancel()
 		if !ok {
-			time.Sleep(t.poll)
+			if pause := min(t.poll, time.Until(deadline)); pause > 0 {
+				time.Sleep(pause)
+			}
 			continue
 		}
 		offset = next
@@ -145,16 +149,15 @@ func (t *TelegramApprover) Ask(req Request) Verdict {
 			switch u.Callback.Data {
 			case "approve:" + id:
 				t.answer(u.Callback.ID, "Approved", deadline)
-				if !time.Now().Before(deadline) {
-					return Verdict{Approved: false, Reason: "timeout"}
-				}
 				return Verdict{Approved: true, Reason: "approved by human"}
 			case "deny:" + id:
 				t.answer(u.Callback.ID, "Denied", deadline)
 				return Verdict{Approved: false, Reason: "denied by human"}
 			}
 		}
-		time.Sleep(t.poll)
+		if pause := min(t.poll, time.Until(deadline)); pause > 0 {
+			time.Sleep(pause)
+		}
 	}
 	return Verdict{Approved: false, Reason: "timeout"}
 }
@@ -175,10 +178,14 @@ func (t *TelegramApprover) send(text, id string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-func (t *TelegramApprover) getUpdates(offset int) ([]tgUpdate, int, bool) {
+func (t *TelegramApprover) getUpdates(ctx context.Context, offset int) ([]tgUpdate, int, bool) {
 	u := fmt.Sprintf("%s?offset=%d&timeout=1&allowed_updates=%%5B%%22callback_query%%22%%5D",
 		t.api("getUpdates"), offset)
-	resp, err := t.client.Get(u)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, offset, false
+	}
+	resp, err := t.client.Do(req)
 	if err != nil {
 		return nil, offset, false
 	}

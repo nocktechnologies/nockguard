@@ -273,3 +273,65 @@ func TestTelegramApproverSendFailureFailsSafe(t *testing.T) {
 		t.Errorf("send failure must fail safe (deny), got %+v", v)
 	}
 }
+
+func TestTelegramDeadlineTiming(t *testing.T) {
+	for _, scenario := range []string{"rejected slow answer", "approved slow answer", "hanging updates"} {
+		t.Run(scenario, func(t *testing.T) {
+			answered := make(chan struct{}, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+					fmt.Fprint(w, `{"ok":true}`)
+				case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+					if r.URL.Query().Get("timeout") != "1" {
+						t.Error("Telegram long-poll timeout must remain 1 second")
+					}
+					if scenario == "hanging updates" {
+						select {
+						case <-r.Context().Done():
+						case <-time.After(time.Second):
+						}
+						return
+					}
+					sender := 42
+					if scenario == "rejected slow answer" {
+						sender = 7
+					}
+					fmt.Fprintf(w, `{"ok":true,"result":[{"update_id":1,"callback_query":{"id":"cb1","data":"approve:n1","from":{"id":%d},"message":{"chat":{"id":8663043855}}}}]}`, sender)
+				case strings.HasSuffix(r.URL.Path, "/answerCallbackQuery"):
+					answered <- struct{}{}
+					select {
+					case <-r.Context().Done():
+					case <-time.After(time.Second):
+					}
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			const timeout = 150 * time.Millisecond
+			a := newTestApprover(srv.URL, timeout)
+			a.poll = 600 * time.Millisecond
+			start := time.Now()
+			v := a.Ask(Request{Agent: "test", Tool: "deploy"})
+			elapsed := time.Since(start)
+			if scenario == "approved slow answer" {
+				if !v.Approved || v.Reason != "approved by human" {
+					t.Errorf("in-time approval lost during slow answer: %+v", v)
+				}
+			} else if v.Approved || v.Reason != "timeout" {
+				t.Errorf("expected timeout, got %+v", v)
+			}
+			if elapsed < timeout || elapsed > timeout+250*time.Millisecond {
+				t.Errorf("Ask took %s, want between %s and %s", elapsed, timeout, timeout+250*time.Millisecond)
+			}
+			if scenario != "hanging updates" {
+				select {
+				case <-answered:
+				default:
+					t.Error("callback answer was not attempted")
+				}
+			}
+		})
+	}
+}
