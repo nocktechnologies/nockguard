@@ -10,10 +10,11 @@ import "encoding/json"
 
 // Request is a held tool call awaiting a human verdict.
 type Request struct {
-	Agent  string
-	Tool   string
-	Params json.RawMessage // MCP tools/call params, including name and arguments
-	Reason string          // why the call is held (policy reason); never arguments
+	Agent         string
+	Tool          string
+	Params        json.RawMessage     // MCP tools/call params, including name and arguments
+	Reason        string              // why the call is held (policy reason); never arguments
+	OnRejectedTap func(reason string) // records an ignored Telegram callback while the call stays held
 }
 
 // Verdict is the human (or fail-safe) answer. Reason is recorded in the audit
@@ -46,16 +47,18 @@ func NewStaticApprover(approved bool, reason string) *StaticApprover {
 func (s *StaticApprover) Ask(Request) Verdict { return s.verdict }
 
 // Environment variable names for the Phase 5 approval gate. EnvBotToken and
-// EnvChatID carry the DEDICATED Telegram approval bot's secrets; EnvTestSeam is
-// the deterministic e2e seam (approve|deny). All three are read by the PROXY
-// process itself at startup (buildApprover) to construct the approver, which
+// EnvChatID carry the DEDICATED Telegram approval bot's secrets; EnvApproverIDs
+// is the permitted Telegram user list, and EnvTestSeam is the deterministic
+// e2e seam (approve|deny). These are read by the PROXY process itself at
+// startup (buildApprover) to construct the approver, which
 // runs IN the proxy — so the upstream MCP child NEVER needs them. Single source
 // of truth: main.go reads via these names, and the proxy strips the same names
 // from the child's environment (see CredEnvNames).
 const (
-	EnvBotToken = "NOCKGUARD_APPROVAL_BOT_TOKEN"
-	EnvChatID   = "NOCKGUARD_APPROVAL_CHAT_ID"
-	EnvTestSeam = "NOCKGUARD_APPROVAL_TEST"
+	EnvBotToken    = "NOCKGUARD_APPROVAL_BOT_TOKEN"
+	EnvChatID      = "NOCKGUARD_APPROVAL_CHAT_ID"
+	EnvApproverIDs = "NOCKGUARD_APPROVER_IDS"
+	EnvTestSeam    = "NOCKGUARD_APPROVAL_TEST"
 	// EnvApprover selects the approver: "local" = operator-only unix socket, no network.
 	EnvApprover = "NOCKGUARD_APPROVER"
 )
@@ -68,7 +71,8 @@ const (
 // token/chat could drive Telegram approve/callback APIs to self-approve a
 // human-gated call, defeating the gate. Mirrors the audit signing-seed isolation
 // (policy.SigningKeyEnvNamesFor). EnvTestSeam is stripped too so a child can
-// never forge the deterministic approve/deny seam.
+// never forge the deterministic approve/deny seam. The approver list is also
+// kept out of the child process.
 func CredEnvNames() []string {
-	return []string{EnvBotToken, EnvChatID, EnvTestSeam, EnvApprover}
+	return []string{EnvBotToken, EnvChatID, EnvApproverIDs, EnvTestSeam, EnvApprover}
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -23,10 +24,26 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 	"github.com/nocktechnologies/nockguard/internal/sessionverify"
 )
+
+func TestTelegramApproverRefusesToStartWithoutAllowlist(t *testing.T) {
+	t.Setenv(approval.EnvTestSeam, "")
+	t.Setenv(approval.EnvApprover, "")
+	t.Setenv(approval.EnvBotToken, "test-token")
+	t.Setenv(approval.EnvChatID, "12345")
+	t.Setenv(approval.EnvApproverIDs, "")
+	var output bytes.Buffer
+	if got := buildApprover(log.New(&output, "", 0)); got != nil {
+		t.Fatalf("Telegram approver started without allowlist: %T", got)
+	}
+	if !strings.Contains(output.String(), approval.EnvApproverIDs) || !strings.Contains(output.String(), "REFUSED to start") {
+		t.Fatalf("missing clear startup error: %s", output.String())
+	}
+}
 
 func TestVerifyCommandCleanTrailProtected(t *testing.T) {
 	dir := t.TempDir()

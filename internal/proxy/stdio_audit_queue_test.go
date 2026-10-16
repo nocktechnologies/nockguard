@@ -20,6 +20,30 @@ type auditWriteCheck func([]byte) (int, error)
 
 func (f auditWriteCheck) Write(p []byte) (int, error) { return f(p) }
 
+type rejectedTapApprover struct{}
+
+func (rejectedTapApprover) Ask(req approval.Request) approval.Verdict {
+	req.OnRejectedTap("telegram-callback-unlisted-sender")
+	return approval.Verdict{Reason: "timeout"}
+}
+
+func TestRejectedTelegramTapIsAuditedWithoutGranting(t *testing.T) {
+	auditor, path, _ := newEd25519Auditor(t)
+	gate := newGate(t, "agents:\n  demo:\n    ask: [deploy]\n", nil, auditor)
+	gate.WithApprover(rejectedTapApprover{})
+	seq := gate.reserveAuditSequence()
+	if gate.approveAsk("deploy", nil, nil, policy.Decision{Reason: "ask-rule"}, seq) {
+		t.Fatal("rejected callback granted held call")
+	}
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events := readAuditEvents(t, path)
+	if len(events) != 2 || events[0].Decision != "block" || events[0].Reason != "telegram-callback-unlisted-sender" || events[1].Decision != "approval-denied" || events[1].Reason != "timeout" {
+		t.Fatalf("audit rows = %+v, want blocked callback then timeout denial", events)
+	}
+}
+
 func TestReserveAuditSequenceRegistersUnderOneLock(t *testing.T) {
 	proxy := &StdioProxy{auditPending: make(map[uint64]struct{})}
 	const count = 128

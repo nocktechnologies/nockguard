@@ -52,17 +52,21 @@ func buildApprover(logger *log.Logger) approval.Approver {
 		logger.Printf("Phase 5 approval gate: local approver REFUSED to start (%v); ALL gated calls fail CLOSED", err)
 		return nil
 	}
-	// Real approver: a DEDICATED Telegram bot (never the fleet's main bot). Both
-	// env vars must be set; otherwise NO approver is wired and every gated call
-	// fails closed (logged loud below). These creds are read HERE, in the proxy
+	// Real approver: a DEDICATED Telegram bot (never the fleet's main bot). The
+	// bot token, chat ID and approver IDs must be set; otherwise gated calls fail
+	// closed. These values are read HERE, in the proxy
 	// process; the proxy strips the same names from the upstream child so the
 	// policed agent can never read the token and self-approve (see approval.CredEnvNames).
 	token := os.Getenv(approval.EnvBotToken)
 	chatID := os.Getenv(approval.EnvChatID)
 	if token != "" && chatID != "" {
-		timeout := 2 * time.Minute
+		a, err := approval.NewTelegramApprover(token, chatID, os.Getenv(approval.EnvApproverIDs), timeout)
+		if err != nil {
+			logger.Printf("Phase 5 approval gate: Telegram approver REFUSED to start (%v); ALL gated calls fail CLOSED", err)
+			return nil
+		}
 		logger.Printf("Phase 5 approval gate ON — Telegram (dedicated bot), %s timeout, fail-safe deny", timeout)
-		return approval.NewTelegramApprover(token, chatID, timeout)
+		return a
 	}
 	logger.Printf("Phase 5 approval gate: no approver configured (set NOCKGUARD_APPROVAL_BOT_TOKEN + NOCKGUARD_APPROVAL_CHAT_ID); ALL gated calls fail CLOSED — both `ask` rules and legacy `require_approval` rules will be DENIED until an approver is wired")
 	return nil

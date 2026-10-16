@@ -10,6 +10,7 @@ All notable changes to NockGuard are documented here.
 
 ### Fixed
 
+- Telegram approvals require listed user IDs and the configured chat, and use random callback nonces.
 - `policy propose` verifies its audit input and lists tool names containing glob characters as comments instead of rules.
 - `mcp-listen` validates loopback Host headers, rejects browser Origin headers and requires `application/json` requests before forwarding.
 - Non-tool MCP methods now record distinct `method-allow` / `method-deny` audit decisions, excluded from tool proposals and tool decision counts. Method rows are written immediately; denied requests return JSON-RPC `-32601`. The optional per-agent `deny_methods` list refuses exact method names before forwarding; other methods continue to pass through by default.
