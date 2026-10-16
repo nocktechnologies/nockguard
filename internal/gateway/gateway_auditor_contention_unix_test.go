@@ -319,7 +319,7 @@ func TestSSEInitializeCommitDoesNotWaitForSharedAuditor(t *testing.T) {
 		}
 		events = append(events, event)
 	}
-	if n != 2 || len(events) != 2 || events[0].Decision != "dispatch" || events[1].Decision != "allow" {
-		t.Fatalf("verified audit entries = %d, events = %+v; want dispatch then allow", n, events)
+	if n != 5 || len(events) != 5 || events[0].Tool != "initialize" || events[1].Tool != "initialize" || events[2].Decision != "dispatch" || events[3].Decision != "allow" || events[4].Tool != "prompts/get" {
+		t.Fatalf("verified audit entries = %d, events = %+v; want two initialize decisions, dispatch, allow, then prompts/get", n, events)
 	}
 }

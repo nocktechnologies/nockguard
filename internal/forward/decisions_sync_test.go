@@ -15,7 +15,7 @@ import (
 // site fails this test until decisionBuckets and the Wall filter learn it.
 var emitPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`appendAudit\w*\([^,]+,[^,]+,\s*"([a-z-]+)"`),
-	regexp.MustCompile(`\.audit\([^,]+,\s*"([a-z-]+)"`),
+	regexp.MustCompile(`\.audit(?:Method)?\([^,]+,\s*"([a-z-]+)"`),
 	regexp.MustCompile(`enqueueBudgetEvent\([^,]+,[^,]+,\s*"([a-z-]+)"`),
 	regexp.MustCompile(`deferredAudit\{"([a-z-]+)"`),
 	regexp.MustCompile(`\bDecision:\s*"([a-z-]+)"`),

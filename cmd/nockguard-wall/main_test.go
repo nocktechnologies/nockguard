@@ -1961,3 +1961,14 @@ func TestDemoStreamCoversEveryWallTile(t *testing.T) {
 		}
 	}
 }
+
+func TestMethodRowsExcludedFromToolCounts(t *testing.T) {
+	evs := []event{classify(event{Decision: "allow"}), classify(event{Decision: "method-allow"}), classify(event{Decision: "method-deny"})}
+	got := computePulse(evs, "", "", "", nil, nil)
+	if got.Total != 3 || got.Approved != 1 || got.Blocked != 0 || got.Other != 2 || got.High != 1 {
+		t.Fatalf("method pulse = %+v", got)
+	}
+	if evs[1].Severity != "none" || evs[2].Severity != "high" {
+		t.Fatalf("method severity = %+v", evs)
+	}
+}

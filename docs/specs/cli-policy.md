@@ -52,6 +52,7 @@ Top level `audit` is optional. Source: [internal/policy/policy.go](../../interna
 | Key | Current meaning |
 | --- | --- |
 | `agents.<name>.allow`, `deny`, `ask`, `shadow`, `require_approval` | Tool patterns; `deny` wins, `ask` holds, `shadow` observes, `require_approval` is the legacy gate. |
+| `agents.<name>.deny_methods` | Exact, case-sensitive non-`tools/call` MCP method names to refuse before forwarding; no globs, empty entries or whitespace. Omitted means pass through with method-only auditing when enabled. Uses the named policy or `default` fallback. |
 | `agents.<name>.mode` | Explicit `allow` permits tools without an allow list; `deny` blocks them. Omitted mode and no allow list deny by default; an allow list denies unmatched tools. |
 | `agents.<name>.fail_mode` | `deny` (default) or `ask` for malformed or ambiguous `tools/call` messages. |
 | `agents.<name>.validate_input` | Opt-in `sqli`, `path_traversal`, `secrets` categories. |

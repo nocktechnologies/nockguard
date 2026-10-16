@@ -143,6 +143,8 @@
                 box-shadow:inset 0 0 0 1px rgba(255,77,77,.3); }
   .row[data-severity="critical"] { border-color:rgba(255,77,77,.55);
                 box-shadow:inset 0 0 0 1px rgba(255,77,77,.22); }
+  .method-allow { border-left-color:var(--allow); }
+  .method-deny { border-left-color:var(--deny); }
   .allow      { border-left-color:var(--allow); }
   .allow      .badge{ background:rgba(63,185,80,.15); color:var(--allow); }
   .deny, .approval-denied { border-left-color:var(--deny); }
@@ -279,6 +281,8 @@
       <select id="f-decision" class="finput" title="filter by decision">
         <option value="">all decisions</option>
         <option value="allow">allow</option>
+        <option value="method-allow">method-allow</option>
+        <option value="method-deny">method-deny</option>
         <option value="deny">deny</option>
         <option value="block">block</option>
         <option value="ratelimit">ratelimit</option>
