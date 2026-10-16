@@ -240,19 +240,27 @@ if 'default' not in (doc.get('agents') or {}):
 
 ### W005 — ask / require_approval with no approver configured (WARNING)
 
-`ask` (and legacy `require_approval`) rules need an approver: the Telegram bot (`NOCKGUARD_APPROVAL_BOT_TOKEN` and `NOCKGUARD_APPROVAL_CHAT_ID`) or the local approver (`NOCKGUARD_APPROVER=local`). With neither, every such call is denied, so the tool is effectively unusable. The policy file gives no indication.
+`ask` (and legacy `require_approval`) rules need an approver: the Telegram bot or the local approver (`NOCKGUARD_APPROVER=local`). The Telegram bot starts only when all three of these are valid: `NOCKGUARD_APPROVAL_BOT_TOKEN` is not empty, `NOCKGUARD_APPROVAL_CHAT_ID` is a numeric chat ID (a leading minus is allowed), and `NOCKGUARD_APPROVER_IDS` is a comma-separated list of numeric Telegram user IDs. With no valid approver, every such call is denied, so the tool is effectively unusable. The policy file gives no indication.
 
 ```bash
 POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 python3 -c "
 import yaml, os
+def num(s, signed):
+    if signed and s[:1] in ('-', '+'):
+        s = s[1:]
+    return s.isascii() and s.isdigit()
+def telegram_ok():
+    e = os.environ.get
+    if not e('NOCKGUARD_APPROVAL_BOT_TOKEN') or not num(e('NOCKGUARD_APPROVAL_CHAT_ID', ''), True):
+        return False
+    return all(num(p.strip(), False) and int(p.strip()) > 0 for p in e('NOCKGUARD_APPROVER_IDS', '').split(','))
 with open('$POLICY') as f:
     doc = yaml.safe_load(f) or {}
 for agent, pol in (doc.get('agents') or {}).items():
     pol = pol or {}
     if pol.get('ask') or pol.get('require_approval'):
-        telegram = all(os.environ.get(v) for v in ('NOCKGUARD_APPROVAL_BOT_TOKEN', 'NOCKGUARD_APPROVAL_CHAT_ID'))
-        if not (telegram or os.environ.get('NOCKGUARD_APPROVER') == 'local'):
+        if not (telegram_ok() or os.environ.get('NOCKGUARD_APPROVER') == 'local'):
             print(f'Agent {agent!r}: ask/require_approval is set but no approver is configured — those calls will be denied')
             break
 " || { echo "policy-lint: check W005 failed to run (exit $?); do not read this as a pass" >&2; exit 1; }
