@@ -1,0 +1,36 @@
+name: upstream-exit-repro
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        revision: [6ae9e1403fdb9bb78c86a4bb7bee70ed753fa890, 8bbea6aee5f9e66a4473a29bd7611132ff368693]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.revision }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Repeat final-output regression
+        shell: bash
+        run: |
+          set -o pipefail
+          go test ./internal/proxy -run '^TestProxyDeliversOutputWrittenBeforeUpstreamExit$' -count=300 -race -timeout=30m -v 2>&1 | tee regression.log
+      - name: Count results
+        if: always()
+        shell: bash
+        run: |
+          echo "Passes: $(grep -c -- '--- PASS: TestProxyDeliversOutputWrittenBeforeUpstreamExit' regression.log || true)"
+          echo "Failures: $(grep -c -- '--- FAIL: TestProxyDeliversOutputWrittenBeforeUpstreamExit' regression.log || true)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: regression-${{ matrix.os }}-${{ matrix.revision }}
+          path: regression.log
