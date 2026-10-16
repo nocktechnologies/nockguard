@@ -11,6 +11,9 @@ v0.9.0 tightens Telegram approvals: only listed users in the configured chat can
 ### Upgrade notes
 
 - `egress-proxy` now refuses a non-loopback listen address unless `--allow-remote` is passed. Existing remote binds must add this flag to start; remote binds print a warning.
+- Telegram approval now needs `NOCKGUARD_APPROVER_IDS`, a comma-separated list of numeric Telegram user IDs. `NOCKGUARD_APPROVAL_CHAT_ID` must be a numeric chat ID; a `@channel` name no longer works. If either is missing or invalid, the Telegram approver does not start and every `ask` and `require_approval` call is denied. A v0.8.0 setup with only the bot token and chat ID must add the approver IDs.
+- `mcp-listen` returns 415 for any request whose `Content-Type` is not `application/json`, and the local listener returns 403 for any request with an `Origin` header. Native MCP clients omit `Origin`; browser-based or custom clients may need changes.
+- Audit trails now contain `method-allow` and `method-deny` rows for non-tool MCP methods. Scripts that count audit rows or match on decision values will see these new values.
 
 ### Changed
 
