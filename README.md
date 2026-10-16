@@ -323,9 +323,12 @@ used:
 nockguard policy propose --agent coder
 ```
 
-The command reads `~/.nockguard/logs/coder.audit.jsonl`, extracts distinct allowed
-tools, and prints a proposed `shadow:` allowlist. After adding that block to the
-agent policy, run in observe mode and preview false positives:
+The command verifies `~/.nockguard/logs/coder.audit.jsonl` with the agent’s public
+key (from the same environment variable or key file used by `verify --agent`).
+It requires a non-empty, fully checkpointed signed trail, extracts distinct
+allowed tools, and prints a proposed `shadow:` allowlist. Names containing
+`*`, `?`, or `[` appear only in comments for manual review. After adding that
+block to the agent policy, run in observe mode and preview false positives:
 
 ```bash
 nockguard policy shadow-report --agent coder

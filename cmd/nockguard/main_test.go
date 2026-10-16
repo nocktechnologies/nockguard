@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -19,6 +20,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/policy"
@@ -436,13 +439,35 @@ func TestEvidenceCommandVerifiesBackingTrail(t *testing.T) {
 
 func TestPolicyProposeCommandPrintsShadowAllowlist(t *testing.T) {
 	dir := t.TempDir()
-	writePlainTrail(t, dir, "kit", []audit.Event{
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(policy.AgentPubKeyEnvName("kit"), hex.EncodeToString(pub))
+	path := policy.AgentAuditPath(filepath.Join(dir, filepath.Base(policy.DefaultAuditPath)), "kit")
+	a, err := audit.New(path, audit.WithEd25519Key(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range []audit.Event{
 		{Agent: "kit", Tool: "Read", Decision: "allow"},
 		{Agent: "kit", Tool: "Read", Decision: "allow"},
 		{Agent: "kit", Tool: "Bash", Decision: "allow"},
 		{Agent: "kit", Tool: "Write", Decision: "deny"},
 		{Agent: "ash", Tool: "WebSearch", Decision: "allow"},
-	})
+		{Agent: "kit", Tool: "*", Decision: "allow"},
+		{Agent: "kit", Tool: "mcp__*", Decision: "allow"},
+		{Agent: "kit", Tool: "read?", Decision: "allow"},
+		{Agent: "kit", Tool: "[ab]", Decision: "allow"},
+		{Agent: "kit", Tool: "*\n  allow: [\"*\"]", Decision: "allow"},
+	} {
+		if err := a.Record(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	code, stdout, stderr := runCommandForTest(t, "policy", "propose", "--agent", "kit", "--audit-dir", dir)
 	if code != 0 {
@@ -453,6 +478,46 @@ func TestPolicyProposeCommandPrintsShadowAllowlist(t *testing.T) {
 	}
 	if strings.Contains(stdout, "Write") || strings.Contains(stdout, "WebSearch") {
 		t.Fatalf("policy propose included denied or other-agent tools:\n%s", stdout)
+	}
+	var proposal struct {
+		Agents map[string]struct {
+			Shadow []string `yaml:"shadow"`
+		} `yaml:"agents"`
+	}
+	if err := yaml.Unmarshal([]byte(stdout), &proposal); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(proposal.Agents["kit"].Shadow, ","); got != "Bash,Read" {
+		t.Fatalf("rules = %q", got)
+	}
+	for _, name := range []string{"*", "mcp__*", "read?", "[ab]"} {
+		if !strings.Contains(stdout, fmt.Sprintf("# Skipped tool name containing glob characters: %q", name)) {
+			t.Fatalf("missing comment for %q: %s", name, stdout)
+		}
+	}
+}
+
+func TestPolicyProposeCommandRefusesUnsignedTrail(t *testing.T) {
+	dir := t.TempDir()
+	writePlainTrail(t, dir, "kit", []audit.Event{{Agent: "kit", Tool: "Read", Decision: "allow"}})
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(policy.AgentPubKeyEnvName("kit"), hex.EncodeToString(pub))
+	code, stdout, _ := runCommandForTest(t, "policy", "propose", "--agent", "kit", "--audit-dir", dir)
+	if code == 0 || stdout != "" {
+		t.Fatalf("unsigned trail: exit=%d stdout=%q", code, stdout)
+	}
+}
+
+func TestPolicyProposeCommandRefusesUncheckpointedSuffix(t *testing.T) {
+	dir := t.TempDir()
+	_, pub := writeEd25519TrailWithCheckpoint(t, dir, "kit", 2, 1)
+	t.Setenv(policy.AgentPubKeyEnvName("kit"), pub)
+	code, stdout, _ := runCommandForTest(t, "policy", "propose", "--agent", "kit", "--audit-dir", dir)
+	if code == 0 || stdout != "" {
+		t.Fatalf("uncheckpointed suffix: exit=%d stdout=%q", code, stdout)
 	}
 }
 
