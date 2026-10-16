@@ -1,16 +1,22 @@
 package proxy
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
+	"github.com/nocktechnologies/nockguard/internal/evidence"
+	"github.com/nocktechnologies/nockguard/internal/forward"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 	"github.com/nocktechnologies/nockguard/internal/trust"
 )
@@ -46,7 +52,7 @@ func TestMethodAuditAndDeny(t *testing.T) {
 				if forwarded == blocked {
 					t.Fatalf("%s forwarded=%v blocked=%v", method, forwarded, blocked)
 				}
-				if blocked && !strings.Contains(string(reply), "method denied by policy") {
+				if blocked && (!strings.Contains(string(reply), "method denied by policy") || !strings.Contains(string(reply), `"code":-32601`)) {
 					t.Fatalf("missing policy error: %s", reply)
 				}
 			}
@@ -69,9 +75,9 @@ func TestMethodAuditAndDeny(t *testing.T) {
 			if err := json.Unmarshal([]byte(lines[0]), &row); err != nil {
 				t.Fatal(err)
 			}
-			want := "allow"
+			want := "method-allow"
 			if deny {
-				want = "deny"
+				want = "method-deny"
 			}
 			if row.Tool != "resources/read" || row.Decision != want {
 				t.Fatalf("unexpected method row: %+v", row)
@@ -118,5 +124,85 @@ func TestMethodAuditDoesNotChangeTrust(t *testing.T) {
 	}
 	if forwarded {
 		t.Fatal("method forwarded after required audit failure")
+	}
+}
+
+func TestMethodRowsCannotProposeTools(t *testing.T) {
+	auditor, path, pub := newEd25519Auditor(t)
+	defer auditor.Close()
+	t.Setenv(policy.AgentPubKeyEnvName("demo"), hex.EncodeToString(pub))
+	gate := newGate(t, "agents:\n  demo:\n    allow: [read_file]\n    deny: [write_file]\n    deny_methods: [resources/read]\n", nil, auditor)
+
+	pending := &sync.Map{}
+	input := `{"jsonrpc":"2.0","id":1,"method":"write_file"}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"initialize"}` + "\n" +
+		`{"jsonrpc":"2.0","id":3,"method":"tools/list"}` + "\n" +
+		toolCall("4", "read_file") + "\n" +
+		`{"jsonrpc":"2.0","id":5,"method":"resources/read"}` + "\n"
+	gate.agentOut = io.Discard
+	if err := gate.agentToUpstream(strings.NewReader(input), io.Discard, pending); err != nil {
+		t.Fatal(err)
+	}
+	responses := `{"jsonrpc":"2.0","id":1,"result":{}}` + "\n" + `{"jsonrpc":"2.0","id":2,"result":{}}` + "\n" + `{"jsonrpc":"2.0","id":3,"result":{"tools":[]}}` + "\n" + `{"jsonrpc":"2.0","id":4,"result":{}}` + "\n"
+	if err := gate.upstreamToAgent(strings.NewReader(responses), io.Discard, pending, nil); err != nil {
+		t.Fatal(err)
+	}
+	proposal, err := policy.ProposeShadowFromAudit("demo", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(proposal.Tools, []string{"read_file"}) {
+		t.Errorf("proposal=%v, want read_file only", proposal.Tools)
+	}
+
+	binary := buildBinary(t)
+	output, err := exec.Command(binary, "policy", "propose", "--agent", "demo", "--audit", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("policy propose: %v: %s", err, output)
+	}
+	wantOutput := "agents:\n    demo:\n        mode: allow\n        shadow:\n            - read_file\n"
+	if string(output) != wantOutput {
+		t.Errorf("policy propose output=%s, want %s", output, wantOutput)
+	}
+	misses, err := policy.ShadowReportFromAudit("demo", path)
+	if err != nil || len(misses) != 0 {
+		t.Errorf("shadow misses=%v err=%v, want 0", misses, err)
+	}
+	pack, err := evidence.BuildPack(evidence.PackOptions{Framework: evidence.FrameworkSOC2, AuditFiles: []string{path}, Ed25519PubHex: hex.EncodeToString(pub)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pack.Verification.ChainIntact {
+		t.Fatal("method decisions broke signed trail")
+	}
+	allows := 0
+	for _, ev := range pack.AllEvents {
+		if ev.Decision == "allow" {
+			allows++
+		}
+	}
+	if allows != 1 {
+		t.Errorf("evidence tool allows=%d, want 1", allows)
+	}
+	for _, control := range pack.Controls {
+		if control.Control.ID == "CC6.1" && len(control.Events) != 0 {
+			t.Errorf("tool access control events=%d, want 0", len(control.Events))
+		}
+	}
+	for _, render := range []func(evidence.Pack) ([]byte, error){evidence.RenderJSON, evidence.RenderHTML} {
+		data, err := render(pack)
+		if err != nil || !strings.Contains(string(data), "method-allow") || !strings.Contains(string(data), "method-deny") {
+			t.Errorf("method labels missing: err=%v", err)
+		}
+	}
+	approved := 0
+	for _, ev := range readAuditEvents(t, path) {
+		if forward.DecisionBucket(ev.Decision) == "approved" {
+			approved++
+		}
+	}
+	// The proxy emits one dispatch and one allow for the tool call.
+	if approved != 2 {
+		t.Errorf("Wall approved records=%d, want 2 (dispatch + tool allow)", approved)
 	}
 }

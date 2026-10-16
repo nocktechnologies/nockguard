@@ -2,7 +2,7 @@
 
 `proxy` wraps one stdio MCP server. It filters `tools/list` and checks
 `tools/call` before forwarding. Other method-bearing messages pass through by
-default, with one audit decision recording the method name in `tool` and no
+default, with a distinct `method-allow` or `method-deny` audit decision recording the method name in `tool` and no
 params when auditing is enabled. Per-agent `deny_methods` refuses exact method
 names before upstream contact, including notification forms (silently dropped).
 Tool allow/deny patterns, argument validation, approvals and limits apply only

@@ -175,7 +175,7 @@ test('approval-denied uses rejection styling and a fixed decision filter option'
 
 // Every decision value the Go source emits (internal/forward's
 // TestWallDecisionFilterMatchesEmittedDecisions keeps this list honest).
-const EMITTED = ['allow', 'deny', 'block', 'ratelimit', 'hide', 'approval-denied', 'approval-granted',
+const EMITTED = ['allow', 'method-allow', 'method-deny', 'deny', 'block', 'ratelimit', 'hide', 'approval-denied', 'approval-granted',
   'would-deny', 'dispatch', 'observe', 'state-write', 'inject', 'budget-ask', 'downgrade'];
 const FIXED = ['', ...EMITTED];
 
@@ -232,4 +232,10 @@ test('unknown decision options stay within the retained window', () => {
   assert.equal(w.elements.get('f-count').textContent, '');
   assert.deepEqual(w.decisions.options.map(o => o.value),
     [...FIXED, 'fourth', 'third']);
+});
+
+test('method rows retain labels without inflating tool allow counts', () => {
+ const w = wall();
+ vm.runInContext("render({decision:'allow', bucket:'approved', severity:'none'}); render({decision:'method-allow', bucket:'other', severity:'none'}); render({decision:'method-deny', bucket:'other', severity:'high'})", w.context);
+ assert.equal(w.elements.get('c-allow').textContent, 1);
 });

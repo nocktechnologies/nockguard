@@ -41,7 +41,7 @@ func TestHTTPListener_InitializeFollowedByToolsCall(t *testing.T) {
 	lsrv := httptest.NewServer(NewHTTPListener("127.0.0.1:0", upstream.URL, gate, log.New(io.Discard, "", 0)).WithBestEffortAudit())
 	defer lsrv.Close()
 
-	// POST initialize (non-gated, no audit emitted for this)
+	// POST initialize (method-only audit).
 	status, body, _ := post(t, lsrv.URL, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
 	if status != http.StatusOK {
 		t.Errorf("initialize status = %d, want 200", status)
@@ -71,8 +71,8 @@ func TestHTTPListener_InitializeFollowedByToolsCall(t *testing.T) {
 	if n != len(evs) || len(evs) != 2 {
 		t.Fatalf("expected 2 verified audit rows (initialize and tools/call), got n=%d rows=%d", n, len(evs))
 	}
-	if evs[0].Decision != "allow" || evs[0].Tool != "initialize" {
-		t.Errorf("audit row = %+v, want allow/initialize", evs[0])
+	if evs[0].Decision != "method-allow" || evs[0].Tool != "initialize" {
+		t.Errorf("audit row = %+v, want method-allow/initialize", evs[0])
 	}
 	if evs[1].Decision != "allow" || evs[1].Tool != "nockcc_nock_list" {
 		t.Errorf("audit row = %+v, want allow/nockcc_nock_list", evs[1])

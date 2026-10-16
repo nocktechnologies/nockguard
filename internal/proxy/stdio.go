@@ -601,7 +601,7 @@ func (p *StdioProxy) updateCardState(seq uint64, tool string, refs *extract.Refe
 // centralized feed to notable enforcement or shadow-enforcement signal.
 func isEnforcement(decision string) bool {
 	switch decision {
-	case "deny", "block", "ratelimit", "approval-granted", "approval-denied", "would-deny":
+	case "deny", "method-deny", "block", "ratelimit", "approval-granted", "approval-denied", "would-deny":
 		// approval-* are the highest-signal events NockGuard captures: a human
 		// had to intervene on a consequential call, so both outcomes surface.
 		return true
@@ -1614,11 +1614,11 @@ func (p *StdioProxy) decideCanonical(topLevel map[string]json.RawMessage, canoni
 	// the method for requests and notifications; never inspect their params.
 	if msg.Method != "" {
 		if p.engine.DeniesMethod(p.agent, msg.Method) {
-			p.auditMethod(msg.Method, "deny", "deny-method")
-			return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32602,
+			p.auditMethod(msg.Method, "method-deny", "deny-method")
+			return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32601,
 				rejectMsg: "nockguard: method denied by policy"}
 		}
-		p.auditMethod(msg.Method, "allow", "method-pass-through")
+		p.auditMethod(msg.Method, "method-allow", "method-pass-through")
 	}
 	// Forward canonical bytes so policy and upstream see the same method.
 	d := mcpDecision{forward: canonicalLine}
