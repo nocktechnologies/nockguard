@@ -12,7 +12,8 @@ v0.9.0 tightens Telegram approvals: only listed users in the configured chat can
 
 - `egress-proxy` now refuses a non-loopback listen address unless `--allow-remote` is passed. Existing remote binds must add this flag to start; remote binds print a warning.
 - Telegram approval now needs `NOCKGUARD_APPROVER_IDS`, a comma-separated list of numeric Telegram user IDs. `NOCKGUARD_APPROVAL_CHAT_ID` must be a numeric chat ID; a `@channel` name no longer works. If either is missing or invalid, the Telegram approver does not start and every `ask` and `require_approval` call is denied. A v0.8.0 setup with only the bot token and chat ID must add the approver IDs.
-- `mcp-listen` returns 415 for a POST unless it sends one `Content-Type` header with media type `application/json` (parameters such as `charset` are allowed), and the local listener returns 403 for any request with an `Origin` header, including `null`. Methods other than POST get 405. Native MCP clients omit `Origin`; browser-based or custom clients may need changes.
+- `mcp-listen` returns 415 for a POST unless it sends one `Content-Type` header with media type `application/json` (parameters such as `charset` are allowed), and the local listener returns 403 for any request with an `Origin` header, including `null`. Methods other than POST get 405. Native MCP clients omit `Origin`; browser-based or custom clients may need changes. The same `Content-Type` rule applies to requests that `mcp-gateway` forwards.
+- `policy propose` now verifies the audit trail before it proposes anything. It needs the agent's Ed25519 public key (the same environment variable or key file `verify --agent` uses) and a non-empty trail that is fully covered by its signed checkpoint. Unsigned, HMAC-signed or partly checkpointed trails, which v0.8.0 read as they were, now fail with an error.
 - Audit trails now contain `method-allow` and `method-deny` rows for non-tool MCP methods. Scripts that count audit rows or match on decision values will see these new values.
 
 ### Changed
@@ -30,6 +31,7 @@ v0.9.0 tightens Telegram approvals: only listed users in the configured chat can
 - The HTTP MCP bridge forwards canonical messages so forwarded tool calls and their audit records agree, and returns an invalid-request error for rejected requests with an ID instead of leaving clients waiting.
 - Stdio MCP rejection messages use "ambiguous message key" for conflicting method or params aliases.
 - The upstream MCP child no longer inherits the configured audit-forwarder API key.
+- The `policy-lint` W005 check now warns when Telegram approval lacks a valid `NOCKGUARD_APPROVER_IDS` list or a numeric chat ID, matching what the approver needs to start.
 
 ## [0.8.0] - 2026-10-15
 
