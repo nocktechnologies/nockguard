@@ -16,9 +16,9 @@ import (
 )
 
 // TestHTTPListener_InitializeFollowedByToolsCall verifies that the audit queue
-// does not stall when initialize (non-gated, forwarded) is followed by tools/call.
-// Initialize does not reserve or emit an audit, but it reserves a seq and must
-// resolve it to avoid blocking later audits. Before the defer fix, this test would
+// does not stall when initialize (method-audited, forwarded) is followed by tools/call.
+// Initialize emits a method audit and reserves a sequence that must
+// resolve to avoid blocking later tool audits. Before the defer fix, this test would
 // timeout or stall because seq 0 (initialize) would remain unresolved, preventing
 // seq 1 (tools/call) from flushing.
 func TestHTTPListener_InitializeFollowedByToolsCall(t *testing.T) {
@@ -66,13 +66,16 @@ func TestHTTPListener_InitializeFollowedByToolsCall(t *testing.T) {
 		t.Fatalf("audit chain verification failed: %v", err)
 	}
 
-	// Key assertion: exactly 1 audit row (from tools/call only, not initialize)
+	// Both the method decision and the tool decision must be recorded.
 	evs := readAuditEvents(t, auditPath)
-	if n != len(evs) || len(evs) != 1 {
-		t.Fatalf("expected 1 verified audit row (from tools/call, not initialize), got n=%d rows=%d", n, len(evs))
+	if n != len(evs) || len(evs) != 2 {
+		t.Fatalf("expected 2 verified audit rows (initialize and tools/call), got n=%d rows=%d", n, len(evs))
 	}
-	if evs[0].Decision != "allow" || evs[0].Tool != "nockcc_nock_list" {
-		t.Errorf("audit row = %+v, want allow/nockcc_nock_list", evs[0])
+	if evs[0].Decision != "allow" || evs[0].Tool != "initialize" {
+		t.Errorf("audit row = %+v, want allow/initialize", evs[0])
+	}
+	if evs[1].Decision != "allow" || evs[1].Tool != "nockcc_nock_list" {
+		t.Errorf("audit row = %+v, want allow/nockcc_nock_list", evs[1])
 	}
 }
 

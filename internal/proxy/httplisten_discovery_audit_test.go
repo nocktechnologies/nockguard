@@ -94,11 +94,11 @@ func TestHTTPListener_RequiredDiscoveryAuditBeforeResult(t *testing.T) {
 			if err := auditor.Close(); err != nil {
 				t.Fatal(err)
 			}
-			if n, err := audit.VerifyEd25519(auditPath, pub); err != nil || n != 1 {
-				t.Fatalf("VerifyEd25519() = (%d, %v), want one durable hide row", n, err)
+			if n, err := audit.VerifyEd25519(auditPath, pub); err != nil || n != 2 {
+				t.Fatalf("VerifyEd25519() = (%d, %v), want method decision and durable hide row", n, err)
 			}
 			events := readAuditEvents(t, auditPath)
-			if len(events) != 1 || events[0].Tool != "hidden_write" || events[0].Decision != "hide" {
+			if len(events) != 2 || events[0].Tool != "tools/list" || events[0].Decision != "allow" || events[1].Tool != "hidden_write" || events[1].Decision != "hide" {
 				t.Fatalf("audit events = %+v, want hidden_write hide row before result delivery", events)
 			}
 		})

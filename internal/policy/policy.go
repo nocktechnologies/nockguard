@@ -65,8 +65,10 @@ type ForwardPolicy struct {
 const DefaultAuditPath = ".nockguard/logs/audit.jsonl"
 
 type AgentPolicy struct {
-	Allow []string `yaml:"allow"`
-	Deny  []string `yaml:"deny"`
+	// DenyMethods lists exact non-tools/call MCP method names to refuse.
+	DenyMethods []string `yaml:"deny_methods"`
+	Allow       []string `yaml:"allow"`
+	Deny        []string `yaml:"deny"`
 	// Shadow is a dry-run allowlist. A miss is recorded as a would-deny basis
 	// while preserving the live verdict, so observe mode can measure an enforce
 	// allowlist before a human flips mode to deny.
@@ -221,6 +223,11 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 	// the policy engine match the fail-loud posture of LimiterFor and
 	// validate.New, which both error on misconfiguration at startup.
 	for agent, pol := range cfg.Agents {
+		for _, method := range pol.DenyMethods {
+			if strings.TrimSpace(method) != method || method == "" || strings.ContainsAny(method, "*?[\\ \t\r\n") || method == "tools/call" {
+				return nil, fmt.Errorf("agent %q deny_methods entry %q must be an exact non-tools/call method name", agent, method)
+			}
+		}
 		if pol.RateLimit != nil {
 			if _, err := rateLimitWindow(agent, pol.RateLimit); err != nil {
 				return nil, err
@@ -406,6 +413,21 @@ func (e *Engine) HasPolicyFor(agent string) bool {
 	}
 	_, ok := e.config.Agents["default"]
 	return ok
+}
+
+// DeniesMethod applies the named agent policy, falling back to default.
+// Tool calls retain their existing tool-name policy gate.
+func (e *Engine) DeniesMethod(agent, method string) bool {
+	pol, ok := e.config.Agents[agent]
+	if !ok {
+		pol = e.config.Agents["default"]
+	}
+	for _, denied := range pol.DenyMethods {
+		if method == denied {
+			return true
+		}
+	}
+	return false
 }
 
 type Verdict int

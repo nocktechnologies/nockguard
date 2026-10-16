@@ -1,7 +1,14 @@
 # MCP gate and transport boundary
 
 `proxy` wraps one stdio MCP server. It filters `tools/list` and checks
-`tools/call` before forwarding; other MCP messages pass through. A missing
+`tools/call` before forwarding. Other method-bearing messages pass through by
+default, with one audit decision recording the method name in `tool` and no
+params when auditing is enabled. Per-agent `deny_methods` refuses exact method
+names before upstream contact, including notification forms (silently dropped).
+Tool allow/deny patterns, argument validation, approvals and limits apply only
+to `tools/call`; they do not inspect `resources/read`, `prompts/get` or
+`completion/complete` params. `tools/list` still filters discovered tools.
+Responses without a method are forwarded without a method audit row. A missing
 policy file starts zero-config observe mode only when `--policy` was not
 supplied. An unknown agent in a loaded policy has no permissions unless
 `default` covers it. `mcp-listen` applies the shared gate to a local HTTP

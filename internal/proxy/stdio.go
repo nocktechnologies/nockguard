@@ -538,6 +538,15 @@ func (p *StdioProxy) audit(tool, decision, reason string, refs *extract.Referenc
 	}
 }
 
+// auditMethod records only method metadata. Non-tool traffic must not change
+// tool trust scores or acquire references from params or session card state.
+func (p *StdioProxy) auditMethod(method, decision, reason string) {
+	p.recordAudit(audit.Event{Agent: p.agent, Tool: method, Decision: decision, Reason: reason})
+	if p.forwarder.Enabled() && isEnforcement(decision) {
+		p.forwarder.Enqueue(forward.Event{Agent: p.agent, Tool: method, Decision: decision, Reason: reason})
+	}
+}
+
 func (p *StdioProxy) setActionFields(ev *audit.Event, actionID string) {
 	ev.SchemaVersion = 2
 	ev.RecordType = "decision"
@@ -1601,10 +1610,17 @@ func (p *StdioProxy) decideCanonical(topLevel map[string]json.RawMessage, canoni
 		return p.decideToolCall(msg, topLevel, canonicalLine, seq)
 	}
 
-	// Non-tools/call traffic (initialize, tools/list, responses, other
-	// notifications) is not gated, but we forward the CANONICAL top-level bytes
-	// (not the raw line) so duplicate-key collapsing reaches upstream — a shadow
-	// "method" can't differ between the proxy's view and upstream's.
+	// Responses have no method and are not new MCP operations. Record only
+	// the method for requests and notifications; never inspect their params.
+	if msg.Method != "" {
+		if p.engine.DeniesMethod(p.agent, msg.Method) {
+			p.auditMethod(msg.Method, "deny", "deny-method")
+			return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32602,
+				rejectMsg: "nockguard: method denied by policy"}
+		}
+		p.auditMethod(msg.Method, "allow", "method-pass-through")
+	}
+	// Forward canonical bytes so policy and upstream see the same method.
 	d := mcpDecision{forward: canonicalLine}
 	if msg.IsRequest() {
 		if msg.Method == "tools/list" {
