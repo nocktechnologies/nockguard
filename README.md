@@ -240,7 +240,7 @@ Each decision is one JSON object per line (JSON Lines):
 {"ts":"2026-06-03T18:30:01Z","agent":"coder","tool":"read_file","decision":"allow","reason":"allow-rule \"read_*\""}
 ```
 
-`decision` is one of `allow`, `deny`, `would-deny` (shadow dry-run miss), `block` (input validation), `ratelimit`, `approval-granted`, `approval-denied`, `state-write`, `hide` (filtered from `tools/list`), or `dispatch` (required-audit permission to forward).
+`decision` is one of `allow`, `deny`, `would-deny` (shadow dry-run miss), `block` (input validation or a rejected Telegram approval tap), `ratelimit`, `approval-granted`, `approval-denied`, `state-write`, `hide` (filtered from `tools/list`), or `dispatch` (required-audit permission to forward).
 
 When auditing is enabled, `proxy`, `mcp-http`, and `mcp-listen` persist a decision
 before forwarding a tool call. A pre-forward write failure refuses that call;
@@ -312,7 +312,7 @@ audit:
     api_key_env: NOCKCC_API_KEY   # the key is read from this env var, never stored in the policy file
 ```
 
-Forwarding is **asynchronous and fail-open**: events post on a background worker, `Enqueue` never blocks (it drops if the buffer saturates), and any HTTP/transport error is swallowed — a slow or unreachable NockCC can never stall or fail a tool call. Severity maps as `block → high` (an injection / secret-exfil attempt), `would-deny → info`, and `deny` / `ratelimit → warn`. Misconfiguration (forwarding enabled with no `url`, or an `api_key_env` that doesn't resolve) fails loud at startup rather than silently dropping every event.
+Forwarding is **asynchronous and fail-open**: events post on a background worker, `Enqueue` never blocks (it drops if the buffer saturates), and any HTTP/transport error is swallowed — a slow or unreachable NockCC can never stall or fail a tool call. Severity maps as `block → high` (an input-validation block or the first rejected Telegram approval tap), `would-deny → info`, and `deny` / `ratelimit → warn`. Misconfiguration (forwarding enabled with no `url`, or an `api_key_env` that doesn't resolve) fails loud at startup rather than silently dropping every event.
 
 Replace `command.example.com` with the base URL of your own Command Center.
 

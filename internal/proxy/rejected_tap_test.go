@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/forward"
 	"github.com/nocktechnologies/nockguard/internal/policy"
+	"github.com/nocktechnologies/nockguard/internal/trust"
 )
 
 type repeatedTapApprover struct{ taps int }
@@ -85,6 +87,7 @@ func TestFirstRejectedTapAlertPrecedesApprovalEnd(t *testing.T) {
 }
 
 func TestRejectedTapAuditIsBoundedOnHTTPApprovalPath(t *testing.T) {
+	var noTapTrustScore float64
 	for _, taps := range []int{0, 1, 10} {
 		t.Run(fmt.Sprintf("taps=%d", taps), func(t *testing.T) {
 			var posts []map[string]any
@@ -99,6 +102,11 @@ func TestRejectedTapAuditIsBoundedOnHTTPApprovalPath(t *testing.T) {
 			defer ops.Close()
 			auditor, path, _ := newEd25519Auditor(t)
 			gate := newGate(t, "agents:\n  demo:\n    ask: [deploy]\n", nil, auditor).WithApprover(repeatedTapApprover{taps})
+			acc, err := trust.New(trust.Config{Enabled: true, Agent: "demo", Path: filepath.Join(t.TempDir(), "trust.json")}, trust.WithClock(func() time.Time { return time.Unix(1000, 0) }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			gate.WithTrust(acc)
 			gate.forwarder = forward.New(forward.Config{BaseURL: ops.URL})
 			gate.forwarder.Start()
 			listener := NewHTTPListener("127.0.0.1:0", "http://127.0.0.1:1", gate, log.New(io.Discard, "", 0))
@@ -146,6 +154,11 @@ func TestRejectedTapAuditIsBoundedOnHTTPApprovalPath(t *testing.T) {
 			}
 			if highBlocks != wantBlocks {
 				t.Errorf("high block alerts = %d, want %d", highBlocks, wantBlocks)
+			}
+			if taps == 0 {
+				noTapTrustScore = acc.Score()
+			} else if got := acc.Score(); got != noTapTrustScore {
+				t.Errorf("third-party taps changed agent trust: got %.2f, no-tap control %.2f", got, noTapTrustScore)
 			}
 		})
 	}

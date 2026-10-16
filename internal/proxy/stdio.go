@@ -284,8 +284,9 @@ func (p *StdioProxy) appendAuditWithApprovalActor(seq uint64, tool, decision, re
 	}
 	p.auditTodo[seq] = append(p.auditTodo[seq], ev)
 
-	// Apply trust outcome and forward to ops-log immediately (not deferred).
-	if p.trust.Enabled() {
+	// A rejected Telegram tap is an outside actor's action, not agent behavior.
+	// Keep its audit and alert without lowering the agent's trust score.
+	if p.trust.Enabled() && !(decision == "block" && strings.HasPrefix(reason, "telegram-callback-")) {
 		if outcome, ok := trust.DecisionToOutcome(decision); ok {
 			p.trust.ApplyOutcome(outcome)
 		}
