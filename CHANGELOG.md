@@ -6,6 +6,7 @@ All notable changes to NockGuard are documented here.
 
 ### Fixed
 
+- Route Telegram approval callbacks to the matching held request when calls wait concurrently.
 - `mcp-listen` accepts the bracketed IPv6 loopback Host `[::1]` without a port.
 
 ## [0.9.0] - 2026-10-16
