@@ -240,21 +240,24 @@ if 'default' not in (doc.get('agents') or {}):
 
 ### W005 — ask / require_approval with no approver configured (WARNING)
 
-`ask` (and legacy `require_approval`) rules need an approver: the Telegram bot or the local approver (`NOCKGUARD_APPROVER=local`). The Telegram bot starts only when all three of these are valid: `NOCKGUARD_APPROVAL_BOT_TOKEN` is not empty, `NOCKGUARD_APPROVAL_CHAT_ID` is a numeric chat ID (a leading minus is allowed), and `NOCKGUARD_APPROVER_IDS` is a comma-separated list of numeric Telegram user IDs. With no valid approver, every such call is denied, so the tool is effectively unusable. The policy file gives no indication.
+`ask` (and legacy `require_approval`) rules need an approver: the Telegram bot or the local approver (`NOCKGUARD_APPROVER=local`). The Telegram bot starts only when all three of these are valid: `NOCKGUARD_APPROVAL_BOT_TOKEN` is not empty, `NOCKGUARD_APPROVAL_CHAT_ID` is a numeric 64-bit chat ID (a leading `-` or `+` is allowed), and `NOCKGUARD_APPROVER_IDS` is a comma-separated list of positive numeric Telegram user IDs (spaces around each ID are ignored). With no valid approver, every such call is denied, so the tool is effectively unusable. The policy file gives no indication.
 
 ```bash
 POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 python3 -c "
 import yaml, os
-def num(s, signed):
-    if signed and s[:1] in ('-', '+'):
-        s = s[1:]
-    return s.isascii() and s.isdigit()
+def i64(s):
+    t = s[1:] if s[:1] in ('-', '+') else s
+    if not (t.isascii() and t.isdigit()):
+        return None
+    v = int(s)
+    return v if -2**63 <= v < 2**63 else None
 def telegram_ok():
     e = os.environ.get
-    if not e('NOCKGUARD_APPROVAL_BOT_TOKEN') or not num(e('NOCKGUARD_APPROVAL_CHAT_ID', ''), True):
+    if not e('NOCKGUARD_APPROVAL_BOT_TOKEN') or i64(e('NOCKGUARD_APPROVAL_CHAT_ID', '')) is None:
         return False
-    return all(num(p.strip(), False) and int(p.strip()) > 0 for p in e('NOCKGUARD_APPROVER_IDS', '').split(','))
+    ids = [i64(p.strip()) for p in e('NOCKGUARD_APPROVER_IDS', '').split(',')]
+    return all(v is not None and v > 0 for v in ids)
 with open('$POLICY') as f:
     doc = yaml.safe_load(f) or {}
 for agent, pol in (doc.get('agents') or {}).items():
