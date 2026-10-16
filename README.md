@@ -190,6 +190,8 @@ nockguard verify --all          # check every per-agent trail found in the audit
 
 When an agent runs under `nocklock wrap`, NockLock records the session in its own signed SQLite log and NockGuard stamps the same `session_id` (and its signing key's `key_id`) on every trail line. `verify --session` checks both chains for that session and gives one verdict:
 
+Session IDs come from `NOCKLOCK_SESSION_ID` in the launching process's environment and are not authenticated.
+
 ```bash
 nockguard verify --session <id> \
   --lock-db <path/to/nocklock/events.db> \
