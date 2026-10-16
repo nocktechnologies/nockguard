@@ -11,7 +11,7 @@ dispatches commands and lists their flags in `printUsage`.
 | `mcp-listen --listen 127.0.0.1:PORT --upstream URL --agent NAME [--policy PATH] [--audit PATH] [--audit-best-effort]` | Local HTTP enforcement listener. |
 | `mcp-gateway --config PATH` | Single-agent OAuth resource gateway; see [gateway contract](../design/hosted-gateway.md). |
 | `wall [--agent NAME] [--audit PATH] [--demo]` | Launch the companion Live Wall binary; see [Install](../../README.md#install) for both binaries. |
-| `egress-proxy --listen ADDR --agent NAME [--policy PATH] [--audit PATH] [--enforce]` | Explicit HTTP/CONNECT proxy; policy observe-only without `--enforce`. |
+| `egress-proxy --listen ADDR --agent NAME [--policy PATH] [--audit PATH] [--enforce] [--allow-remote]` | Explicit HTTP/CONNECT proxy; policy observe-only without `--enforce`. |
 | `verify` / `audit verify` | Verify one trail via `--agent`, `--key-env`, or `--ed25519-pub-env`; `--all`, `--session` and `--export` select their own modes. |
 | `selftest [--policy PATH] [--json]` | Synthetic positive-control enforcement check. |
 | `policy check --policy PATH` | Load the file with the proxy's loader and nothing else; exit 0 loaded (warnings go to stderr), 1 not. |
@@ -26,6 +26,11 @@ dispatches commands and lists their flags in `printUsage`.
 `mcp-listen`; it allows calls through after local audit-write failures,
 weakening fail-closed audit enforcement. `mcp-gateway` has no such option and
 requires auditing to be enabled.
+
+`egress-proxy --listen` requires an explicit loopback host (`127.0.0.1`,
+`localhost`, or `::1`) unless `--allow-remote` is passed. Remote binds print a
+warning: the proxy has no caller authentication, so restrict access with external
+network controls. `localhost` binds IPv4 loopback.
 
 Only zero-config observe mode permits omitting `proxy --agent`: this applies
 when no `--policy` flag is supplied and the default
