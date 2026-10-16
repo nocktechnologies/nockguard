@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,22 +19,25 @@ import (
 //
 // This drives the seed-isolation fix end to end: the configured signing env var
 // MUST be stripped from the upstream child's environment, while every other
-// variable is inherited unchanged.
+// unrelated variable is inherited unchanged.
 func TestUpstreamChildCannotReadSigningSeed(t *testing.T) {
 	binary := buildBinary(t)
+	forwardServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer forwardServer.Close()
 	dir := t.TempDir()
 	auditPath := filepath.Join(dir, "audit.jsonl")
 
-	// Mock MCP server that echoes two env vars straight back in its tool-call
-	// result: the secret signing seed, the NockCC vault credentials, and an unrelated
-	// passthrough var.
+	// Mock MCP server echoes credential isolation checks, a public key and an
+	// unrelated passthrough variable in its tool-call result.
 	mock := filepath.Join(dir, "echo-env.sh")
 	script := `#!/bin/bash
 while IFS= read -r line; do
   method=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin).get('method',''))" 2>/dev/null)
   id=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
   if [ "$method" = "tools/call" ]; then
-    echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"seed\":\"${NOCKGUARD_AUDIT_ED25519_KEY}\",\"other_seed\":\"${NOCKGUARD_AGENT_REVIEWER_1_ED25519_KEY}\",\"public_key\":\"${NOCKGUARD_AGENT_REVIEWER_1_ED25519_PUB}\",\"vault_base_url\":\"${NOCKCC_BASE_URL}\",\"vault_agent_token\":\"${NOCKGUARD_VAULT_AGENT_TOKEN}\",\"passthrough\":\"${NOCKGUARD_PASSTHROUGH}\"}}"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"seed\":\"${NOCKGUARD_AUDIT_ED25519_KEY}\",\"other_seed\":\"${NOCKGUARD_AGENT_REVIEWER_1_ED25519_KEY}\",\"public_key\":\"${NOCKGUARD_AGENT_REVIEWER_1_ED25519_PUB}\",\"vault_base_url\":\"${NOCKCC_BASE_URL}\",\"vault_agent_token\":\"${NOCKGUARD_VAULT_AGENT_TOKEN}\",\"forward_key_present\":\"${NG_CUSTOM_FORWARD_KEY+x}\",\"passthrough\":\"${NOCKGUARD_PASSTHROUGH}\"}}"
   fi
 done
 `
@@ -48,7 +53,8 @@ done
 		"audit:\n" +
 		"  enabled: true\n" +
 		"  path: " + auditPath + "\n" +
-		"  sign_ed25519_key_env: NOCKGUARD_AUDIT_ED25519_KEY\n"
+		"  sign_ed25519_key_env: NOCKGUARD_AUDIT_ED25519_KEY\n" +
+		"  forward:\n    enabled: true\n    url: " + forwardServer.URL + "\n    api_key_env: NG_CUSTOM_FORWARD_KEY\n"
 	if err := os.WriteFile(policyFile, []byte(policyContent), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -67,6 +73,7 @@ done
 		"NOCKCC_BASE_URL=https://vault.invalid",
 		"NOCKGUARD_VAULT_AGENT_TOKEN=test-nockcc-agent-token",
 		"NOCKGUARD_PASSTHROUGH=visible",
+		"NG_CUSTOM_FORWARD_KEY=test-forward-key",
 	)
 	out, err := cmd.Output()
 	if err != nil {
@@ -75,12 +82,13 @@ done
 
 	var resp struct {
 		Result struct {
-			Seed            string `json:"seed"`
-			OtherSeed       string `json:"other_seed"`
-			PublicKey       string `json:"public_key"`
-			VaultBaseURL    string `json:"vault_base_url"`
-			VaultAgentToken string `json:"vault_agent_token"`
-			Passthrough     string `json:"passthrough"`
+			ForwardKeyPresent string `json:"forward_key_present"`
+			Seed              string `json:"seed"`
+			OtherSeed         string `json:"other_seed"`
+			PublicKey         string `json:"public_key"`
+			VaultBaseURL      string `json:"vault_base_url"`
+			VaultAgentToken   string `json:"vault_agent_token"`
+			Passthrough       string `json:"passthrough"`
 		} `json:"result"`
 	}
 	var parsed bool
@@ -97,6 +105,9 @@ done
 		t.Fatalf("did not get the upstream echo response; output:\n%s", out)
 	}
 
+	if resp.Result.ForwardKeyPresent != "" {
+		t.Error("upstream child inherited the configured forwarder key variable")
+	}
 	if resp.Result.Seed != "" {
 		t.Errorf("upstream child CAN read the signing seed (non-repudiation broken): seed=%q", resp.Result.Seed)
 	}

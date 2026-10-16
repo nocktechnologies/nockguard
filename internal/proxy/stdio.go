@@ -664,7 +664,7 @@ func (p *StdioProxy) Run() error {
 	cmd.Stderr = os.Stderr
 	// Isolate proxy-only secrets from the policed agent. The upstream child would
 	// otherwise inherit the proxy's full environment and could read it from its own
-	// /proc/self/environ. Two secret sets are stripped:
+	// /proc/self/environ. These secret sets are stripped:
 	//   1. The audit signing seed (Ed25519/HMAC) — a child that read it could forge
 	//      the audit trail, defeating non-repudiation against the very party it
 	//      targets. Already parsed into the Auditor at startup; the child never needs it.
@@ -675,9 +675,11 @@ func (p *StdioProxy) Run() error {
 	//      os.Getenv is unaffected by this child-only sanitize), so the child never needs them.
 	//   3. The NockCC vault endpoint and agent token — the proxy uses them to
 	//      resolve nockcc: refs, so the upstream child must not inherit them.
+	//   4. The configured audit-forwarder API key, used only by the proxy.
 	// The strip sets compose; sanitizedEnv only touches the CHILD's cmd.Env.
 	strip := append(p.engine.SigningKeyEnvNamesFor(p.agent), approval.CredEnvNames()...)
 	strip = append(strip, p.engine.InjectEnvNames()...)
+	strip = append(strip, p.engine.ForwarderKeyEnvNames()...)
 	strip = append(strip, "NOCKCC_BASE_URL", "NOCKGUARD_VAULT_AGENT_TOKEN")
 	cmd.Env = sanitizedEnv(strip)
 	// Own process group, so a cutoff can kill grandchildren that inherited stdout.

@@ -15,6 +15,7 @@ All notable changes to NockGuard are documented here.
 - Non-tool MCP methods now record distinct `method-allow` / `method-deny` audit decisions, excluded from tool proposals and tool decision counts. Method rows are written immediately; denied requests return JSON-RPC `-32601`. The optional per-agent `deny_methods` list refuses exact method names before forwarding; other methods continue to pass through by default.
 - The HTTP MCP bridge forwards canonical messages so forwarded tool calls and their audit records agree, and returns an invalid-request error for rejected requests with an ID instead of leaving clients waiting.
 - Stdio MCP rejection messages use "ambiguous message key" for conflicting method or params aliases.
+- The upstream MCP child no longer inherits the configured audit-forwarder API key.
 
 ## [0.8.0] - 2026-10-15
 
