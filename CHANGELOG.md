@@ -4,6 +4,8 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+- Reject MCP method and tool names exceeding 256 bytes before forwarding, with bounded audit diagnostics that preserve trail verification.
+
 ## [0.9.0] - 2026-10-16
 
 v0.9.0 tightens Telegram approvals: only listed users in the configured chat can decide held calls, callbacks use random nonces, rejected taps get a reply without stalling, and polling respects the hold deadline. The MCP listener validates loopback Host headers, rejects any `Origin` header and requires `application/json` on POST requests; remote egress proxy binds now need explicit opt-in. Non-tool MCP methods get distinct audit decisions and optional denials, the HTTP bridge forwards canonical messages, the upstream child no longer inherits the audit-forwarder key, and policy proposals verify their audit input.
