@@ -87,7 +87,16 @@ func TestFirstRejectedTapAlertPrecedesApprovalEnd(t *testing.T) {
 }
 
 func TestRejectedTapAuditIsBoundedOnHTTPApprovalPath(t *testing.T) {
-	var noTapTrustScore float64
+	control, err := trust.New(trust.Config{Enabled: true, Agent: "demo", Path: filepath.Join(t.TempDir(), "control-trust.json")}, trust.WithClock(func() time.Time { return time.Unix(1000, 0) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, ok := trust.DecisionToOutcome("approval-denied")
+	if !ok {
+		t.Fatal("approval-denied must have a trust outcome")
+	}
+	control.ApplyOutcome(outcome)
+	wantTrustScore := control.Score()
 	for _, taps := range []int{0, 1, 10} {
 		t.Run(fmt.Sprintf("taps=%d", taps), func(t *testing.T) {
 			var posts []map[string]any
@@ -155,10 +164,8 @@ func TestRejectedTapAuditIsBoundedOnHTTPApprovalPath(t *testing.T) {
 			if highBlocks != wantBlocks {
 				t.Errorf("high block alerts = %d, want %d", highBlocks, wantBlocks)
 			}
-			if taps == 0 {
-				noTapTrustScore = acc.Score()
-			} else if got := acc.Score(); got != noTapTrustScore {
-				t.Errorf("third-party taps changed agent trust: got %.2f, no-tap control %.2f", got, noTapTrustScore)
+			if got := acc.Score(); got != wantTrustScore {
+				t.Errorf("third-party taps changed agent trust: got %.2f, approval-denied control %.2f", got, wantTrustScore)
 			}
 		})
 	}

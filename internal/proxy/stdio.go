@@ -286,6 +286,7 @@ func (p *StdioProxy) appendAuditWithApprovalActor(seq uint64, tool, decision, re
 
 	// A rejected Telegram tap is an outside actor's action, not agent behavior.
 	// Keep its audit and alert without lowering the agent's trust score.
+	// Other block producers use fixed validator names or their own prefixes.
 	if p.trust.Enabled() && !(decision == "block" && strings.HasPrefix(reason, "telegram-callback-")) {
 		if outcome, ok := trust.DecisionToOutcome(decision); ok {
 			p.trust.ApplyOutcome(outcome)
