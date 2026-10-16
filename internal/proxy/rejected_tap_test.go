@@ -9,9 +9,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/forward"
+	"github.com/nocktechnologies/nockguard/internal/policy"
 )
 
 type repeatedTapApprover struct{ taps int }
@@ -21,6 +23,65 @@ func (a repeatedTapApprover) Ask(req approval.Request) approval.Verdict {
 		req.OnRejectedTap("telegram-callback-unlisted-sender")
 	}
 	return approval.Verdict{Reason: "timeout"}
+}
+
+type heldTapApprover struct{ release <-chan struct{} }
+
+func (a heldTapApprover) Ask(req approval.Request) approval.Verdict {
+	req.OnRejectedTap("telegram-callback-unlisted-sender")
+	<-a.release
+	return approval.Verdict{Reason: "timeout"}
+}
+
+func TestFirstRejectedTapAlertPrecedesApprovalEnd(t *testing.T) {
+	alerts := make(chan string, 2)
+	ops := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Severity string `json:"severity"`
+			DataBlob struct {
+				Decision string `json:"decision"`
+			} `json:"data_blob"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		if payload.DataBlob.Decision == "block" {
+			alerts <- payload.Severity
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer ops.Close()
+	auditor, _, _ := newEd25519Auditor(t)
+	gate := newGate(t, "agents:\n  demo:\n    ask: [deploy]\n", nil, auditor)
+	release := make(chan struct{})
+	gate.WithApprover(heldTapApprover{release})
+	gate.forwarder = forward.New(forward.Config{BaseURL: ops.URL})
+	gate.forwarder.Start()
+	seq := gate.reserveAuditSequence()
+	done := make(chan struct{})
+	go func() {
+		gate.approveAsk("deploy", nil, nil, policy.Decision{Reason: "ask-rule"}, seq)
+		close(done)
+	}()
+	var severity string
+	select {
+	case severity = <-alerts:
+	case <-time.After(2 * time.Second):
+	}
+	select {
+	case <-done:
+		t.Error("approval ended before the held tap was released")
+	default:
+	}
+	close(release)
+	<-done
+	gate.forwarder.Stop()
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if severity != "high" {
+		t.Errorf("alert before approval ended = %q, want high", severity)
+	}
 }
 
 func TestRejectedTapAuditIsBoundedOnHTTPApprovalPath(t *testing.T) {
@@ -59,8 +120,8 @@ func TestRejectedTapAuditIsBoundedOnHTTPApprovalPath(t *testing.T) {
 					if !strings.Contains(ev.Reason, "telegram-callback-unlisted-sender") {
 						t.Errorf("block reason = %q", ev.Reason)
 					}
-					if taps > 1 && !strings.Contains(ev.Reason, "rejected-taps=10") {
-						t.Errorf("missing tap count: %q", ev.Reason)
+					if strings.Contains(ev.Reason, "rejected-taps=") {
+						t.Errorf("block row should only report the first tap: %q", ev.Reason)
 					}
 				case "approval-denied":
 					denied++

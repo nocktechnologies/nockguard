@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -118,6 +119,9 @@ func (t *TelegramApprover) Ask(req Request) Verdict {
 		}
 		offset = next
 		for _, u := range updates {
+			if !time.Now().Before(deadline) {
+				return Verdict{Approved: false, Reason: "timeout"}
+			}
 			if u.Callback == nil {
 				continue
 			}
@@ -125,25 +129,28 @@ func (t *TelegramApprover) Ask(req Request) Verdict {
 				continue
 			}
 			if u.Callback.Message.Chat.ID != t.chatNumericID {
-				t.answer(u.Callback.ID, "Approval not allowed")
 				if req.OnRejectedTap != nil {
 					req.OnRejectedTap("telegram-callback-wrong-chat")
 				}
+				t.answer(u.Callback.ID, "Approval not allowed", deadline)
 				continue
 			}
 			if _, allowed := t.approverIDs[u.Callback.From.ID]; !allowed {
-				t.answer(u.Callback.ID, "Approval not allowed")
 				if req.OnRejectedTap != nil {
 					req.OnRejectedTap("telegram-callback-unlisted-sender")
 				}
+				t.answer(u.Callback.ID, "Approval not allowed", deadline)
 				continue
 			}
 			switch u.Callback.Data {
 			case "approve:" + id:
-				t.answer(u.Callback.ID, "Approved")
+				t.answer(u.Callback.ID, "Approved", deadline)
+				if !time.Now().Before(deadline) {
+					return Verdict{Approved: false, Reason: "timeout"}
+				}
 				return Verdict{Approved: true, Reason: "approved by human"}
 			case "deny:" + id:
-				t.answer(u.Callback.ID, "Denied")
+				t.answer(u.Callback.ID, "Denied", deadline)
 				return Verdict{Approved: false, Reason: "denied by human"}
 			}
 		}
@@ -189,11 +196,18 @@ func (t *TelegramApprover) getUpdates(offset int) ([]tgUpdate, int, bool) {
 	return r.Result, next, true
 }
 
-func (t *TelegramApprover) answer(callbackID, text string) {
+func (t *TelegramApprover) answer(callbackID, text string, deadline time.Time) {
 	form := url.Values{}
 	form.Set("callback_query_id", callbackID)
 	form.Set("text", text)
-	if resp, err := t.client.PostForm(t.api("answerCallbackQuery"), form); err == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), min(time.Until(deadline), 2*time.Second))
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.api("answerCallbackQuery"), strings.NewReader(form.Encode()))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if resp, err := t.client.Do(req); err == nil {
 		resp.Body.Close()
 	}
 }

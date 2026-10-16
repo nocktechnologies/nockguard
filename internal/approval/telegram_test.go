@@ -187,6 +187,37 @@ func TestTelegramUnauthorizedCallbacksAreIgnored(t *testing.T) {
 	}
 }
 
+func TestTelegramSlowRejectedReplyCannotExtendApprovalDeadline(t *testing.T) {
+	served := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			fmt.Fprint(w, `{"ok":true}`)
+		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+			if !served {
+				served = true
+				fmt.Fprint(w, `{"ok":true,"result":[{"update_id":1,"callback_query":{"id":"bad","data":"approve:n1","from":{"id":7},"message":{"chat":{"id":8663043855}}}},{"update_id":2,"callback_query":{"id":"good","data":"approve:n1","from":{"id":42},"message":{"chat":{"id":8663043855}}}}]}`)
+			} else {
+				fmt.Fprint(w, `{"ok":true,"result":[]}`)
+			}
+		case strings.HasSuffix(r.URL.Path, "/answerCallbackQuery"):
+			select {
+			case <-r.Context().Done():
+			case <-time.After(400 * time.Millisecond):
+			}
+		}
+	}))
+	defer srv.Close()
+	start := time.Now()
+	v := newTestApprover(srv.URL, 80*time.Millisecond).Ask(Request{Agent: "kit", Tool: "deploy"})
+	if v.Approved || v.Reason != "timeout" {
+		t.Fatalf("late authorized tap must not approve: %+v", v)
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("slow callback reply extended hold to %s", elapsed)
+	}
+}
+
 func TestTelegramApproverRequiresAllowlist(t *testing.T) {
 	for _, ids := range []string{"", " ", "42,", "not-a-number"} {
 		if a, err := NewTelegramApprover("TESTTOKEN", "8663043855", ids, time.Second); a != nil || err == nil || !strings.Contains(err.Error(), EnvApproverIDs) {
