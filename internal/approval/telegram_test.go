@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -330,6 +332,139 @@ func TestTelegramDeadlineTiming(t *testing.T) {
 				case <-answered:
 				default:
 					t.Error("callback answer was not attempted")
+				}
+			}
+		})
+	}
+}
+
+// TestTelegramConcurrentAsks returns both taps in one batch, so consuming the
+// batch without routing it loses the other request's human decision.
+func TestTelegramConcurrentAsks(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprint(reverse), func(t *testing.T) {
+			var mu sync.Mutex
+			var nonces []string
+			tools := make(map[string]string)
+			expected := make(map[string]bool)
+			served := false
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+					_ = r.ParseForm()
+					var markup struct {
+						Rows [][]struct {
+							Data string `json:"callback_data"`
+						} `json:"inline_keyboard"`
+					}
+					_ = json.Unmarshal([]byte(r.Form.Get("reply_markup")), &markup)
+					nonce := strings.TrimPrefix(markup.Rows[0][0].Data, "approve:")
+					nonces = append(nonces, nonce)
+					_, tool, _ := strings.Cut(r.Form.Get("text"), "Tool: ")
+					tools[nonce] = strings.Split(tool, "\n")[0]
+					fmt.Fprint(w, `{"ok":true}`)
+				case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+					if len(nonces) != 2 || served {
+						fmt.Fprint(w, `{"ok":true,"result":[]}`)
+						return
+					}
+					served = true
+					a, b := nonces[0], nonces[1]
+					if reverse {
+						a, b = b, a
+					}
+					expected[tools[a]] = true
+					expected[tools[b]] = false
+					fmt.Fprintf(w, `{"ok":true,"result":[
+						{"update_id":1,"callback_query":{"id":"unknown","data":"approve:unknown","from":{"id":42},"message":{"chat":{"id":8663043855}}}},
+						{"update_id":2,"callback_query":{"id":"bad","data":"approve:%s","from":{"id":7},"message":{"chat":{"id":8663043855}}}},
+						{"update_id":3,"callback_query":{"id":"a","data":"approve:%s","from":{"id":42},"message":{"chat":{"id":8663043855}}}},
+						{"update_id":4,"callback_query":{"id":"b","data":"deny:%s","from":{"id":42},"message":{"chat":{"id":8663043855}}}}]}`, b, a, b)
+				default:
+					fmt.Fprint(w, `{"ok":true}`)
+				}
+			}))
+			defer srv.Close()
+			a := newTestApprover(srv.URL, 300*time.Millisecond)
+			var seq atomic.Int64
+			a.nonce = func() string { return fmt.Sprint(seq.Add(1)) }
+			type result struct {
+				tool    string
+				verdict Verdict
+			}
+			results := make(chan result, 2)
+			rejected := make(chan string, 2)
+			for _, tool := range []string{"deploy", "delete"} {
+				go func() {
+					results <- result{tool, a.Ask(Request{Tool: tool, OnRejectedTap: func(s string) { rejected <- s }})}
+				}()
+			}
+			approved, denied := 0, 0
+			for range 2 {
+				got := <-results
+				v := got.verdict
+				mu.Lock()
+				want, exists := expected[got.tool]
+				mu.Unlock()
+				if !exists || v.Approved != want {
+					t.Fatalf("%s received wrong decision: %+v, want approved=%v", got.tool, v, want)
+				}
+				switch v.Reason {
+				case "approved by human":
+					if !v.Approved {
+						t.Fatal(v)
+					}
+					approved++
+				case "denied by human":
+					if v.Approved {
+						t.Fatal(v)
+					}
+					denied++
+				default:
+					t.Fatalf("lost human decision: %+v", v)
+				}
+			}
+			if approved != 1 || denied != 1 {
+				t.Fatalf("decisions: %d approvals, %d denials", approved, denied)
+			}
+			select {
+			case reason := <-rejected:
+				if reason != "telegram-callback-unlisted-sender" {
+					t.Fatal(reason)
+				}
+			default:
+				t.Fatal("unauthorized callback was not refused")
+			}
+		})
+	}
+}
+
+func TestTelegramConcurrentInvalidCallbacksTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		data   string
+		sender int64
+		chat   int64
+	}{
+		{"unknown nonce", "approve:unknown", 42, 8663043855},
+		{"unlisted sender", "approve:1", 7, 8663043855},
+		{"wrong chat", "approve:1", 42, 99},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := mockTelegramCallback(t, tc.data, tc.sender, tc.chat)
+			defer srv.Close()
+			a := newTestApprover(srv.URL, 80*time.Millisecond)
+			var seq atomic.Int64
+			a.nonce = func() string { return fmt.Sprint(seq.Add(1)) }
+			results := make(chan Verdict, 2)
+			for range 2 {
+				go func() { results <- a.Ask(Request{Tool: "deploy"}) }()
+			}
+			for range 2 {
+				if v := <-results; v.Approved || v.Reason != "timeout" {
+					t.Fatalf("invalid callback resolved a held request: %+v", v)
 				}
 			}
 		})
