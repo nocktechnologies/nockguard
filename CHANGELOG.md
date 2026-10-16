@@ -11,6 +11,7 @@ All notable changes to NockGuard are documented here.
 ### Fixed
 
 - `policy propose` verifies its audit input and lists tool names containing glob characters as comments instead of rules.
+- `mcp-listen` validates loopback Host headers, rejects browser Origin headers and requires `application/json` requests before forwarding.
 
 ## [0.8.0] - 2026-10-15
 

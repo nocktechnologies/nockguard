@@ -585,6 +585,7 @@ func TestHTTPListener_AuthAndSessionPassthrough(t *testing.T) {
 	defer lsrv.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, lsrv.URL, strings.NewReader(toolCall("1", "nockcc_nock_list")))
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer connector-own-token")
 	req.Header.Set("Mcp-Session-Id", "sess-from-connector")
 	resp, err := http.DefaultClient.Do(req)
@@ -623,6 +624,7 @@ func TestHTTPListener_MCPProtocolHeadersPassthrough(t *testing.T) {
 	defer lsrv.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, lsrv.URL, strings.NewReader(toolCall("1", "nockcc_nock_list")))
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("MCP-Protocol-Version", "2026-07-28")
 	req.Header.Set("Last-Event-ID", "42")
 	resp, err := http.DefaultClient.Do(req)

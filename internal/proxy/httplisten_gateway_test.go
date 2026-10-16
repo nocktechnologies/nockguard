@@ -24,6 +24,7 @@ func TestGatewayUpstreamCredentialAndRedirectBoundary(t *testing.T) {
 	gate := newGate(t, "agents:\n  demo:\n    mode: allow\n", nil, nil)
 	l := NewHTTPListener("", upstream.URL, gate, log.New(io.Discard, "", 0)).WithUpstreamAgentToken("test-gateway-service-token")
 	r := httptest.NewRequest("POST", "http://localhost/mcp", strings.NewReader(toolCall("1", "read_item")))
+	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer caller-credential")
 	w := httptest.NewRecorder()
 	l.ServeHTTP(w, r)
