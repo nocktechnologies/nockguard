@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,6 +29,16 @@ type TelegramApprover struct {
 	poll          time.Duration // getUpdates long-poll/spacing
 	client        *http.Client
 	nonce         func() string // unique per request; overridable for tests
+
+	mu      sync.Mutex
+	waiters map[string]*telegramWaiter
+	polling bool
+	offset  int // owned by the single poller, preserved between requests
+}
+
+type telegramWaiter struct {
+	ready   chan struct{}
+	updates []tgUpdate // guarded by the approver mutex
 }
 
 // NewTelegramApprover builds an approver bound to a dedicated bot token + chat.
@@ -84,6 +95,22 @@ type tgResponse struct {
 // Ask posts the held call and waits for a tap. Fail-safe on every error path.
 func (t *TelegramApprover) Ask(req Request) Verdict {
 	id := t.nonce()
+	waiter := &telegramWaiter{ready: make(chan struct{}, 1)}
+	t.mu.Lock()
+	if t.waiters == nil {
+		t.waiters = make(map[string]*telegramWaiter)
+	}
+	if _, exists := t.waiters[id]; exists {
+		t.mu.Unlock()
+		return Verdict{Approved: false, Reason: "nonce-collision"}
+	}
+	t.waiters[id] = waiter
+	t.mu.Unlock()
+	defer func() {
+		t.mu.Lock()
+		delete(t.waiters, id)
+		t.mu.Unlock()
+	}()
 	text := fmt.Sprintf("🔒 NockGuard — approval needed\n\nAgent: %s\nTool: %s", req.Agent, req.Tool)
 	var call struct {
 		Arguments json.RawMessage `json:"arguments"`
@@ -110,19 +137,30 @@ func (t *TelegramApprover) Ask(req Request) Verdict {
 	}
 
 	deadline := time.Now().Add(t.timeout)
-	offset := 0
-	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Until(deadline))
-		updates, next, ok := t.getUpdates(ctx, offset)
-		cancel()
-		if !ok {
-			if pause := min(t.poll, time.Until(deadline)); pause > 0 {
-				time.Sleep(pause)
+	t.mu.Lock()
+	if !t.polling {
+		t.polling = true
+		go t.pollUpdates()
+	}
+	t.mu.Unlock()
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	for {
+		select {
+		case <-timer.C:
+			return Verdict{Approved: false, Reason: "timeout"}
+		case <-waiter.ready:
+			t.mu.Lock()
+			u := waiter.updates[0]
+			waiter.updates[0] = tgUpdate{}
+			waiter.updates = waiter.updates[1:]
+			if len(waiter.updates) > 0 {
+				select {
+				case waiter.ready <- struct{}{}:
+				default:
+				}
 			}
-			continue
-		}
-		offset = next
-		for _, u := range updates {
+			t.mu.Unlock()
 			if !time.Now().Before(deadline) {
 				return Verdict{Approved: false, Reason: "timeout"}
 			}
@@ -155,11 +193,49 @@ func (t *TelegramApprover) Ask(req Request) Verdict {
 				return Verdict{Approved: false, Reason: "denied by human"}
 			}
 		}
-		if pause := min(t.poll, time.Until(deadline)); pause > 0 {
-			time.Sleep(pause)
-		}
 	}
-	return Verdict{Approved: false, Reason: "timeout"}
+}
+
+// pollUpdates is the sole owner of the bot's update offset. It stops when no
+// calls remain held; registration and shutdown share mu so a new call cannot
+// be stranded during that transition.
+func (t *TelegramApprover) pollUpdates() {
+	for {
+		t.mu.Lock()
+		if len(t.waiters) == 0 {
+			t.polling = false
+			t.mu.Unlock()
+			return
+		}
+		t.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		updates, next, ok := t.getUpdates(ctx, t.offset)
+		cancel()
+		if ok {
+			t.offset = next
+			for _, u := range updates {
+				if u.Callback == nil {
+					continue
+				}
+				action, id, valid := strings.Cut(u.Callback.Data, ":")
+				if !valid || (action != "approve" && action != "deny") {
+					continue
+				}
+				t.mu.Lock()
+				if waiter := t.waiters[id]; waiter != nil {
+					// A slow callback answer in one Ask must not stall
+					// delivery to other held requests.
+					waiter.updates = append(waiter.updates, u)
+					select {
+					case waiter.ready <- struct{}{}:
+					default:
+					}
+				}
+				t.mu.Unlock()
+			}
+		}
+		time.Sleep(t.poll)
+	}
 }
 
 func (t *TelegramApprover) send(text, id string) bool {
