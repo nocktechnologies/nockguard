@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
+	"github.com/nocktechnologies/nockguard/internal/jsonrpc"
 )
 
 // TestMCPHTTPProxy_ToolCallReachesUpstream checks that a tools/call request
@@ -370,6 +371,7 @@ func TestMCPHTTPProxy_CanonicalToolCalls(t *testing.T) {
 		{"name alias", `{"method":"tools/call","params":{"Name":"read"}}`, "", "", true},
 		{"multiple method aliases", `{"Method":"tools/call","METHOD":"ping","params":{"name":"read"}}`, "", "", true},
 		{"params alias", `{"method":"tools/call","Params":{"name":"read"}}`, "tools/call", "read", false},
+		{"missing params", `{"method":"tools/call"}`, "", "", true},
 		{"conflicting params", `{"method":"tools/call","params":{"name":"read"},"Params":{"name":"write"}}`, "", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -389,7 +391,7 @@ func TestMCPHTTPProxy_CanonicalToolCalls(t *testing.T) {
 			defer auditor.Close()
 			p := newTestProxy(t, srv.URL, auditor)
 			var out bytes.Buffer
-			if err := p.run(context.Background(), strings.NewReader(tc.line+"\n"), &out); err != nil {
+			if err := p.run(context.Background(), strings.NewReader(`{"jsonrpc":"2.0","id":1,`+tc.line[1:]+"\n"), &out); err != nil {
 				t.Fatal(err)
 			}
 			if err := auditor.Close(); err != nil {
@@ -402,6 +404,13 @@ func TestMCPHTTPProxy_CanonicalToolCalls(t *testing.T) {
 			if tc.reject {
 				if len(forwarded) != 0 || len(bytes.TrimSpace(data)) != 0 {
 					t.Fatalf("ambiguous call forwarded or audited: %s / %s", forwarded, data)
+				}
+				var reply jsonrpc.Message
+				if err := json.Unmarshal(out.Bytes(), &reply); err != nil {
+					t.Fatalf("decode rejection reply %q: %v", out.String(), err)
+				}
+				if reply.JSONRPC != "2.0" || string(reply.ID) != "1" || reply.Error == nil || reply.Error.Code != -32600 || reply.Error.Message == "" {
+					t.Fatalf("expected invalid-request error for id 1, got %s", out.String())
 				}
 				return
 			}

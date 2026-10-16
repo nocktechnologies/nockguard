@@ -14,6 +14,7 @@ package mcphttp
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -117,8 +118,15 @@ func (p *Proxy) run(ctx context.Context, in io.Reader, out io.Writer) error {
 func (p *Proxy) handleLine(ctx context.Context, line []byte, out io.Writer, tripwire bool) error {
 	canonical, msg, toolName, err := proxy.CanonicalizeForForward(line)
 	if err != nil {
-		// Not valid JSON-RPC — skip rather than block; log so the operator can see it.
-		p.logger.Printf("WARN agent=%s: undecodable line, skipping: %v", p.agent, err)
+		// Reject decodable requests so clients do not wait for a timeout.
+		// Malformed input and messages without an id have no reply target.
+		p.logger.Printf("WARN agent=%s: rejected message: %v", p.agent, err)
+		var object map[string]json.RawMessage
+		if json.Unmarshal(line, &object) == nil {
+			if id, ok := object["id"]; ok {
+				_, _ = fmt.Fprintf(out, "%s\n", jsonrpc.ErrorResponse(id, -32600, "nockguard mcp-http: "+err.Error()))
+			}
+		}
 		return nil
 	}
 
