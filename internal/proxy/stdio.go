@@ -1794,7 +1794,12 @@ func (p *StdioProxy) approveAsk(tool string, params json.RawMessage, refs *extra
 		p.resolveAudit(seq)
 		return false
 	}
-	v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: tool, Params: params, Reason: dec.Reason})
+	v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: tool, Params: params, Reason: dec.Reason,
+		OnRejectedTap: func(reason string) {
+			p.logger.Printf("APPROVAL-CALLBACK-BLOCKED agent=%s tool=%s reason=%s", p.agent, tool, reason)
+			p.appendAudit(seq, tool, "block", reason, refs)
+		},
+	})
 	if !v.Approved {
 		p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)
 		p.appendAuditWithApprovalActor(seq, tool, "approval-denied", v.Reason, refs, v.ApprovalActor)

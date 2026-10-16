@@ -34,7 +34,7 @@ while IFS= read -r line; do
   method=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin).get('method',''))" 2>/dev/null)
   id=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
   if [ "$method" = "tools/call" ]; then
-    echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"token\":\"${NOCKGUARD_APPROVAL_BOT_TOKEN}\",\"chat\":\"${NOCKGUARD_APPROVAL_CHAT_ID}\",\"passthrough\":\"${NOCKGUARD_PASSTHROUGH}\"}}"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"token\":\"${NOCKGUARD_APPROVAL_BOT_TOKEN}\",\"chat\":\"${NOCKGUARD_APPROVAL_CHAT_ID}\",\"approvers\":\"${NOCKGUARD_APPROVER_IDS}\",\"passthrough\":\"${NOCKGUARD_PASSTHROUGH}\"}}"
   fi
 done
 `
@@ -57,6 +57,7 @@ done
 	cmd.Env = append(os.Environ(),
 		"NOCKGUARD_APPROVAL_BOT_TOKEN=secret-bot-token",
 		"NOCKGUARD_APPROVAL_CHAT_ID=123456789",
+		"NOCKGUARD_APPROVER_IDS=42",
 		"NOCKGUARD_PASSTHROUGH=visible",
 	)
 	out, err := cmd.Output()
@@ -68,6 +69,7 @@ done
 		Result struct {
 			Token       string `json:"token"`
 			Chat        string `json:"chat"`
+			Approvers   string `json:"approvers"`
 			Passthrough string `json:"passthrough"`
 		} `json:"result"`
 	}
@@ -90,6 +92,9 @@ done
 	}
 	if resp.Result.Chat != "" {
 		t.Errorf("upstream child CAN read the approval chat id: chat=%q", resp.Result.Chat)
+	}
+	if resp.Result.Approvers != "" {
+		t.Errorf("upstream child CAN read the approver IDs: approvers=%q", resp.Result.Approvers)
 	}
 	if resp.Result.Passthrough != "visible" {
 		t.Errorf("non-secret env var was not inherited by the child: passthrough=%q (want %q)", resp.Result.Passthrough, "visible")

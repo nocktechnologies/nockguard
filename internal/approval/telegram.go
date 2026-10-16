@@ -1,10 +1,12 @@
 package approval
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -16,26 +18,45 @@ import (
 // own token for the callback. Fail-safe: a send error, a poll error, or a
 // timeout all return Approved=false — a missed prompt never auto-approves.
 type TelegramApprover struct {
-	token   string
-	chatID  string
-	apiBase string        // override for tests; defaults to https://api.telegram.org
-	timeout time.Duration // total wait for a human tap before failing safe
-	poll    time.Duration // getUpdates long-poll/spacing
-	client  *http.Client
-	nonce   func() string // unique per request; overridable for tests
+	token         string
+	chatID        string
+	chatNumericID int64
+	approverIDs   map[int64]struct{}
+	apiBase       string        // override for tests; defaults to https://api.telegram.org
+	timeout       time.Duration // total wait for a human tap before failing safe
+	poll          time.Duration // getUpdates long-poll/spacing
+	client        *http.Client
+	nonce         func() string // unique per request; overridable for tests
 }
 
 // NewTelegramApprover builds an approver bound to a dedicated bot token + chat.
-func NewTelegramApprover(token, chatID string, timeout time.Duration) *TelegramApprover {
-	return &TelegramApprover{
-		token:   token,
-		chatID:  chatID,
-		apiBase: "https://api.telegram.org",
-		timeout: timeout,
-		poll:    2 * time.Second,
-		client:  &http.Client{Timeout: 30 * time.Second},
-		nonce:   func() string { return fmt.Sprintf("%d", time.Now().UnixNano()) },
+func NewTelegramApprover(token, chatID, ids string, timeout time.Duration) (*TelegramApprover, error) {
+	chatNumericID, err := strconv.ParseInt(chatID, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", EnvChatID, err)
 	}
+	if strings.TrimSpace(ids) == "" {
+		return nil, fmt.Errorf("%s is required for Telegram approval", EnvApproverIDs)
+	}
+	approverIDs := make(map[int64]struct{})
+	for _, raw := range strings.Split(ids, ",") {
+		id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+		if err != nil || id <= 0 {
+			return nil, fmt.Errorf("%s must be a comma-separated list of numeric user IDs", EnvApproverIDs)
+		}
+		approverIDs[id] = struct{}{}
+	}
+	return &TelegramApprover{
+		token:         token,
+		chatID:        chatID,
+		chatNumericID: chatNumericID,
+		approverIDs:   approverIDs,
+		apiBase:       "https://api.telegram.org",
+		timeout:       timeout,
+		poll:          2 * time.Second,
+		client:        &http.Client{Timeout: 30 * time.Second},
+		nonce:         rand.Text,
+	}, nil
 }
 
 type tgUpdate struct {
@@ -43,6 +64,14 @@ type tgUpdate struct {
 	Callback *struct {
 		ID   string `json:"id"`
 		Data string `json:"data"`
+		From struct {
+			ID int64 `json:"id"`
+		} `json:"from"`
+		Message struct {
+			Chat struct {
+				ID int64 `json:"id"`
+			} `json:"chat"`
+		} `json:"message"`
 	} `json:"callback_query"`
 }
 
@@ -90,6 +119,21 @@ func (t *TelegramApprover) Ask(req Request) Verdict {
 		offset = next
 		for _, u := range updates {
 			if u.Callback == nil {
+				continue
+			}
+			if u.Callback.Data != "approve:"+id && u.Callback.Data != "deny:"+id {
+				continue
+			}
+			if u.Callback.Message.Chat.ID != t.chatNumericID {
+				if req.OnRejectedTap != nil {
+					req.OnRejectedTap("telegram-callback-wrong-chat")
+				}
+				continue
+			}
+			if _, allowed := t.approverIDs[u.Callback.From.ID]; !allowed {
+				if req.OnRejectedTap != nil {
+					req.OnRejectedTap("telegram-callback-unlisted-sender")
+				}
 				continue
 			}
 			switch u.Callback.Data {
