@@ -6,7 +6,9 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,10 +22,28 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
+	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/policy"
 	"github.com/nocktechnologies/nockguard/internal/sessionverify"
 )
+
+func TestTelegramApproverRefusesToStartWithoutAllowlist(t *testing.T) {
+	t.Setenv(approval.EnvTestSeam, "")
+	t.Setenv(approval.EnvApprover, "")
+	t.Setenv(approval.EnvBotToken, "test-token")
+	t.Setenv(approval.EnvChatID, "12345")
+	t.Setenv(approval.EnvApproverIDs, "")
+	var output bytes.Buffer
+	if got := buildApprover(log.New(&output, "", 0)); got != nil {
+		t.Fatalf("Telegram approver started without allowlist: %T", got)
+	}
+	if !strings.Contains(output.String(), approval.EnvApproverIDs) || !strings.Contains(output.String(), "REFUSED to start") {
+		t.Fatalf("missing clear startup error: %s", output.String())
+	}
+}
 
 func TestVerifyCommandCleanTrailProtected(t *testing.T) {
 	dir := t.TempDir()
@@ -436,13 +456,35 @@ func TestEvidenceCommandVerifiesBackingTrail(t *testing.T) {
 
 func TestPolicyProposeCommandPrintsShadowAllowlist(t *testing.T) {
 	dir := t.TempDir()
-	writePlainTrail(t, dir, "kit", []audit.Event{
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(policy.AgentPubKeyEnvName("kit"), hex.EncodeToString(pub))
+	path := policy.AgentAuditPath(filepath.Join(dir, filepath.Base(policy.DefaultAuditPath)), "kit")
+	a, err := audit.New(path, audit.WithEd25519Key(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range []audit.Event{
 		{Agent: "kit", Tool: "Read", Decision: "allow"},
 		{Agent: "kit", Tool: "Read", Decision: "allow"},
 		{Agent: "kit", Tool: "Bash", Decision: "allow"},
 		{Agent: "kit", Tool: "Write", Decision: "deny"},
 		{Agent: "ash", Tool: "WebSearch", Decision: "allow"},
-	})
+		{Agent: "kit", Tool: "*", Decision: "allow"},
+		{Agent: "kit", Tool: "mcp__*", Decision: "allow"},
+		{Agent: "kit", Tool: "read?", Decision: "allow"},
+		{Agent: "kit", Tool: "[ab]", Decision: "allow"},
+		{Agent: "kit", Tool: "*\n  allow: [\"*\"]", Decision: "allow"},
+	} {
+		if err := a.Record(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	code, stdout, stderr := runCommandForTest(t, "policy", "propose", "--agent", "kit", "--audit-dir", dir)
 	if code != 0 {
@@ -453,6 +495,46 @@ func TestPolicyProposeCommandPrintsShadowAllowlist(t *testing.T) {
 	}
 	if strings.Contains(stdout, "Write") || strings.Contains(stdout, "WebSearch") {
 		t.Fatalf("policy propose included denied or other-agent tools:\n%s", stdout)
+	}
+	var proposal struct {
+		Agents map[string]struct {
+			Shadow []string `yaml:"shadow"`
+		} `yaml:"agents"`
+	}
+	if err := yaml.Unmarshal([]byte(stdout), &proposal); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(proposal.Agents["kit"].Shadow, ","); got != "Bash,Read" {
+		t.Fatalf("rules = %q", got)
+	}
+	for _, name := range []string{"*", "mcp__*", "read?", "[ab]"} {
+		if !strings.Contains(stdout, fmt.Sprintf("# Skipped tool name containing glob characters: %q", name)) {
+			t.Fatalf("missing comment for %q: %s", name, stdout)
+		}
+	}
+}
+
+func TestPolicyProposeCommandRefusesUnsignedTrail(t *testing.T) {
+	dir := t.TempDir()
+	writePlainTrail(t, dir, "kit", []audit.Event{{Agent: "kit", Tool: "Read", Decision: "allow"}})
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(policy.AgentPubKeyEnvName("kit"), hex.EncodeToString(pub))
+	code, stdout, _ := runCommandForTest(t, "policy", "propose", "--agent", "kit", "--audit-dir", dir)
+	if code == 0 || stdout != "" {
+		t.Fatalf("unsigned trail: exit=%d stdout=%q", code, stdout)
+	}
+}
+
+func TestPolicyProposeCommandRefusesUncheckpointedSuffix(t *testing.T) {
+	dir := t.TempDir()
+	_, pub := writeEd25519TrailWithCheckpoint(t, dir, "kit", 2, 1)
+	t.Setenv(policy.AgentPubKeyEnvName("kit"), pub)
+	code, stdout, _ := runCommandForTest(t, "policy", "propose", "--agent", "kit", "--audit-dir", dir)
+	if code == 0 || stdout != "" {
+		t.Fatalf("uncheckpointed suffix: exit=%d stdout=%q", code, stdout)
 	}
 }
 
@@ -870,5 +952,29 @@ func TestPolicyCheckLoadOnly(t *testing.T) {
 	}
 	if code, _, _ := runCommandForTest(t, "policy", "check"); code != 1 {
 		t.Fatalf("no --policy exit = %d, want 1", code)
+	}
+}
+
+func TestEgressProxyRemoteBindOptIn(t *testing.T) {
+	dir := t.TempDir()
+	policyPath := writeMCPListenPolicy(t, dir, "")
+	for _, allow := range []bool{false, true} {
+		args := []string{"egress-proxy", "--listen", "0.0.0.0:65536", "--agent", "demo", "--policy", policyPath}
+		if allow {
+			args = append(args, "--allow-remote")
+		}
+		code, _, stderr := runCommandForTest(t, args...)
+		if code != 1 {
+			t.Fatalf("exit code=%d, want 1; stderr: %s", code, stderr)
+		}
+		// An out-of-range port avoids opening a remote socket while proving the flag
+		// reaches Run: opt-in must warn before the bind fails.
+		if allow {
+			if !strings.Contains(stderr, "WARNING: --allow-remote") || !strings.Contains(stderr, "unauthenticated") {
+				t.Fatalf("remote opt-in did not warn: %s", stderr)
+			}
+		} else if !strings.Contains(stderr, "must use a loopback host") {
+			t.Fatalf("missing loopback refusal: %s", stderr)
+		}
 	}
 }

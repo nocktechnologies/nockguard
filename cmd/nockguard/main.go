@@ -52,19 +52,23 @@ func buildApprover(logger *log.Logger) approval.Approver {
 		logger.Printf("Phase 5 approval gate: local approver REFUSED to start (%v); ALL gated calls fail CLOSED", err)
 		return nil
 	}
-	// Real approver: a DEDICATED Telegram bot (never the fleet's main bot). Both
-	// env vars must be set; otherwise NO approver is wired and every gated call
-	// fails closed (logged loud below). These creds are read HERE, in the proxy
+	// Real approver: a DEDICATED Telegram bot (never the fleet's main bot). The
+	// bot token, chat ID and approver IDs must be set; otherwise gated calls fail
+	// closed. These values are read HERE, in the proxy
 	// process; the proxy strips the same names from the upstream child so the
 	// policed agent can never read the token and self-approve (see approval.CredEnvNames).
 	token := os.Getenv(approval.EnvBotToken)
 	chatID := os.Getenv(approval.EnvChatID)
 	if token != "" && chatID != "" {
-		timeout := 2 * time.Minute
+		a, err := approval.NewTelegramApprover(token, chatID, os.Getenv(approval.EnvApproverIDs), timeout)
+		if err != nil {
+			logger.Printf("Phase 5 approval gate: Telegram approver REFUSED to start (%v); ALL gated calls fail CLOSED", err)
+			return nil
+		}
 		logger.Printf("Phase 5 approval gate ON — Telegram (dedicated bot), %s timeout, fail-safe deny", timeout)
-		return approval.NewTelegramApprover(token, chatID, timeout)
+		return a
 	}
-	logger.Printf("Phase 5 approval gate: no approver configured (set NOCKGUARD_APPROVAL_BOT_TOKEN + NOCKGUARD_APPROVAL_CHAT_ID); ALL gated calls fail CLOSED — both `ask` rules and legacy `require_approval` rules will be DENIED until an approver is wired")
+	logger.Printf("Phase 5 approval gate: no approver configured (set NOCKGUARD_APPROVAL_BOT_TOKEN + NOCKGUARD_APPROVAL_CHAT_ID + NOCKGUARD_APPROVER_IDS); ALL gated calls fail CLOSED — both `ask` rules and legacy `require_approval` rules will be DENIED until an approver is wired")
 	return nil
 }
 
@@ -98,7 +102,7 @@ func runCLI(args []string) int {
 	}
 
 	if args[0] == "version" {
-		fmt.Println("nockguard v0.8.0")
+		fmt.Println("nockguard v0.9.0")
 		return 0
 	}
 
@@ -372,7 +376,7 @@ func runPolicyPropose(args []string) int {
 	if !ok {
 		return 1
 	}
-	tools, err := policy.ProposeShadowFromAudit(agent, auditPath)
+	proposal, err := policy.ProposeShadowFromAudit(agent, auditPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error reading audit trail: %v\n", err)
 		return 1
@@ -385,7 +389,7 @@ func runPolicyPropose(args []string) int {
 		Agents map[string]proposedAgentPolicy `yaml:"agents"`
 	}{
 		Agents: map[string]proposedAgentPolicy{
-			agent: {Mode: "allow", Shadow: tools},
+			agent: {Mode: "allow", Shadow: proposal.Tools},
 		},
 	}
 	data, err := yaml.Marshal(out)
@@ -394,6 +398,9 @@ func runPolicyPropose(args []string) int {
 		return 1
 	}
 	fmt.Print(string(data))
+	for _, tool := range proposal.Skipped {
+		fmt.Printf("# Skipped tool name containing glob characters: %q\n", tool)
+	}
 	return 0
 }
 
@@ -477,11 +484,12 @@ func parsePolicyAuditArgs(args []string) (agent, auditPath string, ok bool) {
 
 func runEgressProxy(args []string) int {
 	var (
-		listen     string
-		agent      string
-		policyPath string
-		auditPath  string
-		enforce    bool
+		listen      string
+		agent       string
+		policyPath  string
+		auditPath   string
+		enforce     bool
+		allowRemote bool
 	)
 
 	for i := 0; i < len(args); i++ {
@@ -506,6 +514,8 @@ func runEgressProxy(args []string) int {
 				i++
 				auditPath = args[i]
 			}
+		case "--allow-remote":
+			allowRemote = true
 		case "--enforce":
 			enforce = true
 		}
@@ -527,7 +537,7 @@ func runEgressProxy(args []string) int {
 	for _, warn := range engine.Warnings() {
 		fmt.Fprintf(os.Stderr, "warning policy: %s\n", warn)
 	}
-	if err := forwardhttp.ValidateConfig(listen, agent, engine); err != nil {
+	if err := forwardhttp.ValidateConfig(listen, agent, engine, allowRemote); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
@@ -556,7 +566,7 @@ func runEgressProxy(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := forwardhttp.New(listen, agent, engine, auditor, logger).WithEnforce(enforce).Run(ctx); err != nil {
+	if err := forwardhttp.New(listen, agent, engine, auditor, logger).WithEnforce(enforce).WithAllowRemote(allowRemote).Run(ctx); err != nil {
 		logger.Printf("egress proxy error: %v", err)
 		return 1
 	}
@@ -1542,7 +1552,7 @@ Usage:
   nockguard mcp-http --upstream <url> --agent <name> [--policy <path>] [--auth-env <ENV>] [--audit-best-effort]
   nockguard mcp-listen --listen 127.0.0.1:<port> --upstream <url> --agent <name> [--policy <path>] [--audit <path>] [--audit-best-effort]
   nockguard mcp-gateway --config <path>  (OAuth resource behind a loopback HTTPS ingress)
-  nockguard egress-proxy --listen <addr> --agent <name> [--policy <path>] [--audit <path>] [--enforce]
+  nockguard egress-proxy --listen <addr> --agent <name> [--policy <path>] [--audit <path>] [--enforce] [--allow-remote]
   nockguard verify (--all | --agent <name> | --key-env <ENV> | --ed25519-pub-env <ENV>) [--audit <path>] [--audit-dir <dir>]
   nockguard verify --session <id> --lock-db <path> --guard-trail <path> (--pub-env <ENV> | --lock-pub-env <ENV> --guard-pub-env <ENV>) [--json]
   nockguard verify --export <wall.proof.json> (--agent <name> | --ed25519-pub-env <ENV>)
@@ -1561,7 +1571,8 @@ Usage:
 Options:
   --upstream         MCP server command to proxy (for: proxy) or HTTP MCP upstream URL (for: mcp-http, mcp-listen)
   --auth-env         Env var whose value is sent as the Authorization header to the HTTP upstream (for: mcp-http)
-  --listen           Listen address (for: mcp-listen use explicit loopback only; for: egress-proxy)
+  --allow-remote     Permit a non-loopback egress-proxy bind (warns; no caller authentication)
+  --listen           Listen address (for: mcp-listen use explicit loopback only; for: egress-proxy loopback unless --allow-remote)
   --agent            Agent identity for policy lookup / per-agent keypair flow
   --policy           Path to policy YAML (default: ~/.nockguard/policy.yaml)
   --enforce          Block denied egress hosts (returns 403); default is observe-only (logs but allows)

@@ -211,6 +211,7 @@ var decisionBuckets = map[string]string{
 	"hide":            "hidden", // tools/list filtering is discovery, not a refused call
 	"inject":          "other", "budget-ask": "other", "downgrade": "other",
 	DecisionUnparseable: "unreadable",
+	"method-allow":      "other", "method-deny": "other",
 }
 
 // DecisionBucket gives the Wall's count bucket for a recorded decision.
@@ -234,6 +235,12 @@ func IsRejection(decision string) bool { return DecisionBucket(decision) == "blo
 // — the built-in validate rule names (internal/validate) and the policy deny
 // reasons (internal/policy) — plus the wall's own demo phrasing.
 func Severity(decision, reason string) string {
+	if decision == "method-allow" {
+		return ThreatNone
+	}
+	if decision == "method-deny" {
+		return ThreatHigh
+	}
 	switch DecisionBucket(decision) {
 	case "approved", "hidden", "unreadable":
 		return ThreatNone

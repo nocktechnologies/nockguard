@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
+	"github.com/nocktechnologies/nockguard/internal/jsonrpc"
 )
 
 // TestMCPHTTPProxy_ToolCallReachesUpstream checks that a tools/call request
@@ -350,4 +351,97 @@ func newTestProxy(t *testing.T, upstreamURL string, auditor *audit.Auditor) *Pro
 		auditor = a
 	}
 	return New(upstreamURL, "demo", "", auditor, log.New(io.Discard, "", 0))
+}
+
+func TestMCPHTTPProxy_CanonicalToolCalls(t *testing.T) {
+	for _, tc := range []struct {
+		name, line, method, tool string
+		reject                   bool
+	}{
+		{"duplicate method", `{"method":"ping","method":"tools/call","params":{"name":"read"}}`, "tools/call", "read", false},
+		{"duplicate method reversed", `{"method":"tools/call","method":"ping","params":{}}`, "ping", "", false},
+		{"method alias", `{"Method":"tools/call","params":{"name":"read"}}`, "tools/call", "read", false},
+		{"conflicting method", `{"method":"tools/call","Method":"ping","params":{"name":"read"}}`, "tools/call", "read", false},
+		{"conflicting method reversed", `{"Method":"tools/call","method":"ping","params":{}}`, "ping", "", false},
+		{"lowercase method alias", `{"method":"tools/call","methoD":"ping","params":{"name":"read"}}`, "tools/call", "read", false},
+		{"duplicate name", `{"method":"tools/call","params":{"name":"write","name":"read"}}`, "tools/call", "read", false},
+		{"duplicate name reversed", `{"method":"tools/call","params":{"name":"read","name":"write"}}`, "tools/call", "write", false},
+		{"conflicting name", `{"method":"tools/call","params":{"name":"read","Name":"write"}}`, "tools/call", "read", false},
+		{"conflicting name reversed", `{"method":"tools/call","params":{"Name":"read","name":"write"}}`, "tools/call", "write", false},
+		{"name alias", `{"method":"tools/call","params":{"Name":"read"}}`, "", "", true},
+		{"multiple method aliases", `{"Method":"tools/call","METHOD":"ping","params":{"name":"read"}}`, "", "", true},
+		{"params alias", `{"method":"tools/call","Params":{"name":"read"}}`, "tools/call", "read", false},
+		{"missing params", `{"method":"tools/call"}`, "", "", true},
+		{"conflicting params", `{"method":"tools/call","params":{"name":"read"},"Params":{"name":"write"}}`, "", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(EnvTripwire, "")
+			var forwarded []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				forwarded, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+			}))
+			defer srv.Close()
+			path := filepath.Join(t.TempDir(), "audit.jsonl")
+			auditor, err := audit.New(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer auditor.Close()
+			p := newTestProxy(t, srv.URL, auditor)
+			var out bytes.Buffer
+			if err := p.run(context.Background(), strings.NewReader(`{"jsonrpc":"2.0","id":1,`+tc.line[1:]+"\n"), &out); err != nil {
+				t.Fatal(err)
+			}
+			if err := auditor.Close(); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.reject {
+				if len(forwarded) != 0 || len(bytes.TrimSpace(data)) != 0 {
+					t.Fatalf("ambiguous call forwarded or audited: %s / %s", forwarded, data)
+				}
+				var reply jsonrpc.Message
+				if err := json.Unmarshal(out.Bytes(), &reply); err != nil {
+					t.Fatalf("decode rejection reply %q: %v", out.String(), err)
+				}
+				if reply.JSONRPC != "2.0" || string(reply.ID) != "1" || reply.Error == nil || reply.Error.Code != -32600 || reply.Error.Message == "" {
+					t.Fatalf("expected invalid-request error for id 1, got %s", out.String())
+				}
+				return
+			}
+			var msg struct {
+				Method string `json:"method"`
+				Params struct {
+					Name string `json:"name"`
+				} `json:"params"`
+			}
+			if err := json.Unmarshal(forwarded, &msg); err != nil {
+				t.Fatal(err)
+			}
+			if msg.Method != tc.method || msg.Params.Name != tc.tool {
+				t.Fatalf("forwarded method/name = %q/%q, want %q/%q", msg.Method, msg.Params.Name, tc.method, tc.tool)
+			}
+			if bytes.Count(forwarded, []byte(`"method":`)) != 1 || (tc.tool != "" && bytes.Count(forwarded, []byte(`"name":`)) != 1) {
+				t.Fatalf("forwarded keys are not canonical: %s", forwarded)
+			}
+			if tc.tool == "" {
+				if len(bytes.TrimSpace(data)) != 0 {
+					t.Fatalf("non-tool call audited: %s", data)
+				}
+				return
+			}
+			var event audit.Event
+			if err := json.Unmarshal(bytes.TrimSpace(data), &event); err != nil {
+				t.Fatal(err)
+			}
+			if event.Tool != msg.Params.Name {
+				t.Fatalf("audit tool %q differs from forwarded tool %q", event.Tool, msg.Params.Name)
+			}
+		})
+	}
 }

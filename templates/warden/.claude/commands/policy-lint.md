@@ -60,7 +60,7 @@ if extra:
 
 ### E002 — Unknown agent-policy keys (ERROR)
 
-Valid keys under each agent: `allow`, `deny`, `ask`, `shadow`, `mode`, `fail_mode`, `validate_input`, `block_params`, `rate_limit`, `spend_cap`, `trust`, `require_approval` (legacy; prefer `ask`), `inject`. Anything else makes the policy fail to load. Source: `AgentPolicy` in `internal/policy/policy.go`.
+Valid keys under each agent: `allow`, `deny`, `deny_methods` (exact non-tool method names), `ask`, `shadow`, `mode`, `fail_mode`, `validate_input`, `block_params`, `rate_limit`, `spend_cap`, `trust`, `require_approval` (legacy; prefer `ask`), `inject`. Anything else makes the policy fail to load. Source: `AgentPolicy` in `internal/policy/policy.go`.
 
 ```bash
 POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
@@ -68,7 +68,7 @@ python3 -c "
 import yaml, sys
 with open('$POLICY') as f:
     doc = yaml.safe_load(f) or {}
-valid = {'allow','deny','ask','shadow','mode','fail_mode','validate_input','block_params','rate_limit','spend_cap','trust','require_approval','inject'}
+valid = {'allow','deny','deny_methods','ask','shadow','mode','fail_mode','validate_input','block_params','rate_limit','spend_cap','trust','require_approval','inject'}
 for agent, pol in (doc.get('agents') or {}).items():
     if not isinstance(pol, dict): continue
     extra = set(pol) - valid
@@ -240,19 +240,30 @@ if 'default' not in (doc.get('agents') or {}):
 
 ### W005 — ask / require_approval with no approver configured (WARNING)
 
-`ask` (and legacy `require_approval`) rules need an approver: the Telegram bot (`NOCKGUARD_APPROVAL_BOT_TOKEN` and `NOCKGUARD_APPROVAL_CHAT_ID`) or the local approver (`NOCKGUARD_APPROVER=local`). With neither, every such call is denied, so the tool is effectively unusable. The policy file gives no indication.
+`ask` (and legacy `require_approval`) rules need an approver: the Telegram bot or the local approver (`NOCKGUARD_APPROVER=local`). The Telegram bot starts only when all three of these are valid: `NOCKGUARD_APPROVAL_BOT_TOKEN` is not empty, `NOCKGUARD_APPROVAL_CHAT_ID` is a numeric 64-bit chat ID (a leading `-` or `+` is allowed), and `NOCKGUARD_APPROVER_IDS` is a comma-separated list of positive numeric Telegram user IDs (spaces around each ID are ignored). With no valid approver, every such call is denied, so the tool is effectively unusable. The policy file gives no indication.
 
 ```bash
 POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
 python3 -c "
 import yaml, os
+def i64(s):
+    t = s[1:] if s[:1] in ('-', '+') else s
+    if not (t.isascii() and t.isdigit()):
+        return None
+    v = int(s)
+    return v if -2**63 <= v < 2**63 else None
+def telegram_ok():
+    e = os.environ.get
+    if not e('NOCKGUARD_APPROVAL_BOT_TOKEN') or i64(e('NOCKGUARD_APPROVAL_CHAT_ID', '')) is None:
+        return False
+    ids = [i64(p.strip()) for p in e('NOCKGUARD_APPROVER_IDS', '').split(',')]
+    return all(v is not None and v > 0 for v in ids)
 with open('$POLICY') as f:
     doc = yaml.safe_load(f) or {}
 for agent, pol in (doc.get('agents') or {}).items():
     pol = pol or {}
     if pol.get('ask') or pol.get('require_approval'):
-        telegram = all(os.environ.get(v) for v in ('NOCKGUARD_APPROVAL_BOT_TOKEN', 'NOCKGUARD_APPROVAL_CHAT_ID'))
-        if not (telegram or os.environ.get('NOCKGUARD_APPROVER') == 'local'):
+        if not (telegram_ok() or os.environ.get('NOCKGUARD_APPROVER') == 'local'):
             print(f'Agent {agent!r}: ask/require_approval is set but no approver is configured — those calls will be denied')
             break
 " || { echo "policy-lint: check W005 failed to run (exit $?); do not read this as a pass" >&2; exit 1; }

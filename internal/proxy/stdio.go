@@ -284,8 +284,10 @@ func (p *StdioProxy) appendAuditWithApprovalActor(seq uint64, tool, decision, re
 	}
 	p.auditTodo[seq] = append(p.auditTodo[seq], ev)
 
-	// Apply trust outcome and forward to ops-log immediately (not deferred).
-	if p.trust.Enabled() {
+	// A rejected Telegram tap is an outside actor's action, not agent behavior.
+	// Keep its audit and alert without lowering the agent's trust score.
+	// Other block producers use fixed validator names or their own prefixes.
+	if p.trust.Enabled() && !(decision == "block" && strings.HasPrefix(reason, "telegram-callback-")) {
 		if outcome, ok := trust.DecisionToOutcome(decision); ok {
 			p.trust.ApplyOutcome(outcome)
 		}
@@ -538,6 +540,15 @@ func (p *StdioProxy) audit(tool, decision, reason string, refs *extract.Referenc
 	}
 }
 
+// auditMethod records only method metadata. Non-tool traffic must not change
+// tool trust scores or acquire references from params or session card state.
+func (p *StdioProxy) auditMethod(method, decision, reason string) {
+	p.recordAudit(audit.Event{Agent: p.agent, Tool: method, Decision: decision, Reason: reason})
+	if p.forwarder.Enabled() && isEnforcement(decision) {
+		p.forwarder.Enqueue(forward.Event{Agent: p.agent, Tool: method, Decision: decision, Reason: reason})
+	}
+}
+
 func (p *StdioProxy) setActionFields(ev *audit.Event, actionID string) {
 	ev.SchemaVersion = 2
 	ev.RecordType = "decision"
@@ -592,7 +603,7 @@ func (p *StdioProxy) updateCardState(seq uint64, tool string, refs *extract.Refe
 // centralized feed to notable enforcement or shadow-enforcement signal.
 func isEnforcement(decision string) bool {
 	switch decision {
-	case "deny", "block", "ratelimit", "approval-granted", "approval-denied", "would-deny":
+	case "deny", "method-deny", "block", "ratelimit", "approval-granted", "approval-denied", "would-deny":
 		// approval-* are the highest-signal events NockGuard captures: a human
 		// had to intervene on a consequential call, so both outcomes surface.
 		return true
@@ -655,7 +666,7 @@ func (p *StdioProxy) Run() error {
 	cmd.Stderr = os.Stderr
 	// Isolate proxy-only secrets from the policed agent. The upstream child would
 	// otherwise inherit the proxy's full environment and could read it from its own
-	// /proc/self/environ. Two secret sets are stripped:
+	// /proc/self/environ. These secret sets are stripped:
 	//   1. The audit signing seed (Ed25519/HMAC) — a child that read it could forge
 	//      the audit trail, defeating non-repudiation against the very party it
 	//      targets. Already parsed into the Auditor at startup; the child never needs it.
@@ -666,9 +677,11 @@ func (p *StdioProxy) Run() error {
 	//      os.Getenv is unaffected by this child-only sanitize), so the child never needs them.
 	//   3. The NockCC vault endpoint and agent token — the proxy uses them to
 	//      resolve nockcc: refs, so the upstream child must not inherit them.
+	//   4. The configured audit-forwarder API key, used only by the proxy.
 	// The strip sets compose; sanitizedEnv only touches the CHILD's cmd.Env.
 	strip := append(p.engine.SigningKeyEnvNamesFor(p.agent), approval.CredEnvNames()...)
 	strip = append(strip, p.engine.InjectEnvNames()...)
+	strip = append(strip, p.engine.ForwarderKeyEnvNames()...)
 	strip = append(strip, "NOCKCC_BASE_URL", "NOCKGUARD_VAULT_AGENT_TOKEN")
 	cmd.Env = sanitizedEnv(strip)
 	// Own process group, so a cutoff can kill grandchildren that inherited stdout.
@@ -1520,7 +1533,7 @@ type canonicalMessageFailure int
 const (
 	canonicalMessageOK canonicalMessageFailure = iota
 	canonicalMessageUndecodable
-	canonicalMessageAmbiguousParams
+	canonicalMessageAmbiguousKey
 	canonicalMessageMarshalFailed
 	canonicalMessageDecodeFailed
 )
@@ -1530,15 +1543,22 @@ func canonicalizeMessage(line []byte) (map[string]json.RawMessage, []byte, *json
 	if err := json.Unmarshal(line, &topLevel); err != nil {
 		return nil, nil, nil, canonicalMessageUndecodable
 	}
-	for key, value := range topLevel {
-		if key == "params" || !strings.EqualFold(key, "params") {
-			continue
+	for _, field := range []string{"params", "method"} {
+		_, exactPresent := topLevel[field]
+		for key, value := range topLevel {
+			if key == field || !strings.EqualFold(key, field) {
+				continue
+			}
+			if _, exists := topLevel[field]; exists {
+				if field == "method" && exactPresent {
+					delete(topLevel, key)
+					continue
+				}
+				return nil, nil, nil, canonicalMessageAmbiguousKey
+			}
+			topLevel[field] = value
+			delete(topLevel, key)
 		}
-		if _, exists := topLevel["params"]; exists {
-			return nil, nil, nil, canonicalMessageAmbiguousParams
-		}
-		topLevel["params"] = value
-		delete(topLevel, key)
 	}
 	canonicalLine, err := json.Marshal(topLevel)
 	if err != nil {
@@ -1560,7 +1580,7 @@ func canonicalizeMessage(line []byte) (map[string]json.RawMessage, []byte, *json
 func (p *StdioProxy) decide(line []byte, seq uint64) mcpDecision {
 	// Canonicalize the TOP-LEVEL message before doing anything else. Unmarshal
 	// into a map so any duplicate top-level keys (method, id, params, ...)
-	// collapse to Go's last-wins value. Canonicalize case-folded params aliases
+	// collapse to Go's last-wins value. Canonicalize case-folded method and params aliases
 	// (or reject a conflict) before re-marshaling, so the bytes the proxy
 	// gates and the bytes the upstream receives are now identical, so a
 	// first-key-wins upstream cannot read a different "method" (e.g. a second
@@ -1576,10 +1596,10 @@ func (p *StdioProxy) decideCanonical(topLevel map[string]json.RawMessage, canoni
 		p.logger.Printf("REJECT agent=%s reason=undecodable-or-batch", p.agent)
 		return mcpDecision{reject: true, rejectID: json.RawMessage("null"), rejectCode: -32700,
 			rejectMsg: "nockguard: rejected — only single well-formed JSON-RPC objects are accepted (batch arrays are not gated)"}
-	case canonicalMessageAmbiguousParams:
-		p.logger.Printf("REJECT agent=%s reason=ambiguous-params-key", p.agent)
+	case canonicalMessageAmbiguousKey:
+		p.logger.Printf("REJECT agent=%s reason=ambiguous-message-key", p.agent)
 		return mcpDecision{reject: true, rejectID: json.RawMessage("null"), rejectCode: -32600,
-			rejectMsg: "nockguard: rejected — ambiguous params key"}
+			rejectMsg: "nockguard: rejected — ambiguous message key"}
 	case canonicalMessageMarshalFailed:
 		p.handleFailModeAsk("", nil, "canonical-marshal-failed", seq)
 		p.logger.Printf("REJECT agent=%s reason=canonical-marshal-failed", p.agent)
@@ -1601,10 +1621,17 @@ func (p *StdioProxy) decideCanonical(topLevel map[string]json.RawMessage, canoni
 		return p.decideToolCall(msg, topLevel, canonicalLine, seq)
 	}
 
-	// Non-tools/call traffic (initialize, tools/list, responses, other
-	// notifications) is not gated, but we forward the CANONICAL top-level bytes
-	// (not the raw line) so duplicate-key collapsing reaches upstream — a shadow
-	// "method" can't differ between the proxy's view and upstream's.
+	// Responses have no method and are not new MCP operations. Record only
+	// the method for requests and notifications; never inspect their params.
+	if msg.Method != "" {
+		if p.engine.DeniesMethod(p.agent, msg.Method) {
+			p.auditMethod(msg.Method, "method-deny", "deny-method")
+			return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32601,
+				rejectMsg: "nockguard: method denied by policy"}
+		}
+		p.auditMethod(msg.Method, "method-allow", "method-pass-through")
+	}
+	// Forward canonical bytes so policy and upstream see the same method.
 	d := mcpDecision{forward: canonicalLine}
 	if msg.IsRequest() {
 		if msg.Method == "tools/list" {
@@ -1769,7 +1796,19 @@ func (p *StdioProxy) approveAsk(tool string, params json.RawMessage, refs *extra
 		p.resolveAudit(seq)
 		return false
 	}
-	v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: tool, Params: params, Reason: dec.Reason})
+	var rejectedTaps int
+	v := p.approver.Ask(approval.Request{Agent: p.agent, Tool: tool, Params: params, Reason: dec.Reason,
+		OnRejectedTap: func(reason string) {
+			rejectedTaps++
+			if rejectedTaps == 1 {
+				p.logger.Printf("APPROVAL-CALLBACK-BLOCKED agent=%s tool=%s reason=%s", p.agent, tool, reason)
+				p.appendAudit(seq, tool, "block", reason, refs)
+			}
+		},
+	})
+	if rejectedTaps > 1 {
+		p.logger.Printf("APPROVAL-CALLBACK-BLOCKED-SUMMARY agent=%s tool=%s rejected-taps=%d", p.agent, tool, rejectedTaps)
+	}
 	if !v.Approved {
 		p.logger.Printf("APPROVAL-DENIED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)
 		p.appendAuditWithApprovalActor(seq, tool, "approval-denied", v.Reason, refs, v.ApprovalActor)
@@ -2108,7 +2147,8 @@ func sanitizedEnv(strip []string) []string {
 // call the proxy cannot interpret, which the caller fails closed. Top-level
 // duplicate keys collapse to the last value (the value the name gate sees), so
 // the forwarded bytes carry exactly one of each key and the upstream cannot
-// resolve a shadow name. Canonicalize nested objects too: a typed upstream may
+// resolve a shadow name. Case variants of name are removed when an exact
+// name is present. Canonicalize nested objects too: a typed upstream may
 // merge duplicate objects that the validator's map decoder replaces. UseNumber
 // preserves numeric literals without passing them through float64.
 func canonicalToolCall(params json.RawMessage) (name string, canonical json.RawMessage, ok bool) {
@@ -2131,6 +2171,13 @@ func canonicalToolCall(params json.RawMessage) (name string, canonical json.RawM
 	dec.UseNumber()
 	if err := dec.Decode(&value); err != nil {
 		return "", nil, false
+	}
+	// The exact name is authoritative; remove aliases so typed upstreams
+	// cannot select a different name through case-insensitive decoding.
+	for key := range value {
+		if key != "name" && strings.EqualFold(key, "name") {
+			delete(value, key)
+		}
 	}
 	out, err := json.Marshal(value)
 	if err != nil {

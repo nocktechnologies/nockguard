@@ -205,6 +205,8 @@ func TestEmittedDecisionCensus(t *testing.T) {
 	emitted := []struct{ decision, site, bucket string }{
 		{"", "audit.Event zero value", "approved"},
 		{"allow", "policy.go:verdictName; stdio.go:appendAudit; forwardhttp.go", "approved"},
+		{"method-allow", "stdio.go:auditMethod", "other"},
+		{"method-deny", "stdio.go:auditMethod", "other"},
 		{"would-deny", "stdio.go:appendAudit", "approved"},
 		{"observe", "mcphttp.go:Record", "approved"},
 		{"dispatch", "httplisten.go:audit", "approved"},
@@ -276,7 +278,7 @@ func TestEmittedDecisionCensus(t *testing.T) {
 				switch name {
 				case "appendAudit", "enqueueBudgetEvent":
 					index = 2
-				case "audit":
+				case "audit", "auditMethod":
 					index = 1
 				}
 				if index >= 0 && len(n.Args) > index {

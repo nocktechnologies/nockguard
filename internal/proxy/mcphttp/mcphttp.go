@@ -116,16 +116,22 @@ func (p *Proxy) run(ctx context.Context, in io.Reader, out io.Writer) error {
 }
 
 func (p *Proxy) handleLine(ctx context.Context, line []byte, out io.Writer, tripwire bool) error {
-	msg, err := jsonrpc.Decode(line)
+	canonical, msg, toolName, err := proxy.CanonicalizeForForward(line)
 	if err != nil {
-		// Not valid JSON-RPC — skip rather than block; log so the operator can see it.
-		p.logger.Printf("WARN agent=%s: undecodable line, skipping: %v", p.agent, err)
+		// Reject decodable requests so clients do not wait for a timeout.
+		// Malformed input and messages without an id have no reply target.
+		p.logger.Printf("WARN agent=%s: rejected message: %v", p.agent, err)
+		var object map[string]json.RawMessage
+		if json.Unmarshal(line, &object) == nil {
+			if id, ok := object["id"]; ok {
+				_, _ = fmt.Fprintf(out, "%s\n", jsonrpc.ErrorResponse(id, -32600, "nockguard mcp-http: "+err.Error()))
+			}
+		}
 		return nil
 	}
 
 	// Audit tools/call before forwarding (tripwire skips audit entirely).
 	if msg.Method == "tools/call" && !tripwire {
-		toolName := extractToolName(msg.Params)
 		if err := p.record(toolName); err != nil {
 			p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, toolName, err)
 			if !p.bestEffort {
@@ -138,7 +144,7 @@ func (p *Proxy) handleLine(ctx context.Context, line []byte, out io.Writer, trip
 	}
 
 	// Forward after the audit gate clears.
-	resp, err := p.post(ctx, line)
+	resp, err := p.post(ctx, canonical)
 	if err != nil {
 		p.logger.Printf("UPSTREAM-ERROR agent=%s: %v", p.agent, err)
 		// Return a JSON-RPC error to the client on request failures so the
@@ -236,16 +242,6 @@ func (p *Proxy) record(tool string) error {
 		return p.auditor.Record(ev)
 	}
 	return p.auditor.RecordRequired(ev)
-}
-
-func extractToolName(params json.RawMessage) string {
-	var obj struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(params, &obj); err != nil {
-		return ""
-	}
-	return obj.Name
 }
 
 func trimTrailingNewlines(b []byte) []byte {

@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -177,8 +178,29 @@ func requireLoopback(addr string) error {
 // forwards it upstream (allow) or returns a JSON-RPC error without ever
 // contacting upstream (deny/block/rate-limit/approval-denied).
 func (l *HTTPListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// An empty listen address is used only by the in-process hosted gateway,
+	// which validates its configured public Host and Origin before calling us.
+	// Run refuses an empty bind, so it cannot expose this path as a listener.
+	if l.listen != "" {
+		if !httpListenerLoopbackHost(r.Host) {
+			http.Error(w, "invalid host", http.StatusMisdirectedRequest)
+			return
+		}
+		// The local listener has no browser-origin allowlist. Native MCP clients
+		// omit Origin; reject every supplied value, including null and duplicates.
+		if len(r.Header.Values("Origin")) > 0 {
+			http.Error(w, "origin forbidden", http.StatusForbidden)
+			return
+		}
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	contentTypes := r.Header.Values("Content-Type")
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if len(contentTypes) != 1 || err != nil || mediaType != "application/json" {
+		http.Error(w, "application/json required", http.StatusUnsupportedMediaType)
 		return
 	}
 
@@ -261,6 +283,27 @@ func (l *HTTPListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// forward the CANONICAL bytes upstream and stream the response back unchanged.
 	// forward() will set resolved = true to prevent double-resolution in the defer.
 	l.forward(w, r, d.forward, d.toolForState, d.refsForState, d.deferredAudits, d.refsForAudit, d.tool, seq, &resolved)
+}
+
+func httpListenerLoopbackHost(authority string) bool {
+	host := authority
+	if strings.Contains(authority, ":") {
+		var port string
+		var err error
+		host, port, err = net.SplitHostPort(authority)
+		if err != nil {
+			return false
+		}
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return false
+		}
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // jsonRPCIDMatches reports whether respID is present and equals the id of the

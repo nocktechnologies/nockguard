@@ -58,7 +58,7 @@ nockguard wall --agent coder          # open the Live Wall for coder's signed tr
 
 To exercise the blocked canary as well, run `python3 scripts/quickstart-acceptance.py` from a source checkout. This Linux CI test runs the commands above in an empty home with a local MCP stub using the filesystem server's tool names. It confirms both reads succeed, a direct `write_file` call is denied without creating a file, `verify` exits 0 with `PROTECTED`, and the signed trail records both allow and deny decisions. Denied tools are hidden from normal MCP tool discovery, so the test sends the canary call directly.
 
-The Live Wall over the trail that script writes (local stub upstream, `coder` agent): 6 records in view, 4 allowed (two `allow` and two `dispatch`), 1 rejected (the denied `write_file`) and 1 tool hidden (`write_file` in discovery). The header reads "Verification: verified" against `coder.pub`.
+The Live Wall over the trail that script writes (local stub upstream, `coder` agent): 8 records in view, 6 allowed (four `allow` and two `dispatch`), 1 rejected (the denied `write_file`) and 1 tool hidden (`write_file` in discovery). The header reads "Verification: verified" against `coder.pub`.
 
 For a longer local policy demo, run `nockguard keygen --agent demo` and then
 `python3 livedemo/live_client.py`. Its bundled MCP server demonstrates allowed,
@@ -171,6 +171,8 @@ agents:
 
 Policy verdict precedence is `deny` first, then `ask`, then normal allow/mode logic. An `Ask` verdict is not a warning or "flag but pass" result: the call is withheld until approval. Any state-write intents attached to the policy decision are also withheld; NockGuard applies them only after approval, and drops them on denial or timeout. The legacy `require_approval` key remains accepted for existing policies, but new policies should use `ask`. An `ask` call needs an approver: the dedicated Telegram bot, or the network-free local approver (`NOCKGUARD_APPROVER=local`, see "Local approver" under Phase 5 below). With neither, every `ask` call is denied.
 
+For Telegram approval, set `NOCKGUARD_APPROVAL_BOT_TOKEN`, `NOCKGUARD_APPROVAL_CHAT_ID`, and `NOCKGUARD_APPROVER_IDS` (a comma-separated list of numeric Telegram user IDs). A callback approves or denies only when its sender is listed and its message belongs to the configured chat. Missing or invalid approver IDs prevent the Telegram approver from starting; gated calls fail closed. Rejected taps receive a short refusal and leave the call held. The stdio proxy and HTTP enforcement listener share the approval gate, so the first rejected tap on each held request records one `block` audit row and forwards one `high` severity NockCC event when forwarding is enabled. Later taps are counted in a local summary log without adding audit rows or alerts. The `mcp-http` bridge is observe-only and does not ask for approval.
+
 Rate limiting and spend caps are opt-in and independent — set one, both, or neither. NockGuard sits at the MCP layer and sees tool *calls*, not upstream API token spend, so the spend cap is denominated in tool calls (a proxy for cost), enforced before the call reaches the server. When a call clears the allowlist and input validation but exceeds a limit, the agent receives a JSON-RPC error (`rate limit exceeded` / `spend cap exceeded`); policy-denied or input-blocked calls never consume budget. Ask calls are metered before the approval prompt, preserving the existing Phase 5 gate order.
 
 ## Verify a trail in one command
@@ -187,6 +189,8 @@ nockguard verify --all          # check every per-agent trail found in the audit
 ### One verdict for a session across NockGuard and NockLock
 
 When an agent runs under `nocklock wrap`, NockLock records the session in its own signed SQLite log and NockGuard stamps the same `session_id` (and its signing key's `key_id`) on every trail line. `verify --session` checks both chains for that session and gives one verdict:
+
+Session IDs come from `NOCKLOCK_SESSION_ID` in the launching process's environment and are not authenticated.
 
 ```bash
 nockguard verify --session <id> \
@@ -238,7 +242,7 @@ Each decision is one JSON object per line (JSON Lines):
 {"ts":"2026-06-03T18:30:01Z","agent":"coder","tool":"read_file","decision":"allow","reason":"allow-rule \"read_*\""}
 ```
 
-`decision` is one of `allow`, `deny`, `would-deny` (shadow dry-run miss), `block` (input validation), `ratelimit`, `approval-granted`, `approval-denied`, `state-write`, `hide` (filtered from `tools/list`), or `dispatch` (required-audit permission to forward).
+`decision` is one of `allow`, `deny`, `would-deny` (shadow dry-run miss), `block` (input validation or a rejected Telegram approval tap), `ratelimit`, `approval-granted`, `approval-denied`, `state-write`, `hide` (filtered from `tools/list`), or `dispatch` (required-audit permission to forward).
 
 When auditing is enabled, `proxy`, `mcp-http`, and `mcp-listen` persist a decision
 before forwarding a tool call. A pre-forward write failure refuses that call;
@@ -310,7 +314,7 @@ audit:
     api_key_env: NOCKCC_API_KEY   # the key is read from this env var, never stored in the policy file
 ```
 
-Forwarding is **asynchronous and fail-open**: events post on a background worker, `Enqueue` never blocks (it drops if the buffer saturates), and any HTTP/transport error is swallowed — a slow or unreachable NockCC can never stall or fail a tool call. Severity maps as `block → high` (an injection / secret-exfil attempt), `would-deny → info`, and `deny` / `ratelimit → warn`. Misconfiguration (forwarding enabled with no `url`, or an `api_key_env` that doesn't resolve) fails loud at startup rather than silently dropping every event.
+Forwarding is **asynchronous and fail-open**: events post on a background worker, `Enqueue` never blocks (it drops if the buffer saturates), and any HTTP/transport error is swallowed — a slow or unreachable NockCC can never stall or fail a tool call. Severity maps as `block → high` (an input-validation block or the first rejected Telegram approval tap), `would-deny → info`, and `deny` / `ratelimit → warn`. Misconfiguration (forwarding enabled with no `url`, or an `api_key_env` that doesn't resolve) fails loud at startup rather than silently dropping every event.
 
 Replace `command.example.com` with the base URL of your own Command Center.
 
@@ -323,9 +327,12 @@ used:
 nockguard policy propose --agent coder
 ```
 
-The command reads `~/.nockguard/logs/coder.audit.jsonl`, extracts distinct allowed
-tools, and prints a proposed `shadow:` allowlist. After adding that block to the
-agent policy, run in observe mode and preview false positives:
+The command verifies `~/.nockguard/logs/coder.audit.jsonl` with the agent’s public
+key (from the same environment variable or key file used by `verify --agent`).
+It requires a non-empty, fully checkpointed signed trail, extracts distinct
+allowed tools, and prints a proposed `shadow:` allowlist. Names containing
+`*`, `?`, or `[` appear only in comments for manual review. After adding that
+block to the agent policy, run in observe mode and preview false positives:
 
 ```bash
 nockguard policy shadow-report --agent coder
@@ -471,7 +478,7 @@ NockGuard intercepts two MCP methods:
 - **tools/list**: Keeps allowed and ask-verdict tools visible and hides denied tools. An ask tool is held for approval when called.
 - **tools/call**: Checks the tool name against policy before forwarding. `Deny` rejects immediately. `Ask` holds the call for the configured approver and forwards only on approval, applying any withheld state writes after that approval. With Phase 2 validation enabled, NockGuard also scans the call's arguments (recursively, keys and values) against the configured rule categories and custom patterns, blocking injection attempts and outbound sensitive-data leaks. With Phase 3 limits enabled, a call that clears policy and validation is then metered against the agent's rate limit and spend cap. Denied, ask-denied, blocked, or over-limit calls get a JSON-RPC error response.
 
-All other MCP traffic passes through unmodified. NockGuard is version-transparent — it works with any MCP protocol version. Input validation is opt-in: an allowlist-only policy behaves exactly as in Phase 1.
+Other method-bearing MCP messages pass through by default and, with auditing enabled, record `method-allow` or `method-deny` containing the method name in `tool`, never params. These rows are excluded from tool allowlist proposals and tool decision counts. Method rows are written immediately and can precede earlier tool decisions waiting on upstream responses. Denied method requests return JSON-RPC `-32601` (method not found). Set per-agent `deny_methods: [resources/read, prompts/get, completion/complete]` to refuse exact method names before upstream contact. The named agent policy takes precedence over `default`; entries are case-sensitive literals, not globs. `tools/call` cannot appear in this list: use tool `deny` rules instead. Tool rules, validation, approvals and limits do not inspect other methods' params. Notifications follow the same method policy; denied notifications are dropped without a JSON-RPC response. Responses without a method pass through without a method audit row. NockGuard is version-transparent — it works with any MCP protocol version. Input validation is opt-in: an allowlist-only policy behaves exactly as in Phase 1.
 
 ## Coverage scope
 
