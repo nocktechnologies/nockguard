@@ -18,6 +18,14 @@ const auditAfterForwardError = "nockguard: audit failed after forwarding; tool m
 const unverifiedToolResponseError = "nockguard: upstream response could not be verified; tool may have executed; do not retry automatically"
 
 func (p *StdioProxy) recordAudit(ev audit.Event) error {
+	if p.actionPairing && p.runStopping.Load() && !p.runActive.Load() {
+		return fmt.Errorf("audit run is closed")
+	}
+	if p.runActive.Load() && ev.SchemaVersion == 0 {
+		ev.SchemaVersion = 2
+		ev.RecordType = "decision"
+		ev.RunID = p.actionRunID
+	}
 	var err error
 	if p.requiredAudit {
 		err = p.auditor.RecordRequired(ev)

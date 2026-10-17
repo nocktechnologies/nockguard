@@ -93,6 +93,8 @@ type StdioProxy struct {
 	actionInitErr error
 	actionSeq     uint64
 	actionIDs     map[uint64]string // audit request sequence -> generated action id
+	runStopping   atomic.Bool
+	runActive     atomic.Bool
 }
 
 // writeAgentLine writes one newline-terminated line to the agent-facing channel
@@ -661,6 +663,56 @@ func (p *StdioProxy) Run() error {
 	if p.actionInitErr != nil {
 		return p.actionInitErr
 	}
+	runCloseAllowed := false
+	if p.actionPairing {
+		if !p.auditor.Signed() {
+			return fmt.Errorf("audit.action_pairing requires a signed audit writer for run lifecycle")
+		}
+		if err := p.auditor.RecordRequired(audit.Event{Agent: p.agent, SchemaVersion: 2, RecordType: "run", RunID: p.actionRunID, RunEvent: "open"}); err != nil {
+			return fmt.Errorf("open audit run: %w", err)
+		}
+		p.logger.Printf("AUDIT-RUN open run_id=%s", p.actionRunID)
+		p.runActive.Store(true)
+		stopHeartbeat := make(chan struct{})
+		var heartbeats sync.WaitGroup
+		heartbeats.Add(1)
+		go func() {
+			defer heartbeats.Done()
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopHeartbeat:
+					return
+				case <-ticker.C:
+					if err := p.auditor.RecordRequired(audit.Event{Agent: p.agent, SchemaVersion: 2, RecordType: "run", RunID: p.actionRunID, RunEvent: "heartbeat"}); err != nil {
+						p.logger.Printf("AUDIT-RUN heartbeat failed run_id=%s: %v", p.actionRunID, err)
+						return
+					}
+				}
+			}
+		}()
+		defer func() {
+			p.runStopping.Store(true)
+			close(stopHeartbeat)
+			heartbeatDone := make(chan struct{})
+			go func() { heartbeats.Wait(); close(heartbeatDone) }()
+			select {
+			case <-heartbeatDone:
+			case <-time.After(auditDrainBound):
+				runCloseAllowed = false
+				p.logger.Printf("AUDIT-RUN heartbeat drain timed out run_id=%s", p.actionRunID)
+			}
+			p.runActive.Store(false)
+			if runCloseAllowed && p.auditor.RequiredError() == nil {
+				if err := p.auditor.RecordRequired(audit.Event{Agent: p.agent, SchemaVersion: 2, RecordType: "run", RunID: p.actionRunID, RunEvent: "close"}); err != nil {
+					p.logger.Printf("AUDIT-RUN close failed run_id=%s: %v", p.actionRunID, err)
+				} else {
+					p.logger.Printf("AUDIT-RUN close run_id=%s", p.actionRunID)
+				}
+			}
+		}()
+	}
 
 	cmd := exec.Command(p.upstream[0], p.upstream[1:]...)
 	cmd.Stderr = os.Stderr
@@ -728,6 +780,7 @@ func (p *StdioProxy) Run() error {
 	var outputFailed atomic.Bool
 	outputErrCh := make(chan error, 1)
 	upstreamDone := make(chan struct{})
+	inputDone := make(chan struct{})
 	outputProgress := make(chan struct{}, 1)
 
 	pendingCalls := &sync.Map{}
@@ -740,6 +793,7 @@ func (p *StdioProxy) Run() error {
 	}()
 
 	go func() {
+		defer close(inputDone)
 		if err := p.agentToUpstream(os.Stdin, upstreamIn, pendingCalls); err != nil {
 			errCh <- fmt.Errorf("agent->upstream: %w", err)
 		} else {
@@ -766,6 +820,7 @@ func (p *StdioProxy) Run() error {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return fmt.Errorf("proxy received %s", sig)
 	}
+	p.runStopping.Store(true)
 	// Clean output EOF bounds the leader wait to one second. When the leader
 	// exits first, let a reading client receive output while it keeps flowing,
 	// subject to a ten-second absolute cap from that exit.
@@ -885,6 +940,14 @@ func (p *StdioProxy) Run() error {
 	}()
 	select {
 	case <-audited:
+		if p.actionPairing {
+			select {
+			case <-inputDone:
+				runCloseAllowed = true
+			case <-time.After(auditDrainBound):
+				p.logger.Printf("AUDIT-RUN input drain timed out run_id=%s", p.actionRunID)
+			}
+		}
 	case <-auditShutdown.Done():
 		shutdownTimedOut = true
 		p.logger.Print("upstream exited: audit drain deadline reached")
@@ -1344,6 +1407,9 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 	for scanner.Scan() {
+		if p.runStopping.Load() {
+			return fmt.Errorf("audit run is shutting down")
+		}
 		if p.requiredAudit {
 			if err := p.auditor.RequiredError(); err != nil {
 				p.logger.Printf("AUDIT-ERROR agent=%s audit failing: calls refused: %v", p.agent, err)

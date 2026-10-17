@@ -75,6 +75,34 @@ func TestVerifyCommandCleanTrailProtected(t *testing.T) {
 	}
 }
 
+func TestVerifyCommandCompletenessIsSeparateFromIntegrity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	key := []byte("run lifecycle command test key")
+	a, err := audit.New(path, audit.WithSigningKey(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	runID := "0123456789abcdef0123456789abcdef"
+	for _, event := range []string{"open", "close"} {
+		if err := a.RecordRequired(audit.Event{Agent: "demo", SchemaVersion: 2, RecordType: "run", RunID: runID, RunEvent: event}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TEST_RUN_AUDIT_KEY", string(key))
+	code, stdout, stderr := runCommandForTest(t, "verify", "--key-env", "TEST_RUN_AUDIT_KEY", "--audit", path, "--completeness", "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit=%d stderr=%q stdout=%s", code, stderr, stdout)
+	}
+	var got verifyResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Verdict != "PROTECTED" || len(got.Completeness) != 1 || got.Completeness[0].Verdict != "LIMITED" {
+		t.Fatalf("integrity and completeness must be separate: %+v", got)
+	}
+}
+
 func TestVerifyCommandRequiresRowsAndCompleteCheckpoint(t *testing.T) {
 	for _, tc := range []struct {
 		name           string

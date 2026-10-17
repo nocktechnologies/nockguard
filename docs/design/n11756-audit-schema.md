@@ -84,6 +84,15 @@ Add a separate analyzer result; do not change `verify`'s integrity `PROTECTED` v
 
 The analyzer scans the full shared trail after ordinary integrity verification, groups only by `run_id`, and validates per-run counters/head plus action lifecycles. The global `.hwm` count still covers the shared file; a run-local close summary is not a replacement for it. Old v1 rows provide no run membership or terminal evidence, so an analyzer cannot declare a legacy run complete.
 
+N11759's implemented assessment splits two conservative cases out of the
+draft's broader statuses: a verified legacy-only trail is `UNVERIFIED` because
+it has no run lifecycle, and a verified v2 run with invalid structure is
+`BROKEN`. `INCOMPLETE` describes an open run whose heartbeat is stale or a
+recorded action without a terminal observation. `UNASSESSABLE` remains for a
+future-dated heartbeat, mixed legacy/v2 producers, or unavailable verification.
+These are observation-stream statuses; the independent integrity verdict
+remains authoritative about signatures and the checkpoint.
+
 ## Compatibility and rollout
 
 The historical v1 field set is the original `Event` plus N11755's additive `approval_actor,omitempty`. When that field and all v2 fields are empty, new readers must retain the historical typed-marshal bytes exactly. N11755 write and read validation applies to the actor field in both versions. A populated actor remains an implicit-v1 row, but an old verifier that predates N11755 will drop it and fail signature verification; disclose this compatibility boundary with N11755. New verifiers must verify actor-bearing v1 rows and v2 against their respective typed shapes. Add golden tests proving old signed HMAC and Ed25519 fixtures still verify and serialize byte-for-byte, plus tests for duplicate keys at nested depths, unknown keys, case aliases, omitted/default fields, explicit v1, and unknown versions.

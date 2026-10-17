@@ -53,9 +53,19 @@ cannot verify signed v2 trails, and their signed writer refuses to reopen such
 a trail after startup verification fails. An older unsigned writer does not
 authenticate v2 fields and may append legacy rows instead. Keep pairing on a
 dedicated audit path; a rollback must use a new path. Pairing is disabled by
-default, requires required audit writes, applies to stdio only, and cannot be
-combined with `--audit-best-effort`. These action rows do not include run
-open/close records and therefore do not support a completeness verdict; the
+default, requires signed and durable audit writes, applies to stdio only, and cannot be
+combined with `--audit-best-effort`. The signed producer durably appends
+`run/open` before accepting calls, writes `run/heartbeat` every 30 seconds,
+and writes `run/close` after its bounded shutdown drain only if the writer
+stayed healthy. The close commits the preceding per-run count and signature
+under the shared trail's file lock. `verify --completeness` reports a separate
+per-run assessment after ordinary integrity verification. `LIMITED` means
+only that the signed observation stream recorded for that run is internally
+complete; it does not certify every attempt was recorded or that an upstream
+side effect completed. A missing close becomes `INCOMPLETE` after 90 seconds
+without a heartbeat, but cannot distinguish a crash from a cut trail. Recent
+open runs are `IN_PROGRESS`, future-dated heartbeats are `UNASSESSABLE`,
+legacy trails are `UNVERIFIED`, and invalid run structure is `BROKEN`. The
 dispatch itself never proves execution or success. Source:
 `internal/audit/audit.go`, `internal/proxy/stdio.go`.
 
