@@ -250,7 +250,6 @@ func runCLI(args []string) int {
 			fmt.Fprintf(os.Stderr, "error: zero-config observe setup failed: %v\n", err)
 			return 1
 		}
-		defer auditor.Close()
 		printObserveBanner(os.Stderr, agent, auditPath, pubHex, policyPath)
 	} else {
 		// A policy file is present or was explicitly named: load-or-error, unchanged.
@@ -281,8 +280,8 @@ func runCLI(args []string) int {
 			fmt.Fprintf(os.Stderr, "error opening audit trail: %v\n", err)
 			return 1
 		}
-		defer auditor.Close()
 	}
+	defer closeAuditorBounded(os.Stderr, auditor.Close, time.Second)
 
 	validator, err := engine.ValidatorFor(agent)
 	if err != nil {
@@ -740,11 +739,64 @@ func parseCommand(cmd string) []string {
 // and fully checkpointed, 2 = any tampered, 1 = any empty, unanchored or
 // unverifiable trail, or no trails found (NO_TRAILS is not protected).
 type verifyResult struct {
-	Verdict         string `json:"verdict"`
-	AuditPath       string `json:"audit_path,omitempty"`
-	PubKeySource    string `json:"public_key_source,omitempty"`
-	EntriesVerified int    `json:"entries_verified"`
-	Error           string `json:"error,omitempty"`
+	Verdict         string                `json:"verdict"`
+	AuditPath       string                `json:"audit_path,omitempty"`
+	PubKeySource    string                `json:"public_key_source,omitempty"`
+	EntriesVerified int                   `json:"entries_verified"`
+	Error           string                `json:"error,omitempty"`
+	Completeness    []audit.RunAssessment `json:"completeness,omitempty"`
+}
+
+// closeAuditorBounded closes the audit writer without letting a stuck write
+// hold process exit forever. The proxy has already written or skipped its run
+// close row by now, so a timeout says only that a write is still in flight;
+// the trail itself records whether the run closed.
+func closeAuditorBounded(w io.Writer, closeFn func() error, timeout time.Duration) {
+	closed := make(chan error, 1)
+	go func() { closed <- closeFn() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			fmt.Fprintf(w, "audit close failed: %v\n", err)
+		}
+	case <-time.After(timeout):
+		fmt.Fprintln(w, "audit close timed out: an audit write is still in progress; check the run with nockguard verify --completeness")
+	}
+}
+
+// readVerifySnapshot reads the checkpoint and trail as one consistent
+// snapshot. A regular trail is held under the shared flock that signed writers
+// take exclusively for each append and checkpoint update, so a live writer
+// cannot land a row or checkpoint between the two reads. The checkpoint is read
+// first so that, even without the lock, its count never runs ahead of the trail.
+func readVerifySnapshot(path string) (trail, hwm []byte, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if info.Mode().IsRegular() {
+		if err := audit.LockShared(f.Fd()); err != nil {
+			return nil, nil, fmt.Errorf("locking audit trail: %w", err)
+		}
+		defer func() { _ = audit.UnlockFile(f.Fd()) }()
+	}
+	hwm, err = os.ReadFile(path + ".hwm")
+	if os.IsNotExist(err) {
+		hwm, err = nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	trail, err = io.ReadAll(f)
+	if err != nil {
+		return nil, nil, err
+	}
+	return trail, hwm, nil
 }
 
 type verifyAllResult struct {
@@ -911,12 +963,15 @@ func runAudit(args []string) int {
 	var auditPath, auditDir, agentName, keyEnv, pubEnv string
 	allMode := false
 	jsonOutput := false
+	completeness := false
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--all":
 			allMode = true
 		case "--json":
 			jsonOutput = true
+		case "--completeness":
+			completeness = true
 		case "--audit":
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "error: --audit requires a value")
@@ -965,6 +1020,10 @@ func runAudit(args []string) int {
 	// --all verifies EVERY per-agent trail in one command ("prove the whole fleet
 	// is accountable") and short-circuits the single-trail modes below.
 	if allMode {
+		if completeness {
+			fmt.Fprintln(os.Stderr, "error: --completeness requires a single trail")
+			return 1
+		}
 		return verifyAllAgents(auditDir, jsonOutput)
 	}
 
@@ -1025,7 +1084,16 @@ func runAudit(args []string) int {
 		checkpointCount int
 		err             error
 		keySource       string
+		trailSnapshot   []byte
+		hwmSnapshot     []byte
 	)
+	if completeness {
+		trailSnapshot, hwmSnapshot, err = readVerifySnapshot(auditPath)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading audit snapshot: %v\n", err)
+		return 1
+	}
 	if pubEnv != "" {
 		pubHex, src, kerr := requirePubHex(pubEnv, agentName)
 		keySource = src
@@ -1038,14 +1106,22 @@ func runAudit(args []string) int {
 			fmt.Fprintf(os.Stderr, "error: %v\n", perr)
 			return 1
 		}
-		n, checkpointCount, err = audit.VerifyEd25519WithCheckpoint(auditPath, pub)
+		if completeness {
+			n, checkpointCount, err = audit.VerifyEd25519WithCheckpointBytes(trailSnapshot, hwmSnapshot, pub)
+		} else {
+			n, checkpointCount, err = audit.VerifyEd25519WithCheckpoint(auditPath, pub)
+		}
 	} else {
 		key := os.Getenv(keyEnv)
 		if key == "" {
 			fmt.Fprintf(os.Stderr, "error: %s is not set in the environment\n", keyEnv)
 			return 1
 		}
-		n, checkpointCount, err = audit.VerifyWithCheckpoint(auditPath, []byte(key))
+		if completeness {
+			n, checkpointCount, err = audit.VerifyWithCheckpointBytes(trailSnapshot, hwmSnapshot, []byte(key))
+		} else {
+			n, checkpointCount, err = audit.VerifyWithCheckpoint(auditPath, []byte(key))
+		}
 	}
 
 	if err != nil {
@@ -1073,14 +1149,21 @@ func runAudit(args []string) int {
 		}
 		return 1
 	}
+	var assessment []audit.RunAssessment
+	if completeness {
+		assessment = audit.AssessRuns(trailSnapshot, true, time.Now())
+	}
 	if jsonOutput {
-		writeJSON(verifyResult{Verdict: "PROTECTED", AuditPath: auditPath, PubKeySource: keySource, EntriesVerified: n})
+		writeJSON(verifyResult{Verdict: "PROTECTED", AuditPath: auditPath, PubKeySource: keySource, EntriesVerified: n, Completeness: assessment})
 	} else {
 		fmt.Printf("OK — %d entries verified, hash chain intact: %s\n", n, auditPath)
 		if keySource != "" {
 			fmt.Printf("public key: %s\n", keySource)
 		}
 		fmt.Println("VERDICT: PROTECTED")
+		for _, run := range assessment {
+			fmt.Printf("COMPLETENESS: %s run_id=%s — %s\n", run.Verdict, run.RunID, run.Reason)
+		}
 	}
 	return 0
 }

@@ -147,7 +147,9 @@ type Auditor struct {
 	edPriv        ed25519.PrivateKey // Ed25519 signing key; non-nil = non-repudiable trail (takes precedence over key)
 	keyID         string             // hex(sha256(pub)) of edPriv's public key; stamped on Events when edPriv is set
 	runSeqs       map[string]uint64  // last durably appended v2 sequence per fresh process run id
-	actionPairing bool               // seed existing v2 run sequences only for the opt-in pairing writer
+	runHeads      map[string]string  // last durable signature for each run
+	runClosed     map[string]bool
+	actionPairing bool // seed existing v2 run sequences only for the opt-in pairing writer
 	closed        bool
 	requiredErr   error
 }
@@ -208,7 +210,7 @@ func (a *Auditor) sign(canonical []byte, prev string) string {
 // is enabled, the chain is seeded from the last signature already in the file so
 // that appends across restarts stay verifiable.
 func New(path string, opts ...Option) (*Auditor, error) {
-	a := &Auditor{clock: time.Now, runSeqs: make(map[string]uint64)}
+	a := &Auditor{clock: time.Now, runSeqs: make(map[string]uint64), runHeads: make(map[string]string), runClosed: make(map[string]bool)}
 	for _, o := range opts {
 		o(a)
 	}
@@ -309,6 +311,8 @@ func (a *Auditor) seedRunSequences(path string) error {
 		}
 		if ev.RunSeq > a.runSeqs[ev.RunID] {
 			a.runSeqs[ev.RunID] = ev.RunSeq
+			a.runHeads[ev.RunID] = ev.Sig
+			a.runClosed[ev.RunID] = ev.RecordType == "run" && ev.RunEvent == "close"
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -326,6 +330,16 @@ func (a *Auditor) Enabled() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.f != nil && !a.closed
+}
+
+// Signed reports whether lifecycle rows from this writer will carry a signature.
+func (a *Auditor) Signed() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.f != nil && !a.closed && a.signing()
 }
 
 // Record stamps the event with the current time and appends it as one JSON line.
@@ -436,6 +450,10 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 	ev.Time = a.clock().Format(time.RFC3339)
 	ev.Sig = "" // canonical content never includes the signature itself
 	if ev.SchemaVersion == 2 {
+		if a.runClosed[ev.RunID] {
+			latchRequiredFailure = false
+			return fmt.Errorf("run %s is closed", ev.RunID)
+		}
 		if !required {
 			latchRequiredFailure = false
 			return fmt.Errorf("schema v2 audit rows require durable writes")
@@ -449,6 +467,10 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 			return fmt.Errorf("schema v2 run_seq exhausted; start a new run")
 		}
 		ev.RunSeq = a.runSeqs[ev.RunID] + 1
+		if ev.RecordType == "run" && ev.RunEvent == "close" {
+			ev.RunCount = a.runSeqs[ev.RunID]
+			ev.RunHead = a.runHeads[ev.RunID]
+		}
 	} else if ev.SchemaVersion != 0 {
 		latchRequiredFailure = false
 		return fmt.Errorf("unsupported audit schema_version %d", ev.SchemaVersion)
@@ -543,6 +565,10 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 	}
 	if ev.SchemaVersion == 2 {
 		a.runSeqs[ev.RunID] = ev.RunSeq
+		a.runHeads[ev.RunID] = ev.Sig
+		if ev.RecordType == "run" && ev.RunEvent == "close" {
+			a.runClosed[ev.RunID] = true
+		}
 	}
 	return nil
 }

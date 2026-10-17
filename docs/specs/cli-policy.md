@@ -43,6 +43,12 @@ public key from `NOCKGUARD_AGENT_<NAME>_ED25519_PUB` or the matching `.pub`
 file. Key file and environment precedence is in `internal/policy/agentkeys.go`.
 `--all` is not a substitute for `--session`: the latter checks a specified
 NockLock DB and Guard trail together ([cmd/nockguard/verify_session.go](../../cmd/nockguard/verify_session.go)).
+For a single signed trail, `verify --completeness` adds per-run assessments to
+the integrity verdict. It requires the same snapshot to pass signature and
+checkpoint verification. `LIMITED` is the highest completeness result and
+means the recorded observation stream is internally complete, not that every
+attempt was recorded or a remote side effect completed. `--all`, `--session`,
+and `--export` retain their own verification scopes.
 
 ## Policy YAML
 
