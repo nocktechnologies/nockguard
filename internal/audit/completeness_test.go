@@ -179,6 +179,41 @@ func TestInterleavedSignedRunsKeepIndependentHeads(t *testing.T) {
 	}
 }
 
+func TestRunAssessmentActionlessDecisionAllowlist(t *testing.T) {
+	now := time.Date(2026, 10, 17, 6, 0, 0, 0, time.UTC)
+	for _, tc := range []struct{ decision, want string }{
+		{"method-allow", "LIMITED"},
+		{"method-deny", "LIMITED"},
+		{"hide", "LIMITED"},
+		{"deny", "BROKEN"},
+		{"state-write", "BROKEN"},
+		{"approval-granted", "BROKEN"},
+	} {
+		t.Run(tc.decision, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "audit.jsonl")
+			a, err := New(path, WithSigningKey([]byte("test signing key")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			a.clock = func() time.Time { return now }
+			for _, ev := range []Event{
+				{RecordType: "run", RunEvent: "open"},
+				{RecordType: "decision", Tool: "x", Decision: tc.decision},
+				{RecordType: "run", RunEvent: "close"},
+			} {
+				ev.Agent, ev.RunID, ev.SchemaVersion = "demo", testRunID, 2
+				if err := a.RecordRequired(ev); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := AssessRuns(mustRead(t, path), true, now)[0].Verdict; got != tc.want {
+				t.Fatalf("action-less %s = %s, want %s", tc.decision, got, tc.want)
+			}
+		})
+	}
+}
+
 func mustRead(t *testing.T, path string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(path)

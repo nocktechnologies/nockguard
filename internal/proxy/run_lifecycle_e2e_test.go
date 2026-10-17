@@ -1,14 +1,18 @@
 package proxy
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
+	"github.com/nocktechnologies/nockguard/internal/policy"
 )
 
 func TestSignedRunLifecycleCleanAndKilled(t *testing.T) {
@@ -91,5 +95,117 @@ func TestSignedRunLifecycleCleanAndKilled(t *testing.T) {
 				t.Fatalf("assessment = %s, want %s; trail=%s", got, want, data)
 			}
 		})
+	}
+}
+
+type lifecycleTapApprover struct{}
+
+func (lifecycleTapApprover) Ask(req approval.Request) approval.Verdict {
+	req.OnRejectedTap("telegram-callback-unlisted-sender")
+	if req.Tool == "ask_grant" {
+		return approval.Verdict{Approved: true, Reason: "approved by test"}
+	}
+	return approval.Verdict{Reason: "denied by test"}
+}
+
+// While a run is active, recordAudit promotes every unversioned row to a v2
+// decision for the run. The analyzer accepts an action-less v2 decision only
+// for method-allow, method-deny and hide. Drive every other decision producer
+// on the paired stdio path through one live run and require it to stay LIMITED,
+// so each of those rows must carry its action_id.
+func TestSignedRunDecisionRowsStayAttachedToActions(t *testing.T) {
+	auditor, path, pub := newEd25519Auditor(t)
+	defer auditor.Close()
+	policyText := `audit:
+  enabled: true
+  action_pairing: true
+agents:
+  demo:
+    mode: allow
+    deny: ["denied_tool"]
+    deny_methods: ["resources/list"]
+    ask: ["ask_*"]
+    block_params: ["forbidden-marker"]
+    spend_cap:
+      max_calls: 3
+`
+	engine, err := policy.LoadBytes([]byte(policyText))
+	if err != nil {
+		t.Fatal(err)
+	}
+	limiter, err := engine.LimiterFor(httpTestAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := newGate(t, policyText, limiter, auditor)
+	gate.WithApprover(lifecycleTapApprover{})
+	gate.agentOut = io.Discard
+	if !gate.actionPairing || !gate.validator.Enabled() || !gate.limiter.Enabled() {
+		t.Fatal("test policy must enable pairing, validation and the spend cap")
+	}
+	run := func(event string) {
+		t.Helper()
+		if err := auditor.RecordRequired(audit.Event{Agent: httpTestAgent, SchemaVersion: 2, RecordType: "run", RunID: gate.actionRunID, RunEvent: event}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("open")
+	gate.runActive.Store(true)
+
+	oversized := strings.Repeat("x", maxRequestNameBytes+1)
+	requests := []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,                           // method-allow
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,                           // hide on response
+		`{"jsonrpc":"2.0","id":3,"method":"resources/list","params":{}}`,                       // method-deny
+		callLine("4", "denied_tool", "a"),                                                      // deny
+		callLine("5", "read_ok", "forbidden-marker"),                                           // block (validation)
+		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{}}`,                           // deny unextractable-name
+		`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"` + oversized + `"}}`, // method-deny oversized
+		callLine("8", "read_ok", "b"),                                                          // allow + dispatch
+		callLine("9", "ask_grant", "c"),                                                        // block tap, approval-granted, state-write
+		callLine("10", "ask_deny", "d"),                                                        // block tap, approval-denied
+		callLine("8", "read_ok", "e"),                                                          // block duplicate-active-request-id
+		callLine("11", "read_more", "f"),                                                       // ratelimit spend-cap
+	}
+	pending := &sync.Map{}
+	if err := gate.agentToUpstream(strings.NewReader(strings.Join(requests, "\n")+"\n"), io.Discard, pending); err != nil {
+		t.Fatal(err)
+	}
+	responses := []string{
+		`{"jsonrpc":"2.0","id":1,"result":{}}`,
+		`{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read_ok"},{"name":"denied_tool"}]}}`,
+		`{"jsonrpc":"2.0","id":8,"result":{}}`,
+		`{"jsonrpc":"2.0","id":9,"result":{}}`,
+	}
+	if err := gate.upstreamToAgent(strings.NewReader(strings.Join(responses, "\n")+"\n"), io.Discard, pending, nil); err != nil {
+		t.Fatal(err)
+	}
+	gate.drainAudits()
+	gate.runActive.Store(false)
+	run("close")
+
+	if rows, count, err := audit.VerifyEd25519WithCheckpoint(path, pub); err != nil || rows != count {
+		t.Fatalf("integrity rows=%d checkpoint=%d err=%v", rows, count, err)
+	}
+	seen := map[string]bool{}
+	for _, ev := range readAuditEvents(t, path) {
+		if ev.SchemaVersion != 2 {
+			t.Fatalf("legacy row in an active run: %+v", ev)
+		}
+		if ev.RecordType == "decision" {
+			seen[ev.Decision] = true
+			if ev.ActionID == "" && ev.Decision != "method-allow" && ev.Decision != "method-deny" && ev.Decision != "hide" {
+				t.Errorf("action-less %s row: %+v", ev.Decision, ev)
+			}
+		}
+	}
+	for _, want := range []string{"method-allow", "method-deny", "hide", "deny", "block", "ratelimit", "allow", "dispatch", "approval-granted", "approval-denied", "state-write"} {
+		if !seen[want] {
+			t.Errorf("run did not exercise a %s row; decisions=%v", want, seen)
+		}
+	}
+	got := audit.AssessRuns(mustRead(t, path), true, time.Now())
+	if len(got) != 1 || got[0].Verdict != "LIMITED" {
+		t.Fatalf("assessment = %+v, want one LIMITED run", got)
 	}
 }
