@@ -99,7 +99,7 @@ invalid policy values must not silently grant access.
 | `evidence` | Integrity verified | Setup/input error | Broken chain; pack still produced |
 | Other commands | Success | Usage or runtime failure | Command-specific; do not assume `2` means tampering |
 
-`verify --completeness` keeps the integrity-only exit status; BROKEN, INCOMPLETE or UNASSESSABLE completeness verdicts do not change the exit code; read `completeness[].verdict` in --json.
+`verify --completeness` keeps the integrity-only exit status; BROKEN, INCOMPLETE or UNASSESSABLE completeness verdicts do not change the exit code; read `completeness[].verdict` in --json. The `completeness` array is present only when the integrity verdict is `PROTECTED`; any other verdict, or a key or read error, produces no completeness output.
 
 Parse `--json` for scripts where offered. Text output is for humans. Sources:
 [cmd/nockguard/main.go](../../cmd/nockguard/main.go),
