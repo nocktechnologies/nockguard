@@ -281,18 +281,7 @@ func runCLI(args []string) int {
 			return 1
 		}
 	}
-	defer func() {
-		closed := make(chan error, 1)
-		go func() { closed <- auditor.Close() }()
-		select {
-		case err := <-closed:
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "audit close failed: %v\n", err)
-			}
-		case <-time.After(time.Second):
-			fmt.Fprintln(os.Stderr, "audit close timed out; run remains unclosed")
-		}
-	}()
+	defer closeAuditorBounded(os.Stderr, auditor.Close, time.Second)
 
 	validator, err := engine.ValidatorFor(agent)
 	if err != nil {
@@ -756,6 +745,23 @@ type verifyResult struct {
 	EntriesVerified int                   `json:"entries_verified"`
 	Error           string                `json:"error,omitempty"`
 	Completeness    []audit.RunAssessment `json:"completeness,omitempty"`
+}
+
+// closeAuditorBounded closes the audit writer without letting a stuck write
+// hold process exit forever. The proxy has already written or skipped its run
+// close row by now, so a timeout says only that a write is still in flight;
+// the trail itself records whether the run closed.
+func closeAuditorBounded(w io.Writer, closeFn func() error, timeout time.Duration) {
+	closed := make(chan error, 1)
+	go func() { closed <- closeFn() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			fmt.Fprintf(w, "audit close failed: %v\n", err)
+		}
+	case <-time.After(timeout):
+		fmt.Fprintln(w, "audit close timed out: an audit write is still in progress; check the run with nockguard verify --completeness")
+	}
 }
 
 // readVerifySnapshot reads the checkpoint and trail as one consistent

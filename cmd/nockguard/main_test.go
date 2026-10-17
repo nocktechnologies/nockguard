@@ -171,6 +171,19 @@ func TestVerifyCompletenessSnapshotWithConcurrentWriter(t *testing.T) {
 	}
 }
 
+func TestCloseAuditorTimeoutDoesNotClaimRunState(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	var stderr bytes.Buffer
+	closeAuditorBounded(&stderr, func() error { <-release; return nil }, 10*time.Millisecond)
+	msg := stderr.String()
+	// The run close row is written (or skipped) before the writer closes, so
+	// a close timeout cannot know whether the run is unclosed.
+	if !strings.Contains(msg, "audit close timed out") || strings.Contains(msg, "unclosed") {
+		t.Fatalf("close-timeout message = %q", msg)
+	}
+}
+
 func TestVerifyCommandRequiresRowsAndCompleteCheckpoint(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
