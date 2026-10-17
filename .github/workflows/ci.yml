@@ -7,12 +7,19 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: detect docs-only change
+        id: changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci-docs-only.sh "${{ github.event.pull_request.number }}" | tee -a "$GITHUB_OUTPUT"
 
       - name: AGENTS.md paths
         run: python3 scripts/check-agents-paths.py
@@ -25,14 +32,21 @@ jobs:
       - name: Go version
         run: go version
 
+      - name: doc-pinned tests
+        if: steps.changes.outputs.docs_only == 'true'
+        run: go test ./cmd/nockguard/ ./internal/policy/ -run '^(TestWardenCommandsMatchRepoCommands|TestPolicyLintListsEveryAgentKey|TestShippedTemplatesCiteFunctionsAndKeepStderr|TestPolicyLintTelegramParity|TestWardenPolicyExamplesLoadWithStrictPolicyLoader)$'
+
       - uses: actions/setup-node@v4
+        if: steps.changes.outputs.docs_only != 'true'
         with:
           node-version: '22'
 
       - name: wall browser tests
+        if: steps.changes.outputs.docs_only != 'true'
         run: node --test cmd/nockguard-wall/index.test.js
 
       - name: gofmt
+        if: steps.changes.outputs.docs_only != 'true'
         run: |
           unformatted=$(gofmt -l internal/ cmd/)
           if [ -n "$unformatted" ]; then
@@ -42,20 +56,25 @@ jobs:
           fi
 
       - name: go vet
+        if: steps.changes.outputs.docs_only != 'true'
         run: go vet ./...
 
       - name: build
+        if: steps.changes.outputs.docs_only != 'true'
         run: go build ./...
 
       - name: govulncheck
+        if: steps.changes.outputs.docs_only != 'true'
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           "$(go env GOPATH)/bin/govulncheck" ./...
 
       - name: test
+        if: steps.changes.outputs.docs_only != 'true'
         run: go test -race ./...
 
       - name: quickstart acceptance
+        if: steps.changes.outputs.docs_only != 'true'
         run: python3 scripts/quickstart-acceptance.py
 
   macos-test:
@@ -63,10 +82,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: detect docs-only change
+        id: changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci-docs-only.sh "${{ github.event.pull_request.number }}" | tee -a "$GITHUB_OUTPUT"
+
       - uses: actions/setup-go@v5
+        if: steps.changes.outputs.docs_only != 'true'
         with:
           go-version-file: go.mod
           cache: true
 
       - name: test
+        if: steps.changes.outputs.docs_only != 'true'
         run: go test -race ./...

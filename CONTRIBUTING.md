@@ -11,16 +11,15 @@ Thanks for looking. NockGuard is small on purpose: a single Go binary that sits 
 
 ## Development
 
+Before you push, run the tests for the packages you touched, plus lint. CI runs the full suite once as the gate, so you do not need to run it locally:
+
 ```bash
-go build ./...
-go vet ./...
-test -z "$(gofmt -l internal/ cmd/)"
-go test -race ./...
-node --test cmd/nockguard-wall/index.test.js   # Wall browser tests (Node 22)
-python3 scripts/quickstart-acceptance.py       # README quickstart end to end (Linux only; CI runs it on ubuntu-latest)
+go test -race ./internal/<package>/ ./cmd/<command>/   # only the packages you touched
+test -z "$(gofmt -l internal/ cmd/)" && go vet ./...   # lint
+node --test cmd/nockguard-wall/index.test.js           # if you touched the Wall (Node 22)
 ```
 
-These are the checks CI runs; it also runs the `gitleaks` secret scan and `govulncheck ./...`. Go version is pinned in `go.mod`. There are no generated files and no external services required for the test suite.
+CI runs `go build ./...`, `go vet ./...`, gofmt, `go test -race ./...`, the Wall browser tests, `scripts/quickstart-acceptance.py` (Linux only), `govulncheck ./...` and the `gitleaks` secret scan. A PR that changes only Markdown or `docs/` skips the suite and runs only the tests that read repo Markdown. Go version is pinned in `go.mod`. There are no generated files and no external services required for the test suite.
 
 Before opening a pull request, run the firewall's own proof against a policy that names your agent:
 

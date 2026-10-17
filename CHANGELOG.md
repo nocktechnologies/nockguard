@@ -4,6 +4,13 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- CI skips the test suite on PRs that change only Markdown or `docs/`; it
+  still runs the tests that read repo Markdown, and `build-test` and
+  `macos-test` still report. Contributor docs now ask for focused tests plus
+  lint before pushing, with the full suite run once in CI.
+
 ## [0.10.1] - 2026-10-17
 
 v0.10.1 rejects malformed CLI arguments before setup and removes redundant

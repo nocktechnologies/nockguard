@@ -22,24 +22,24 @@ no phone-home or license gate. Follows Engineering Standards v4.
 ## Build and test
 
 Go is pinned in `go.mod`; the Wall browser tests need Node 22. Go tests live
-beside each package as `*_test.go`. Run focused tests while working, then
-every CI step before you open a PR:
+beside each package as `*_test.go`. Before you push, run only the tests for
+the packages you touched, plus lint. Do not run the full suite locally; CI runs
+it once as the gate:
 
 ```bash
-python3 scripts/check-agents-paths.py          # every path named in AGENTS.md is git-tracked
-node --test cmd/nockguard-wall/index.test.js   # Wall browser tests
-test -z "$(gofmt -l internal/ cmd/)"           # gofmt
-go vet ./...
-go build ./...
-go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
-"$(go env GOPATH)/bin/govulncheck" ./...
-go test -race ./...
-python3 scripts/quickstart-acceptance.py       # README quickstart end to end; Linux only
+go test -race ./internal/<package>/ ./cmd/<command>/   # only the packages you touched
+test -z "$(gofmt -l internal/ cmd/)" && go vet ./...   # lint
+python3 scripts/check-agents-paths.py                  # if you edited AGENTS.md
+node --test cmd/nockguard-wall/index.test.js           # if you touched the Wall
 ```
 
-These are the `build-test` job steps in `.github/workflows/ci.yml`; the same
-workflow runs `go test -race ./...` on macOS as `macos-test`. The test suite
-needs no external services and there are no generated files.
+The `build-test` job in `.github/workflows/ci.yml` runs the full gate: the
+path check, Wall tests, gofmt, vet, build, govulncheck, `go test -race ./...`
+and `scripts/quickstart-acceptance.py`; `macos-test` runs `go test -race ./...`
+on macOS. `scripts/ci-docs-only.sh` marks a PR whose files are all `*.md` or
+under `docs/` as docs-only: both jobs then skip the suite, still report, and
+`build-test` runs only the path check and the tests that read repo Markdown.
+The test suite needs no external services and there are no generated files.
 
 Before opening a PR, run the firewall's own proof against a policy that names
 your agent:
