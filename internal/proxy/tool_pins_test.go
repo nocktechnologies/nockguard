@@ -201,6 +201,22 @@ func TestConfiguredPinIsEnforcedWithoutStrictMode(t *testing.T) {
 	}
 }
 
+func TestToolPinsRefuseUnsignedAuditor(t *testing.T) {
+	_, hash, err := digestToolDefinition([]byte(`{"name":"read","inputSchema":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditor, err := audit.New(t.TempDir() + "/audit.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer auditor.Close()
+	gate := pinGate(t, hash, true, auditor)
+	if gate.actionInitErr == nil {
+		t.Fatal("pin policy accepted an unsigned audit writer")
+	}
+}
+
 func TestPaginatedCatalogCannotAuthorizePin(t *testing.T) {
 	definition := `{"name":"read","inputSchema":{}}`
 	_, hash, err := digestToolDefinition([]byte(definition))
@@ -279,7 +295,7 @@ agents:
 	}
 }
 
-func TestPinWriteSerializedWithCatalogInvalidation(t *testing.T) {
+func TestPinWriteDoesNotBlockCatalogInvalidation(t *testing.T) {
 	definition := `{"name":"read","inputSchema":{}}`
 	_, hash, err := digestToolDefinition([]byte(definition))
 	if err != nil {
@@ -300,10 +316,13 @@ func TestPinWriteSerializedWithCatalogInvalidation(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("pinned call never reached upstream write")
 	}
-	if gate.catalog.mu.TryLock() {
-		gate.catalog.mu.Unlock()
+	invalidated := make(chan struct{})
+	go func() { gate.catalog.invalidate(); close(invalidated) }()
+	select {
+	case <-invalidated:
+	case <-time.After(2 * time.Second):
 		close(writer.release)
-		t.Fatal("catalog could be invalidated after pin check but before forwarding")
+		t.Fatal("blocked upstream write held the catalog lock and stalled invalidation")
 	}
 	close(writer.release)
 	select {
@@ -314,7 +333,6 @@ func TestPinWriteSerializedWithCatalogInvalidation(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("pinned upstream write did not finish")
 	}
-	gate.catalog.invalidate()
 	var forwarded bytes.Buffer
 	if err := gate.agentToUpstream(strings.NewReader(callLine("3", "read", "private")+"\n"), &forwarded, pending); err != nil {
 		t.Fatal(err)

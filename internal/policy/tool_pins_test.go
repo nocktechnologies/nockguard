@@ -1,6 +1,9 @@
 package policy
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"strings"
 	"testing"
 )
@@ -34,8 +37,27 @@ agents:
 	if err := engine.ValidateToolPinScope("demo", "local-fs"); err != nil {
 		t.Fatal(err)
 	}
+	// Signing may come from the existing per-agent environment or protected key
+	// file; the runtime auditor must verify that a key was actually resolved.
+	perAgent := strings.Replace(valid, "  sign_key_env: TEST_PIN_KEY\n", "  path: "+t.TempDir()+"/audit.jsonl\n", 1)
+	perAgentEngine, err := LoadBytes([]byte(perAgent))
+	if err != nil {
+		t.Fatalf("per-agent signing policy rejected at load: %v", err)
+	}
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(AgentKeyEnvName("demo"), hex.EncodeToString(key.Seed()))
+	perAgentAuditor, err := perAgentEngine.AuditorFor("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer perAgentAuditor.Close()
+	if !perAgentAuditor.SigningEnabled() {
+		t.Fatal("per-agent seed did not produce a signed auditor")
+	}
 	for _, bad := range []string{
-		strings.Replace(valid, "  sign_key_env: TEST_PIN_KEY\n", "", 1),
 		strings.Replace(valid, "  action_pairing: true\n", "", 1),
 		strings.Replace(valid, strings.Repeat("a", 64), strings.Repeat("A", 64), 1),
 		strings.Replace(valid, "jcs-rfc8785-v1", "other", 1),

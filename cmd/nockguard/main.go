@@ -292,14 +292,15 @@ func runCLI(args []string) int {
 		defer auditor.Close()
 	}
 
-	validator, err := engine.ValidatorFor(agent)
-	if err == nil {
-		err = engine.ValidateToolPinScope(agent, upstreamID)
+	if err := engine.ValidateToolPinScope(agent, upstreamID); err != nil {
+		fmt.Fprintf(os.Stderr, "error: tool pin scope for agent %s: %v\n", agent, err)
+		return 1
 	}
 	if engine.HasToolPinConstraints(agent) && auditBestEffort {
 		fmt.Fprintln(os.Stderr, "error: --audit-best-effort is incompatible with tool pins")
 		return 1
 	}
+	validator, err := engine.ValidatorFor(agent)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error building input validator for agent %s: %v\n", agent, err)
 		return 1

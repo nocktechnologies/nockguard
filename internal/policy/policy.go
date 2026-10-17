@@ -228,8 +228,8 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 		if len(pol.ToolPins) == 0 && !pol.StrictToolPins {
 			continue
 		}
-		if cfg.Audit == nil || !cfg.Audit.ActionPairing || (cfg.Audit.SignKeyEnv == "" && cfg.Audit.SignEd25519KeyEnv == "") {
-			return nil, fmt.Errorf("agent %q: tool pins require signed audit.action_pairing", agent)
+		if cfg.Audit == nil || !cfg.Audit.ActionPairing {
+			return nil, fmt.Errorf("agent %q: tool pins require audit.action_pairing", agent)
 		}
 		for upstream, tools := range pol.ToolPins {
 			if upstream == "" || len(tools) == 0 {

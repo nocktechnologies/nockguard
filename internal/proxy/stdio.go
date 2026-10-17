@@ -234,6 +234,10 @@ func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, valid
 			p.actionInitErr = fmt.Errorf("audit.action_pairing requires an available durable audit writer")
 			return p
 		}
+		if engine.HasToolPinConstraints(agent) && !auditor.SigningEnabled() {
+			p.actionInitErr = fmt.Errorf("tool pins require a signed audit writer")
+			return p
+		}
 		var runID [16]byte
 		if _, err := rand.Read(runID[:]); err != nil {
 			p.actionInitErr = fmt.Errorf("initialize action audit run id: %w", err)
@@ -1538,9 +1542,11 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			if p.actionPairing && request.Method == "notifications/cancelled" {
 				p.markCancelledAction(pending, cancellationRequestID(&request))
 			}
-			// Serialize the last pin check, durable dispatch, and upstream write
-			// with catalog invalidation. A list_changed cannot invalidate the
-			// catalog between authorization and forwarding.
+			// Serialize the last pin check and durable dispatch with catalog
+			// invalidation. Dispatch is the authorization point: a notification
+			// after it blocks later calls, while this call is already in flight.
+			// Release the lock before upstream I/O so a blocked write cannot stop
+			// the response reader from processing list_changed.
 			catalogLocked := request.Method == "tools/call" && p.engine.HasToolPinConstraints(p.agent)
 			if catalogLocked {
 				p.catalog.mu.Lock()
@@ -1590,6 +1596,9 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 					continue
 				}
 			}
+			if catalogLocked {
+				p.catalog.mu.Unlock()
+			}
 			// Register response state before the write: an upstream may reply while
 			// Write is still returning, and the response reader must be able to
 			// correlate it immediately.
@@ -1606,9 +1615,6 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				pending.Store(string(d.forwardID), pendingCard)
 			}
 			_, writeErr := fmt.Fprintf(w, "%s\n", d.forward)
-			if catalogLocked {
-				p.catalog.mu.Unlock()
-			}
 			if writeErr != nil {
 				if request.Method == "tools/list" {
 					p.catalog.invalidate()
