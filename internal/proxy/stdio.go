@@ -97,6 +97,7 @@ type StdioProxy struct {
 	actionObserved sync.Map // action id -> definition observed at first decision
 	runStopping    atomic.Bool
 	runActive      atomic.Bool
+	inputLineMu    sync.Mutex // held by a paired proxy while it handles one accepted input line
 }
 
 // writeAgentLine writes one newline-terminated line to the agent-facing channel
@@ -709,10 +710,20 @@ func (p *StdioProxy) Run() error {
 			}
 			p.runActive.Store(false)
 			if runCloseAllowed && p.auditor.RequiredError() == nil {
-				if err := p.auditor.RecordRequired(audit.Event{Agent: p.agent, SchemaVersion: 2, RecordType: "run", RunID: p.actionRunID, RunEvent: "close"}); err != nil {
-					p.logger.Printf("AUDIT-RUN close failed run_id=%s: %v", p.actionRunID, err)
-				} else {
-					p.logger.Printf("AUDIT-RUN close run_id=%s", p.actionRunID)
+				// Bound the close write so a stuck writer cannot hold the exit.
+				closed := make(chan error, 1)
+				go func() {
+					closed <- p.auditor.RecordRequired(audit.Event{Agent: p.agent, SchemaVersion: 2, RecordType: "run", RunID: p.actionRunID, RunEvent: "close"})
+				}()
+				select {
+				case err := <-closed:
+					if err != nil {
+						p.logger.Printf("AUDIT-RUN close failed run_id=%s: %v", p.actionRunID, err)
+					} else {
+						p.logger.Printf("AUDIT-RUN close run_id=%s", p.actionRunID)
+					}
+				case <-time.After(auditDrainBound):
+					p.logger.Printf("AUDIT-RUN close timed out run_id=%s", p.actionRunID)
 				}
 			}
 		}()
@@ -796,6 +807,31 @@ func (p *StdioProxy) Run() error {
 		}
 	}()
 
+	// stopOnSignal kills the upstream group. A paired run then stops accepting
+	// input and runs the same bounded drain as an upstream exit: outcome_unknown
+	// for still-tracked dispatches, then run/close if the run is healthy.
+	// Legacy proxies keep the immediate return.
+	stopOnSignal := func(sig os.Signal) error {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if p.actionPairing {
+			p.runStopping.Store(true)
+			auditCleanupStarted = true
+			audited := make(chan struct{})
+			go func() {
+				p.finishPendingActions(pendingCalls, "shutdown")
+				p.drainAudits()
+				close(audited)
+			}()
+			select {
+			case <-audited:
+				runCloseAllowed = p.waitInputIdle(inputDone)
+			case <-time.After(auditDrainBound):
+				p.logger.Printf("AUDIT-RUN signal drain timed out run_id=%s", p.actionRunID)
+			}
+		}
+		return fmt.Errorf("proxy received %s", sig)
+	}
+
 	go func() {
 		defer close(inputDone)
 		if err := p.agentToUpstream(os.Stdin, upstreamIn, pendingCalls); err != nil {
@@ -821,8 +857,7 @@ func (p *StdioProxy) Run() error {
 		outputComplete = true
 	case observed = <-waitCh:
 	case sig := <-signals:
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		return fmt.Errorf("proxy received %s", sig)
+		return stopOnSignal(sig)
 	}
 	if p.actionPairing {
 		// Only a paired run stops accepting input here; legacy proxies keep
@@ -855,8 +890,7 @@ func (p *StdioProxy) Run() error {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			observed = <-waitCh
 		case sig := <-signals:
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			return fmt.Errorf("proxy received %s", sig)
+			return stopOnSignal(sig)
 		}
 	} else {
 		idle = time.NewTimer(upstreamShutdownBound)
@@ -885,8 +919,7 @@ func (p *StdioProxy) Run() error {
 				drainLimit = "absolute cap"
 				break drainOutput
 			case sig := <-signals:
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				return fmt.Errorf("proxy received %s", sig)
+				return stopOnSignal(sig)
 			}
 		}
 		// If EOF and a deadline became ready together, the completed drain wins.
@@ -922,8 +955,7 @@ func (p *StdioProxy) Run() error {
 			shutdownTimedOut = true
 			p.logger.Print("upstream exited: client reply deadline reached; abandoning remaining replies")
 		case sig := <-signals:
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			return fmt.Errorf("proxy received %s", sig)
+			return stopOnSignal(sig)
 		}
 	}
 	// Linux and macOS waitid leave the leader unreaped until this kill, so
@@ -949,17 +981,20 @@ func (p *StdioProxy) Run() error {
 	select {
 	case <-audited:
 		if p.actionPairing {
-			select {
-			case <-inputDone:
-				runCloseAllowed = true
-			case <-time.After(auditDrainBound):
-				p.logger.Printf("AUDIT-RUN input drain timed out run_id=%s", p.actionRunID)
-			}
+			runCloseAllowed = p.waitInputIdle(inputDone)
 		}
 	case <-auditShutdown.Done():
 		shutdownTimedOut = true
 		p.logger.Print("upstream exited: audit drain deadline reached")
 	case sig := <-signals:
+		if p.actionPairing {
+			// The group is already killed; finish the bounded drain and close.
+			select {
+			case <-audited:
+				runCloseAllowed = p.waitInputIdle(inputDone)
+			case <-auditShutdown.Done():
+			}
+		}
 		return fmt.Errorf("proxy received %s", sig)
 	}
 	if !outputTimedOut {
@@ -989,6 +1024,28 @@ func (p *StdioProxy) Run() error {
 	default:
 	}
 	return nil
+}
+
+// waitInputIdle reports whether a paired run's input goroutine has stopped
+// accepting calls. runStopping is already set, so the goroutine either returned
+// or will refuse the next line; holding inputLineMu once proves no accepted
+// line is still being handled. A client that keeps stdin open is therefore
+// not waited on. Bounded by auditDrainBound.
+func (p *StdioProxy) waitInputIdle(inputDone <-chan struct{}) bool {
+	idle := make(chan struct{})
+	go func() {
+		p.inputLineMu.Lock()
+		p.inputLineMu.Unlock()
+		close(idle)
+	}()
+	select {
+	case <-inputDone:
+	case <-idle:
+	case <-time.After(auditDrainBound):
+		p.logger.Printf("AUDIT-RUN input drain timed out run_id=%s", p.actionRunID)
+		return false
+	}
+	return true
 }
 
 // mcpDecision is the transport-independent verdict for one inbound JSON-RPC
@@ -1434,7 +1491,23 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 	}
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
-	for scanner.Scan() {
+	// A paired proxy holds inputLineMu while it handles one line, so run close
+	// can tell an accepted line in progress from a goroutine idle in Scan. The
+	// lock is taken before the runStopping check: a line that saw the run still
+	// accepting is finished before close proceeds.
+	lineLocked := false
+	releaseLine := func() {
+		if lineLocked {
+			lineLocked = false
+			p.inputLineMu.Unlock()
+		}
+	}
+	defer releaseLine()
+	for ; scanner.Scan(); releaseLine() {
+		if p.actionPairing {
+			p.inputLineMu.Lock()
+			lineLocked = true
+		}
 		if p.actionPairing && p.runStopping.Load() {
 			return fmt.Errorf("audit run is shutting down")
 		}

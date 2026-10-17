@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/ed25519"
 	"io"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -336,4 +338,124 @@ func TestLegacyProxyKeepsReadingInputAfterUpstreamLeaderExits(t *testing.T) {
 	if strings.Contains(stderr.String(), "audit run is shutting down") {
 		t.Fatalf("legacy proxy reported run shutdown:\n%s", stderr.String())
 	}
+}
+
+// startPairedProxy starts the binary with a signed, paired policy and returns
+// the command, the client's stdin, and the trail path and public key.
+func startPairedProxy(t *testing.T, upstreamBody string) (*exec.Cmd, io.WriteCloser, string, ed25519.PublicKey) {
+	t.Helper()
+	binary := buildBinary(t)
+	keygenOut, err := exec.Command(binary, "keygen", "--print-env").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := envValue(t, string(keygenOut), "NOCKGUARD_AUDIT_ED25519_KEY")
+	pub, err := audit.PublicKeyFromHex(envValue(t, string(keygenOut), "NOCKGUARD_AUDIT_ED25519_PUB"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	policyPath := filepath.Join(dir, "policy.yaml")
+	body := "agents:\n  demo:\n    mode: allow\naudit:\n  enabled: true\n  action_pairing: true\n  path: " + path + "\n  sign_ed25519_key_env: NOCKGUARD_AUDIT_ED25519_KEY\n"
+	if err := os.WriteFile(policyPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := filepath.Join(dir, "server.sh")
+	if err := os.WriteFile(server, []byte(upstreamBody), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(binary, "proxy", "--upstream", server, "--agent", "demo", "--policy", policyPath)
+	cmd.Env = append(os.Environ(), "NOCKGUARD_AUDIT_ED25519_KEY="+seed)
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = in.Close(); _ = cmd.Process.Kill() })
+	return cmd, in, path, pub
+}
+
+// waitForTrail polls until the trail contains marker and the signed
+// checkpoint covers every row.
+func waitForTrail(t *testing.T, path string, pub ed25519.PublicKey, marker string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, _ := os.ReadFile(path)
+		if strings.Contains(string(data), marker) {
+			if rows, count, err := audit.VerifyEd25519WithCheckpoint(path, pub); err == nil && rows > 0 && rows == count {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("trail never recorded %s: %s", marker, data)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// assertClosedWithUnknown checks a dispatched call got outcome_unknown, the
+// run has a signed close, and the run assesses LIMITED.
+func assertClosedWithUnknown(t *testing.T, path string, pub ed25519.PublicKey) {
+	t.Helper()
+	if rows, count, err := audit.VerifyEd25519WithCheckpoint(path, pub); err != nil || rows != count {
+		t.Fatalf("integrity rows=%d checkpoint=%d err=%v", rows, count, err)
+	}
+	data := mustRead(t, path)
+	for _, want := range []string{`"decision":"dispatch"`, `"observation":"outcome_unknown"`, `"run_event":"close"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("trail lacks %s:\n%s", want, data)
+		}
+	}
+	if got := audit.AssessRuns(data, true, time.Now()); len(got) != 1 || got[0].Verdict != "LIMITED" {
+		t.Fatalf("assessment = %+v, want one LIMITED run; trail:\n%s", got, data)
+	}
+}
+
+// The upstream exits while the client keeps stdin open. The proxy must stop
+// accepting input, record outcome_unknown for the dispatched call and close
+// the run without waiting on the client's open stdin.
+func TestPairedRunClosesWhenUpstreamExitsWithClientStdinOpen(t *testing.T) {
+	cmd, in, path, pub := startPairedProxy(t, "#!/bin/sh\nread -r line\nexit 0\n")
+	waitForTrail(t, path, pub, `"run_event":"open"`)
+	if _, err := io.WriteString(in, callLine("1", "read_private", "x")+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy did not exit after the upstream exited")
+	}
+	assertClosedWithUnknown(t, path, pub)
+}
+
+// SIGTERM with a dispatched call in flight runs the same bounded drain:
+// outcome_unknown for the call, then run/close, within a hard bound.
+func TestPairedRunClosesOnSignalWithInFlightDispatch(t *testing.T) {
+	cmd, in, path, pub := startPairedProxy(t, "#!/bin/sh\ncat >/dev/null\n")
+	waitForTrail(t, path, pub, `"run_event":"open"`)
+	if _, err := io.WriteString(in, callLine("1", "read_private", "x")+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	waitForTrail(t, path, pub, `"decision":"dispatch"`)
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	started := time.Now()
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy did not exit after SIGTERM")
+	}
+	if elapsed := time.Since(started); elapsed > 4*time.Second {
+		t.Fatalf("signal shutdown took %s", elapsed)
+	}
+	assertClosedWithUnknown(t, path, pub)
 }
