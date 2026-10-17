@@ -294,7 +294,9 @@ func canonicalJCSNumber(raw string) (string, error) {
 }
 
 func decimalIsZero(s string) bool {
-	for _, c := range s {
+	// Only the significand decides zero; exponent digits do not.
+	mantissa, _, _ := strings.Cut(strings.ToLower(s), "e")
+	for _, c := range mantissa {
 		if c >= '1' && c <= '9' {
 			return false
 		}

@@ -1022,6 +1022,8 @@ func (p *StdioProxy) queueActionID(seq uint64, actionID string) {
 	p.auditMutex.Unlock()
 }
 
+// appendActionObservation must be called with card.mu held (observeAction),
+// which serializes card.observed across response, timeout and cancel paths.
 func (p *StdioProxy) appendActionObservation(seq uint64, card *pendingCard, observation, cause, responseClass string, mcpIsError *bool) error {
 	if card == nil || card.actionID == "" {
 		return nil
@@ -1449,6 +1451,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 		}
 		if p.requiredAudit && p.auditor.RequiredError() != nil {
 			p.resolveAudit(seq)
+			p.actionObserved.Delete(actionID)
 			id := d.rejectID
 			if d.forward != nil {
 				if msg, err := jsonrpc.Decode(d.forward); err == nil {
@@ -1503,6 +1506,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				p.audit(d.tool, "dispatch", "required-audit-before-forward", d.refsForAudit, actionID)
 				if p.auditor.RequiredError() != nil {
 					p.resolveAudit(seq)
+					p.actionObserved.Delete(actionID)
 					if err := p.rejectToAgent(request.ID, -32603, AuditBeforeForwardError); err != nil {
 						return err
 					}
@@ -2171,13 +2175,14 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ..
 	var observations map[string]toolObservation
 	var nextCursor string
 	if buildID != 0 {
+		// Observation never changes the listing: a catalog failure discards
+		// the generation and the page is filtered exactly as without one.
 		active, bounded := p.catalog.pageWithinBounds(buildID, len(line), len(tools))
-		if !active {
-			buildID = 0
-		}
 		if active && !bounded {
 			discard("bound-exceeded")
-			return invalid()
+		}
+		if !active || !bounded {
+			buildID = 0
 		}
 	}
 	if buildID != 0 {
@@ -2185,8 +2190,10 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ..
 		observations, err = pageObservations(tools)
 		if err != nil {
 			discard("invalid-page")
-			return invalid()
+			buildID = 0
 		}
+	}
+	if buildID != 0 {
 		unhashable := 0
 		for _, observation := range observations {
 			if observation.status == "unhashable" {
@@ -2196,10 +2203,11 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ..
 		if unhashable > 0 {
 			p.logger.Printf("TOOL-DEFINITION-UNHASHABLE agent=%s count=%d", p.agent, unhashable)
 		}
-		if raw, exists := result["nextCursor"]; exists {
+		// A null nextCursor means no further pages, the same as an absent one.
+		if raw, exists := result["nextCursor"]; exists && string(raw) != "null" {
 			if json.Unmarshal(raw, &nextCursor) != nil || nextCursor == "" {
 				discard("invalid-cursor")
-				return invalid()
+				buildID = 0
 			}
 		}
 	}
@@ -2223,7 +2231,6 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ..
 	if buildID != 0 {
 		if err := p.catalog.addPage(buildID, len(line), observations, nextCursor); err != nil {
 			p.logger.Printf("TOOL-CATALOG-DISCARDED agent=%s reason=%v", p.agent, err)
-			return invalid()
 		}
 	}
 	// All values below are validated RawMessages; marshaling cannot fail.
