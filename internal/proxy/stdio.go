@@ -2113,7 +2113,7 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 	audits = append(audits, deferredAudit{"allow", dec.Reason})
 	p.appendAudit(seq, toolName, "allow", dec.Reason, &refs)
 	if dec.Verdict == policy.Ask {
-		// Keep approval and withheld state writes before the required dispatch
+		// Keep approval before the required dispatch
 		// row, while also recording this call's final allow decision.
 		p.resolveAudit(seq)
 	}
@@ -2162,7 +2162,6 @@ func (p *StdioProxy) approveAsk(tool string, params json.RawMessage, refs *extra
 	}
 	p.logger.Printf("APPROVAL-GRANTED agent=%s tool=%s reason=%s", p.agent, tool, v.Reason)
 	p.appendAuditWithApprovalActor(seq, tool, "approval-granted", v.Reason, refs, v.ApprovalActor)
-	p.applyWithheld(tool, dec.Withheld, seq)
 	return true
 }
 
@@ -2172,17 +2171,6 @@ func (p *StdioProxy) handleFailModeAsk(tool string, params json.RawMessage, reas
 		return false
 	}
 	return p.approveAsk(tool, params, nil, dec, seq)
-}
-
-func (p *StdioProxy) applyWithheld(tool string, writes []policy.StateWrite, seq uint64) {
-	if len(writes) == 0 {
-		return
-	}
-	for _, write := range writes {
-		reason := write.Reason()
-		p.logger.Printf("STATE-WRITE agent=%s tool=%s reason=%q", p.agent, tool, reason)
-		p.appendAudit(seq, tool, "state-write", reason, nil)
-	}
 }
 
 // rejectToAgent returns a JSON-RPC error to the agent for a denied REQUEST

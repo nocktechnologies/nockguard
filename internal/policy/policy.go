@@ -532,27 +532,6 @@ func (v Verdict) String() string {
 	}
 }
 
-// StateWrite is an explicit side-effect intent produced by policy evaluation.
-// The proxy applies these only after an Ask verdict is approved; denied or timed
-// out approval prompts drop them.
-type StateWrite struct {
-	Label string
-	State string
-}
-
-func (w StateWrite) Reason() string {
-	if w.Label == "" && w.State == "" {
-		return "state-write"
-	}
-	if w.Label == "" {
-		return w.State
-	}
-	if w.State == "" {
-		return w.Label
-	}
-	return w.Label + " " + w.State
-}
-
 // Decision is the outcome of evaluating a (agent, tool) pair against policy. It
 // carries not just the allow/deny verdict but the BASIS for it — which rule
 // matched, or that none did — so the audit trail can name WHY a call was allowed
@@ -564,8 +543,7 @@ type Decision struct {
 	// e.g. `deny-rule "*delete*"`, `allow-rule "nockcc_nock_*"`,
 	// "no allow-rule matched", "default-allow (no allow list)", or
 	// "no policy for agent (fail-closed)".
-	Reason   string
-	Withheld []StateWrite
+	Reason string
 	// ShadowWouldDeny marks a dry-run Shadow allowlist miss. It never changes
 	// Verdict; callers record it as a separate would-deny audit event.
 	ShadowWouldDeny bool
@@ -616,12 +594,7 @@ func (e *Engine) Evaluate(agent, tool string) Decision {
 
 	for _, pattern := range pol.Ask {
 		if matchPattern(pattern, tool) {
-			reason := fmt.Sprintf("ask-rule %q", pattern)
-			return Decision{
-				Verdict:  Ask,
-				Reason:   reason,
-				Withheld: []StateWrite{{Label: "approval-state", State: "approved for " + reason}},
-			}
+			return Decision{Verdict: Ask, Reason: fmt.Sprintf("ask-rule %q", pattern)}
 		}
 	}
 
@@ -727,11 +700,7 @@ func (e *Engine) FailModeVerdict(agent, reason string) Decision {
 		return Decision{Verdict: Deny, Reason: reason}
 	}
 	if pol.FailMode == "ask" {
-		return Decision{
-			Verdict:  Ask,
-			Reason:   reason,
-			Withheld: []StateWrite{{Label: "approval-state", State: "approved for " + reason}},
-		}
+		return Decision{Verdict: Ask, Reason: reason}
 	}
 	return Decision{Verdict: Deny, Reason: reason}
 }

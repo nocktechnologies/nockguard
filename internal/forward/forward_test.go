@@ -207,7 +207,7 @@ func TestEmittedDecisionCensus(t *testing.T) {
 		{"would-deny", "stdio.go:appendAudit", "approved"},
 		{"observe", "mcphttp.go:Record", "approved"},
 		{"dispatch", "httplisten.go:audit", "approved"},
-		{"state-write", "policy.go:verdictName; stdio.go:appendAudit", "approved"},
+		{"state-write", "historical approval audit rows", "approved"},
 		{"approval-granted", "stdio.go:appendAudit", "approved"},
 		{"deny", "policy.go:verdictName; stdio.go:appendAudit; forwardhttp.go", "blocked"},
 		{"block", "stdio.go:appendAudit; inject.go:appendAudit; lock.go", "blocked"},

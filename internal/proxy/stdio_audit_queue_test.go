@@ -388,10 +388,10 @@ func TestHandleFailModeAskKeepsCallerDenyAudit(t *testing.T) {
 	for _, event := range events {
 		decisions = append(decisions, event.Decision)
 	}
-	if strings.Join(decisions, ",") != "approval-granted,state-write,deny" {
-		t.Fatalf("audit decisions = %v, want approval-granted, state-write, deny; rows=%+v", decisions, events)
+	if strings.Join(decisions, ",") != "approval-granted,deny" {
+		t.Fatalf("audit decisions = %v, want approval-granted, deny; rows=%+v", decisions, events)
 	}
-	if events[0].Tool != "echo_args" || events[0].Reason != "approved by test" || events[2].Tool != "echo_args" || events[2].Reason != "canonical-marshal-failed" {
+	if events[0].Tool != "echo_args" || events[0].Reason != "approved by test" || events[1].Tool != "echo_args" || events[1].Reason != "canonical-marshal-failed" {
 		t.Fatalf("audit rows = %+v, want the approval and caller denial for echo_args", events)
 	}
 	if len(proxy.auditTodo) != 0 {

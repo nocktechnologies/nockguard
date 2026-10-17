@@ -295,13 +295,12 @@ agents:
 		agent, tool   string
 		wantVerdict   Verdict
 		wantAllowed   bool
-		wantWithheld  bool
 		reasonSnippet string
 	}{
-		{"deny short-circuits ask/allow", "kit", "nockcc_kill_switch_set", Deny, false, false, `deny-rule "nockcc_kill_switch_set"`},
-		{"ask after deny before allow", "kit", "nockcc_spend_add", Ask, false, true, `ask-rule "nockcc_spend_*"`},
-		{"allow still works", "kit", "nockcc_nock_list", Allow, true, false, `allow-rule "nockcc_*"`},
-		{"ask works without allow list", "permissive", "shell_exec", Ask, false, true, `ask-rule "shell_*"`},
+		{"deny short-circuits ask/allow", "kit", "nockcc_kill_switch_set", Deny, false, `deny-rule "nockcc_kill_switch_set"`},
+		{"ask after deny before allow", "kit", "nockcc_spend_add", Ask, false, `ask-rule "nockcc_spend_*"`},
+		{"allow still works", "kit", "nockcc_nock_list", Allow, true, `allow-rule "nockcc_*"`},
+		{"ask works without allow list", "permissive", "shell_exec", Ask, false, `ask-rule "shell_*"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -311,9 +310,6 @@ agents:
 			}
 			if dec.Allowed() != tt.wantAllowed {
 				t.Errorf("Allowed() = %v, want %v", dec.Allowed(), tt.wantAllowed)
-			}
-			if (len(dec.Withheld) > 0) != tt.wantWithheld {
-				t.Errorf("len(Withheld) = %d, want withheld=%v", len(dec.Withheld), tt.wantWithheld)
 			}
 			if !strings.Contains(dec.Reason, tt.reasonSnippet) {
 				t.Errorf("Reason = %q, want to contain %q", dec.Reason, tt.reasonSnippet)
