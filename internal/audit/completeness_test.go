@@ -214,6 +214,35 @@ func TestRunAssessmentActionlessDecisionAllowlist(t *testing.T) {
 	}
 }
 
+func TestRunWithoutOpenKeepsUnassessableVerdict(t *testing.T) {
+	now := time.Date(2026, 10, 17, 6, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	a, err := New(path, WithSigningKey([]byte("test signing key")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	a.clock = func() time.Time { return now }
+	// A v2 row whose run has no open is structurally broken, but the design
+	// keeps a mixed or unverified trail UNASSESSABLE as a whole.
+	if err := a.RecordRequired(Event{Agent: "demo", SchemaVersion: 2, RecordType: "decision", RunID: testRunID, Tool: "initialize", Decision: "method-allow"}); err != nil {
+		t.Fatal(err)
+	}
+	v2Only := mustRead(t, path)
+	if got := AssessRuns(v2Only, true, now)[0].Verdict; got != "BROKEN" {
+		t.Fatalf("verified run without open = %s, want BROKEN", got)
+	}
+	if got := AssessRuns(v2Only, false, now)[0].Verdict; got != "UNASSESSABLE" {
+		t.Fatalf("unverified run without open = %s, want UNASSESSABLE", got)
+	}
+	if err := a.Record(Event{Agent: "demo", Tool: "read", Decision: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := AssessRuns(mustRead(t, path), true, now)[0].Verdict; got != "UNASSESSABLE" {
+		t.Fatalf("mixed trail with run without open = %s, want UNASSESSABLE", got)
+	}
+}
+
 func mustRead(t *testing.T, path string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(path)

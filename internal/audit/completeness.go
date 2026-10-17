@@ -157,6 +157,8 @@ func AssessRuns(trail []byte, checkpointed bool, now time.Time) []RunAssessment 
 		switch {
 		case !checkpointed || legacy:
 			a.Verdict, a.Reason = "UNASSESSABLE", "trail is not exclusively verified and checkpointed v2 rows"
+		case !run.open:
+			a.Verdict, a.Reason = "BROKEN", fmt.Sprintf("run %s has no open", id)
 		case run.broken:
 			a.Verdict, a.Reason = "BROKEN", "run structure or action transitions are invalid"
 		case run.future:
@@ -169,9 +171,6 @@ func AssessRuns(trail []byte, checkpointed bool, now time.Time) []RunAssessment 
 			a.Verdict, a.Reason = "INCOMPLETE", "run has no close and its last heartbeat is stale; abnormal end or truncation is unknown"
 		default:
 			a.Verdict, a.Reason = "IN_PROGRESS", "run has no close and its last heartbeat is recent"
-		}
-		if !run.open {
-			a.Verdict, a.Reason = "BROKEN", fmt.Sprintf("run %s has no open", id)
 		}
 		result = append(result, a)
 	}
