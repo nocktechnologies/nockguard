@@ -820,7 +820,11 @@ func (p *StdioProxy) Run() error {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return fmt.Errorf("proxy received %s", sig)
 	}
-	p.runStopping.Store(true)
+	if p.actionPairing {
+		// Only a paired run stops accepting input here; legacy proxies keep
+		// forwarding client input during the output drain.
+		p.runStopping.Store(true)
+	}
 	// Clean output EOF bounds the leader wait to one second. When the leader
 	// exits first, let a reading client receive output while it keeps flowing,
 	// subject to a ten-second absolute cap from that exit.
@@ -1407,7 +1411,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 	for scanner.Scan() {
-		if p.runStopping.Load() {
+		if p.actionPairing && p.runStopping.Load() {
 			return fmt.Errorf("audit run is shutting down")
 		}
 		if p.requiredAudit {

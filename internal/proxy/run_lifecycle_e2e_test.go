@@ -295,3 +295,45 @@ func TestRunCloseConcurrentWithWritesLeavesNoLegacyRows(t *testing.T) {
 	}
 	t.Logf("%d transitions, %d durable runs closed under concurrent writes", passes, runs)
 }
+
+// With action pairing off there is no run lifecycle: after the upstream leader
+// exits, the proxy must keep forwarding client input during the output drain
+// and exit cleanly on client EOF, exactly as before run lifecycle existed.
+func TestLegacyProxyKeepsReadingInputAfterUpstreamLeaderExits(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "paced-output.sh")
+	// The descendant keeps the upstream's stdin, so input forwarded after
+	// the leader exits still reaches a reader.
+	body := "#!/bin/bash\n(sleep 0.2; echo aaaa; read -r line && echo GOT; for i in {1..5}; do echo aaaa; sleep 0.1; done; echo DONE) <&0 &\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	in, out, exited, stderr := runWithOpenStdinStderr(t, "bash "+script)
+	// The first descendant line arrives after the leader has exited.
+	if !out.Scan() || out.Text() != "aaaa" {
+		t.Fatalf("first output line %q, err %v", out.Text(), out.Err())
+	}
+	if _, err := io.WriteString(in, `{"jsonrpc":"2.0","method":"notifications/initialized"}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = in.Close()
+	var last string
+	forwarded := false
+	for out.Scan() {
+		last = out.Text()
+		forwarded = forwarded || last == "GOT"
+	}
+	if last != "DONE" || !forwarded {
+		t.Fatalf("output truncated or input not forwarded; last line %q, forwarded %v", last, forwarded)
+	}
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("legacy proxy exit = %v; stderr:\n%s", err, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy did not exit")
+	}
+	if strings.Contains(stderr.String(), "audit run is shutting down") {
+		t.Fatalf("legacy proxy reported run shutdown:\n%s", stderr.String())
+	}
+}
