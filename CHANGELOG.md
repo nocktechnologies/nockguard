@@ -4,11 +4,37 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-17
+
+v0.10.0 extends the opt-in paired stdio audit (`audit.action_pairing: true`). Signed action rows now record a digest of each tool definition the server advertised. Operators can pin reviewed definitions with `tool_pins` and `--upstream-id`; a pinned tool whose definition is missing, unhashable or changed is hidden from `tools/list` and its calls are blocked. Each paired proxy run writes signed open, heartbeat and close rows, and `verify --completeness` reports a per-run assessment next to the integrity verdict. Paired audit now needs a signing key. This release also fixes concurrent Telegram approval routing, the bracketed IPv6 loopback Host on `mcp-listen`, oversized method and tool names, and a malformed `approval_actor` latching the required audit writer.
+
+### Upgrade notes
+
+- `audit.action_pairing: true` now needs a signed audit writer (an Ed25519 or HMAC signing key). Without one, `nockguard proxy` exits with `audit.action_pairing requires a signed audit writer for run lifecycle`. v0.9.0 ran pairing unsigned. Policies without `action_pairing` are not affected.
+- Paired trails now contain `run` rows (`open`, a `heartbeat` every 30 seconds, `close`) and, on call rows, `tool_pin_status` with `tool_hash_version` and `tool_definition_hash` when a definition was observed. Scripts that count rows or match on `record_type` will see them. These rows use the v2 format v0.9.0 already validates, so a v0.9.0 `verify` still checks their integrity; `--completeness` needs v0.10.0.
+- With pairing on, when the upstream exits or the proxy gets SIGINT, SIGTERM, SIGHUP or SIGQUIT, the proxy stops accepting input, waits a bounded time for accepted calls, records `outcome_unknown` for calls still in flight and then writes the run `close` row. With pairing off, shutdown is unchanged.
+- `tool_pins` and `strict_tool_pins` are new agent policy keys. A policy that uses them does not load on v0.9.0, so roll back with a policy that omits them.
+- `--upstream-id` is required only when the agent's policy sets `tool_pins` or `strict_tool_pins`. The ID must be 1 to 128 bytes with no whitespace or control characters, and when pins are listed it must name an upstream under `tool_pins`; the same rule applies to `tool_pins` keys when the policy loads. A pin policy also needs `audit.action_pairing: true` (the policy fails to load without it) and a signing key. `--audit-best-effort` is refused with pins, and `mcp-listen`, `mcp-http` and `mcp-gateway` refuse to start with a pin policy.
+- `verify --completeness` keeps the integrity exit status: `BROKEN`, `INCOMPLETE` or `UNASSESSABLE` do not change the exit code. Read `completeness[].verdict` from `--json`. It checks a single trail and cannot be combined with `--all`.
+- MCP requests whose method or tool name is longer than 256 bytes are now refused with JSON-RPC `-32600` and recorded as `method-deny`.
+
+### Added
+
+- Tool-definition digests for opt-in paired stdio audit. Each tool in a complete client `tools/list` listing gets a SHA-256 digest of its RFC 8785 canonical JSON (`jcs-rfc8785-v1`), kept in a session tool catalog. Signed v2 call rows record the observed hash and a `tool_pin_status` (`unpinned`, `unobserved` or `unhashable`). The digest identifies the definition the server advertised, not how the server behaves. Only a complete single-page listing attaches a hash to later calls; calls after a paginated listing or after `notifications/tools/list_changed` stay `unobserved`. No raw definition or schema is written to the trail. If the catalog cannot be built, `tools/list` still returns the normal filtered listing.
+- Operator tool pins for the stdio proxy. `tool_pins` maps a stable upstream ID, passed with `--upstream-id`, and an exact tool name to a reviewed `jcs-rfc8785-v1` SHA-256 digest. A pinned tool whose definition is missing, unhashable or changed is hidden from `tools/list` and blocked on `tools/call`, even without strict mode. `strict_tool_pins: true` also blocks allowed tools that have no pin. Signed rows record the expected `tool_pin_hash` next to the observed hash, with `matched`, `mismatch`, `unobserved`, `unhashable` or `unpinned` status. Re-listing and call approval never change a pin; only a policy edit does. After `notifications/tools/list_changed`, re-list from the first page or reconnect. Pinned tools behind a paginated listing stay blocked.
+- Signed run lifecycle rows for opt-in paired stdio audit. Each run has a fresh random run nonce and writes a durable `open` row before reading input, a `heartbeat` every 30 seconds and, after a bounded shutdown drain, a `close` row that commits to the run's preceding row count and signature. A write or sync failure prevents a clean close.
+- `verify --completeness` adds a per-run assessment to a single trail's integrity verdict. `LIMITED` is the best result: the signed, checkpointed observation stream recorded for that run is internally complete. It does not prove that every attempted call was recorded or that a remote side effect completed. A recent open run is `IN_PROGRESS`; an open run with no heartbeat for 90 seconds, or an action with no terminal observation, is `INCOMPLETE`; future-dated heartbeats, unsigned or mixed legacy and v2 trails, and unavailable verification are `UNASSESSABLE`; legacy-only trails are `UNVERIFIED`; invalid run structure is `BROKEN`. Completeness is separate from integrity and does not change the exit code.
+
+### Changed
+
+- The proxy waits at most one second for the audit writer to close on exit. If a write is still in progress, it says so and points to `verify --completeness`.
+
 ### Fixed
 
 - Route Telegram approval callbacks to the matching held request when calls wait concurrently.
 - `mcp-listen` accepts the bracketed IPv6 loopback Host `[::1]` without a port.
 - Reject MCP method and tool names exceeding 256 bytes before forwarding, with bounded audit diagnostics that preserve trail verification.
+- A required audit write rejected for a malformed `approval_actor` no longer latches the writer or creates the `.audit-failing` marker; nothing is written, and later calls proceed. Real storage failures still latch.
 
 ## [0.9.0] - 2026-10-16
 
