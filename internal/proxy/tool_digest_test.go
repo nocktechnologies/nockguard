@@ -576,45 +576,47 @@ func TestEndedActionsReleaseObservedDefinitions(t *testing.T) {
 
 func TestActionObservationRacesResponseTimeoutAndCancel(t *testing.T) {
 	for i := 0; i < 20; i++ {
-		auditor, path, _ := newEd25519Auditor(t)
-		gate := newActionPairingGate(t, auditor, "")
-		pending := &sync.Map{}
-		listedNames(t, listPage(t, gate, pending, listRequest(1, ""), listResponse(1, toolsJSON("slow_tool"), "")))
-		if err := gate.agentToUpstream(strings.NewReader(callLine("7", "slow_tool", "private")+"\n"), io.Discard, pending); err != nil {
-			t.Fatal(err)
-		}
-		var wg sync.WaitGroup
-		wg.Add(3)
-		go func() {
-			defer wg.Done()
-			_ = gate.upstreamToAgent(strings.NewReader(`{"jsonrpc":"2.0","id":7,"result":{}}`+"\n"), io.Discard, pending, nil)
-		}()
-		go func() {
-			defer wg.Done()
-			gate.finishPendingActions(pending, "timeout")
-		}()
-		go func() {
-			defer wg.Done()
-			gate.markCancelledAction(pending, json.RawMessage(`7`))
-		}()
-		wg.Wait()
-		gate.drainAudits()
-		hash := gate.catalog.observe("slow_tool").hash
-		var terminal int
-		for _, ev := range actionEvents(readAuditEvents(t, path)) {
-			if ev.RecordType == "action_observation" && ev.Observation != "late_response_observed" {
-				terminal++
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			auditor, path, _ := newEd25519Auditor(t)
+			defer auditor.Close()
+			gate := newActionPairingGate(t, auditor, "")
+			pending := &sync.Map{}
+			listedNames(t, listPage(t, gate, pending, listRequest(1, ""), listResponse(1, toolsJSON("slow_tool"), "")))
+			if err := gate.agentToUpstream(strings.NewReader(callLine("7", "slow_tool", "private")+"\n"), io.Discard, pending); err != nil {
+				t.Fatal(err)
 			}
-			if ev.ToolDefinitionHash != hash || ev.ToolPinStatus != "unpinned" {
-				t.Fatalf("row lost the frozen observation: %+v", ev)
+			var wg sync.WaitGroup
+			wg.Add(3)
+			go func() {
+				defer wg.Done()
+				_ = gate.upstreamToAgent(strings.NewReader(`{"jsonrpc":"2.0","id":7,"result":{}}`+"\n"), io.Discard, pending, nil)
+			}()
+			go func() {
+				defer wg.Done()
+				gate.finishPendingActions(pending, "timeout")
+			}()
+			go func() {
+				defer wg.Done()
+				gate.markCancelledAction(pending, json.RawMessage(`7`))
+			}()
+			wg.Wait()
+			gate.drainAudits()
+			hash := gate.catalog.observe("slow_tool").hash
+			var terminal int
+			for _, ev := range actionEvents(readAuditEvents(t, path)) {
+				if ev.RecordType == "action_observation" && ev.Observation != "late_response_observed" {
+					terminal++
+				}
+				if ev.ToolDefinitionHash != hash || ev.ToolPinStatus != "unpinned" {
+					t.Fatalf("row lost the frozen observation: %+v", ev)
+				}
 			}
-		}
-		if terminal != 1 {
-			t.Fatalf("terminal observations = %d; want 1", terminal)
-		}
-		if n := actionObservedCount(gate); n != 0 {
-			t.Fatalf("actionObserved retained %d entries", n)
-		}
-		auditor.Close()
+			if terminal != 1 {
+				t.Fatalf("terminal observations = %d; want 1", terminal)
+			}
+			if n := actionObservedCount(gate); n != 0 {
+				t.Fatalf("actionObserved retained %d entries", n)
+			}
+		})
 	}
 }
