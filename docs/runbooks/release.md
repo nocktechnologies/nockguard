@@ -48,8 +48,10 @@ do not weaken existing protections to make promotion pass.
    and say so in the release PR body. Merge it before the freeze starts,
    because the freeze admits only release-fix PRs. If `next` moves after the
    cleanup merge (or the nothing-to-remove read) and before the freeze, read
-   the new commits too. Per-PR simplification sees one diff at a time; this
-   pass catches what builds up between PRs.
+   the new commits too. If that read finds something, add it to the cleanup PR
+   if it has not merged; otherwise record it in the release PR body for the
+   next batch. Per-PR simplification sees one diff at a time; this pass catches
+   what builds up between PRs.
 2. On `next` (or the release branch described above), choose the release tag
    and update the hardcoded version in `cmd/nockguard/main.go`,
    `docs/ROADMAP.md`, and the heading in `CHANGELOG.md`. Build the CLI and run
