@@ -53,7 +53,7 @@ do not weaken existing protections to make promotion pass.
    `docs/ROADMAP.md`, and the heading in `CHANGELOG.md`. Build the CLI and run
    `scripts/check-release-version.sh vX.Y.Z <binary>`. Verify customer docs
    against the code that will ship, then promote through the release PR above.
-3. Run the [CI checks](../../CLAUDE.md#build-and-test), including the
+3. Run the [CI checks](../../AGENTS.md#build-and-test), including the
    [macOS test job](../../.github/workflows/ci.yml), against the exact `main`
    commit selected for release.
 4. Run `scripts/build-release-assets.sh vX.Y.Z dist` on Linux with GNU tar and

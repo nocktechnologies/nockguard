@@ -14,6 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: AGENTS.md paths
+        run: python3 scripts/check-agents-paths.py
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
