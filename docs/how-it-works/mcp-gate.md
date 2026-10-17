@@ -25,6 +25,17 @@ complete single-page listing restores observed hashes; a paginated one does
 not. The digest identifies an advertised definition, not the server's behavior.
 See [audit](audit.md) for the signed fields and limits.
 
+Operator pins are configured per agent, stable upstream ID, and exact tool
+name. Pass `--upstream-id` to `proxy`; a configured pin always gates discovery
+and direct calls, while `strict_tool_pins` additionally requires a pin for every
+allowed tool. Re-list after `notifications/tools/list_changed`; a paginated
+catalog cannot authorize pinned calls. See [policy and limits](policy-and-limits.md).
+The final pin check and durable dispatch are serialized with catalog changes.
+A call dispatched before `list_changed` remains in flight, even if the upstream
+write completes afterward; later calls require a fresh verified listing.
+`mcp-http`, `mcp-listen`, and `mcp-gateway` refuse pin policies until HTTP catalog
+observations can be bound to individual upstream sessions.
+
 `mcp-http` bridges a stdio client to an HTTP MCP server in observe-only mode;
 it is not an enforcement listener ([cmd/nockguard/main.go](../../cmd/nockguard/main.go)). A managed
 cloud connector cannot reach an operator's loopback listener. The separate

@@ -2,6 +2,7 @@ package policy
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/forward"
@@ -65,6 +67,9 @@ type ForwardPolicy struct {
 const DefaultAuditPath = ".nockguard/logs/audit.jsonl"
 
 type AgentPolicy struct {
+	// ToolPins are reviewed definitions keyed by stable upstream ID and exact tool name.
+	ToolPins       map[string]map[string]ToolPin `yaml:"tool_pins"`
+	StrictToolPins bool                          `yaml:"strict_tool_pins"`
 	// DenyMethods lists exact non-tools/call MCP method names to refuse.
 	DenyMethods []string `yaml:"deny_methods"`
 	Allow       []string `yaml:"allow"`
@@ -103,6 +108,11 @@ type AgentPolicy struct {
 	// to the raw value. Injection happens only on allowed calls, after validation,
 	// before the final marshal to upstream. Empty = no injection.
 	Inject []InjectRule `yaml:"inject"`
+}
+
+type ToolPin struct {
+	HashVersion string `yaml:"hash_version"`
+	SHA256      string `yaml:"sha256"`
 }
 
 // RateLimitPolicy bounds tool-call rate: at most MaxCalls within Window (a Go
@@ -214,6 +224,30 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 	}
 	if cfg.Audit != nil && cfg.Audit.ActionPairing && !cfg.Audit.Enabled {
 		return nil, fmt.Errorf("policy %s: audit.action_pairing requires audit.enabled: true", name)
+	}
+	for agent, pol := range cfg.Agents {
+		if len(pol.ToolPins) == 0 && !pol.StrictToolPins {
+			continue
+		}
+		if cfg.Audit == nil || !cfg.Audit.ActionPairing {
+			return nil, fmt.Errorf("agent %q: tool pins require audit.action_pairing", agent)
+		}
+		for upstream, tools := range pol.ToolPins {
+			if err := ValidateUpstreamID(upstream); err != nil {
+				return nil, fmt.Errorf("agent %q: tool_pins upstream ID %q: %w", agent, upstream, err)
+			}
+			if len(tools) == 0 {
+				return nil, fmt.Errorf("agent %q: empty pin set for upstream %q", agent, upstream)
+			}
+			for tool, pin := range tools {
+				if tool == "" || pin.HashVersion != "jcs-rfc8785-v1" || len(pin.SHA256) != 64 || strings.ToLower(pin.SHA256) != pin.SHA256 {
+					return nil, fmt.Errorf("agent %q: invalid tool pin for %q in upstream %q", agent, tool, upstream)
+				}
+				if _, err := hex.DecodeString(pin.SHA256); err != nil {
+					return nil, fmt.Errorf("agent %q: invalid tool pin for %q: %w", agent, tool, err)
+				}
+			}
+		}
 	}
 	// Validate every glob pattern at load time so a malformed wildcard fails
 	// LOUD here rather than silently voiding a control at evaluate time (N8180).
@@ -413,6 +447,59 @@ func (e *Engine) HasPolicyFor(agent string) bool {
 	}
 	_, ok := e.config.Agents["default"]
 	return ok
+}
+
+func (e *Engine) toolPinPolicy(agent string) AgentPolicy {
+	pol, ok := e.config.Agents[agent]
+	if !ok {
+		pol = e.config.Agents["default"]
+	}
+	return pol
+}
+
+func (e *Engine) ToolPin(agent, upstreamID, tool string) (ToolPin, bool) {
+	pol := e.toolPinPolicy(agent)
+	pin, exists := pol.ToolPins[upstreamID][tool]
+	return pin, exists
+}
+
+func (e *Engine) HasToolPinConstraints(agent string) bool {
+	pol := e.toolPinPolicy(agent)
+	return pol.StrictToolPins || len(pol.ToolPins) > 0
+}
+
+func (e *Engine) StrictToolPins(agent string) bool {
+	pol := e.toolPinPolicy(agent)
+	return pol.StrictToolPins
+}
+
+// ValidateUpstreamID applies the stable upstream ID format shared by
+// --upstream-id and tool_pins keys: 1-128 bytes, no Unicode whitespace and
+// no control characters.
+func ValidateUpstreamID(id string) error {
+	if id == "" || len(id) > 128 {
+		return fmt.Errorf("upstream ID must be 1-128 bytes with no whitespace or control characters")
+	}
+	for _, r := range id {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("upstream ID must be 1-128 bytes with no whitespace or control characters")
+		}
+	}
+	return nil
+}
+
+func (e *Engine) ValidateToolPinScope(agent, upstreamID string) error {
+	pol := e.toolPinPolicy(agent)
+	if !pol.StrictToolPins && len(pol.ToolPins) == 0 {
+		return nil
+	}
+	if err := ValidateUpstreamID(upstreamID); err != nil {
+		return fmt.Errorf("tool pins require a stable --upstream-id: %w", err)
+	}
+	if len(pol.ToolPins) > 0 && len(pol.ToolPins[upstreamID]) == 0 {
+		return fmt.Errorf("upstream ID %q has no configured tool_pins", upstreamID)
+	}
+	return nil
 }
 
 // DeniesMethod applies the named agent policy, falling back to default.

@@ -191,9 +191,10 @@ func WithActionPairing() Option {
 	return func(a *Auditor) { a.actionPairing = true }
 }
 
-// signing reports whether any signing mode is active.
-func (a *Auditor) signing() bool {
-	return len(a.key) > 0 || a.edPriv != nil
+// SigningEnabled reports whether records are authenticated by HMAC or Ed25519.
+// Signing options are fixed when the auditor is constructed.
+func (a *Auditor) SigningEnabled() bool {
+	return a != nil && (len(a.key) > 0 || a.edPriv != nil)
 }
 
 // sign produces the hex chain signature for canonical bytes linked to prev,
@@ -220,7 +221,7 @@ func New(path string, opts ...Option) (*Auditor, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	if a.signing() {
+	if a.SigningEnabled() {
 		if FailureStatus(path) {
 			if _, err := os.Stat(path); err != nil {
 				return nil, fmt.Errorf("cannot verify failed audit trail on reopen: %w", err)
@@ -250,7 +251,7 @@ func New(path string, opts ...Option) (*Auditor, error) {
 	}
 	a.f = f
 	a.path = path
-	if a.signing() {
+	if a.SigningEnabled() {
 		// A verified reopen is the required writer's recovery boundary.
 		_ = os.Remove(path + ".audit-failing")
 	}
@@ -339,7 +340,7 @@ func (a *Auditor) Signed() bool {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.f != nil && !a.closed && a.signing()
+	return a.f != nil && !a.closed && a.SigningEnabled()
 }
 
 // Record stamps the event with the current time and appends it as one JSON line.
@@ -439,7 +440,7 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 		latchRequiredFailure = false // rejected input; nothing was written
 		return err
 	}
-	if a.signing() {
+	if a.SigningEnabled() {
 		// Serialize the timestamp with signed appends across processes.
 		if err := lockExclusive(a.f.Fd()); err != nil {
 			return err
@@ -505,7 +506,7 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 	}
 
 	var checkpointCount int
-	if a.signing() {
+	if a.SigningEnabled() {
 		// Cross-process safety. The mutex only serializes writers within ONE
 		// process. Multiple proxy processes each seed prevSig from the tail at
 		// open and, left to their in-memory copy, would chain off a stale head —
@@ -558,7 +559,7 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 	// Signing mode only, still under the flock held above: advance the
 	// tail-truncation high-water-mark so a later removal of this entry is
 	// detectable (N8154). ev.Sig is this entry's signature.
-	if a.signing() {
+	if a.SigningEnabled() {
 		if err := a.updateHighWaterMark(checkpointCount+1, ev.Sig, required); err != nil {
 			return err
 		}

@@ -19,8 +19,9 @@ const (
 )
 
 type toolObservation struct {
-	hash   string
-	status string
+	hash    string
+	pinHash string
+	status  string
 }
 
 type catalogBuild struct {
@@ -48,23 +49,28 @@ func (c *toolCatalog) beginList(params json.RawMessage) uint64 {
 	var cursor string
 	if len(params) > 0 && string(params) != "null" {
 		if validateJSONStringLiterals(params) != nil {
+			c.invalidate()
 			return 0
 		}
 		decoder := json.NewDecoder(bytes.NewReader(params))
 		decoder.UseNumber()
 		value, err := readJCSValue(decoder, 0)
 		if err != nil {
+			c.invalidate()
 			return 0
 		}
 		if _, err := decoder.Token(); err != io.EOF {
+			c.invalidate()
 			return 0
 		}
 		fields, ok := value.(map[string]any)
 		if !ok {
+			c.invalidate()
 			return 0
 		}
 		for key := range fields {
 			if key != "cursor" && strings.EqualFold(key, "cursor") {
+				c.invalidate()
 				return 0
 			}
 		}
@@ -72,6 +78,7 @@ func (c *toolCatalog) beginList(params json.RawMessage) uint64 {
 			var ok bool
 			cursor, ok = raw.(string)
 			if !ok || cursor == "" || len(cursor) > maxCatalogCursor {
+				c.invalidate()
 				return 0
 			}
 		}
@@ -83,6 +90,8 @@ func (c *toolCatalog) beginList(params json.RawMessage) uint64 {
 			c.build.inFlight = true
 			return c.build.id
 		}
+		c.published = nil
+		c.publishedPaginated = false
 		return 0
 	}
 	c.nextID++
@@ -91,6 +100,37 @@ func (c *toolCatalog) beginList(params json.RawMessage) uint64 {
 	c.published = nil
 	c.publishedPaginated = false
 	return c.build.id
+}
+
+// exactListParams rejects aliases and duplicate members before the ordinary
+// JSON-RPC decoder can collapse them and misattribute a continuation page.
+func exactListParams(raw []byte) (json.RawMessage, bool) {
+	if validateJSONStringLiterals(raw) != nil {
+		return nil, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	value, err := readJCSValue(dec, 0)
+	if err != nil {
+		return nil, false
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, false
+	}
+	fields, ok := value.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	for key := range fields {
+		if key != "params" && strings.EqualFold(key, "params") {
+			return nil, false
+		}
+	}
+	var message map[string]json.RawMessage
+	if json.Unmarshal(raw, &message) != nil {
+		return nil, false
+	}
+	return message["params"], true
 }
 
 func (c *toolCatalog) invalidate() {
@@ -126,15 +166,15 @@ func (c *toolCatalog) observe(name string) toolObservation {
 	return toolObservation{status: "unobserved"}
 }
 
-func (c *toolCatalog) pageWithinBounds(id uint64, size, count int) (active, bounded bool) {
+func (c *toolCatalog) pageWithinBounds(id uint64, size, count int) (active, bounded, paginated bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	build := c.build
 	if build == nil || build.id != id || !build.inFlight {
-		return false, false
+		return false, false, false
 	}
 	return true, build.pages < maxCatalogPages && build.bytes+size <= maxCatalogBytes &&
-		len(build.tools)+count <= maxCatalogTools
+		len(build.tools)+count <= maxCatalogTools, build.paginated
 }
 
 // addPage commits an entire page under one lock. A failed page discards the
@@ -147,7 +187,7 @@ func (c *toolCatalog) addPage(id uint64, size int, observations map[string]toolO
 	defer c.mu.Unlock()
 	build := c.build
 	if build == nil || build.id != id || !build.inFlight {
-		return nil
+		return fmt.Errorf("tool catalog stale generation")
 	}
 	discard := func(reason string) error { c.build = nil; return fmt.Errorf("tool catalog %s", reason) }
 	if build.pages >= maxCatalogPages || build.bytes+size > maxCatalogBytes || len(build.tools)+len(observations) > maxCatalogTools {
@@ -212,14 +252,52 @@ func (p *StdioProxy) applyToolObservation(ev *audit.Event) {
 	if ev.SchemaVersion != 2 || ev.Tool == "" {
 		return
 	}
-	observed := p.catalog.observe(ev.Tool)
+	var observed toolObservation
 	if ev.ActionID != "" {
-		actual, _ := p.actionObserved.LoadOrStore(ev.ActionID, observed)
-		observed = actual.(toolObservation)
+		if actual, ok := p.actionObserved.Load(ev.ActionID); ok {
+			observed = actual.(toolObservation)
+		} else {
+			observed, _ = p.pinObservation(ev.Tool, p.catalog.observe(ev.Tool))
+			actual, _ := p.actionObserved.LoadOrStore(ev.ActionID, observed)
+			observed = actual.(toolObservation)
+		}
+	} else {
+		observed, _ = p.pinObservation(ev.Tool, p.catalog.observe(ev.Tool))
 	}
+	setToolObservationFields(ev, observed)
+}
+
+func setToolObservationFields(ev *audit.Event, observed toolObservation) {
 	ev.ToolPinStatus = observed.status
-	if observed.hash != "" {
+	ev.ToolPinHash = observed.pinHash
+	if observed.hash != "" || observed.pinHash != "" {
 		ev.ToolHashVersion = toolHashVersion
-		ev.ToolDefinitionHash = observed.hash
 	}
+	ev.ToolDefinitionHash = observed.hash
+}
+
+func (p *StdioProxy) pinObservation(tool string, observed toolObservation) (toolObservation, string) {
+	pin, pinned := p.engine.ToolPin(p.agent, p.upstreamID, tool)
+	if !pinned {
+		if p.engine.StrictToolPins(p.agent) || (p.upstreamID == "" && p.engine.HasToolPinConstraints(p.agent)) {
+			observed.status = "unpinned"
+			return observed, "pin_unverified"
+		}
+		return observed, ""
+	}
+	observed.pinHash = pin.SHA256
+	switch observed.status {
+	case "", "unobserved":
+		// A zero observation (stale or discarded build) is not a definition.
+		observed.status = "unobserved"
+		return observed, "tool_catalog_refresh_required"
+	case "unhashable":
+		return observed, "pin_unverified"
+	}
+	if observed.hash != pin.SHA256 {
+		observed.status = "mismatch"
+		return observed, "pin_mismatch"
+	}
+	observed.status = "matched"
+	return observed, ""
 }

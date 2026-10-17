@@ -42,6 +42,7 @@ type auditSequenceRange struct {
 
 type StdioProxy struct {
 	upstream      []string
+	upstreamID    string
 	agent         string
 	engine        *policy.Engine
 	validator     *validate.Validator
@@ -204,6 +205,11 @@ func (p *StdioProxy) WithResolver(r secrets.Resolver) *StdioProxy {
 	return p
 }
 
+func (p *StdioProxy) WithUpstreamID(id string) *StdioProxy {
+	p.upstreamID = id
+	return p
+}
+
 func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, validator *validate.Validator, limiter *ratelimit.Limiter, auditor *audit.Auditor, forwarder *forward.Forwarder, logger *log.Logger) *StdioProxy {
 	resolver := secrets.Chain()
 	p := &StdioProxy{
@@ -231,6 +237,10 @@ func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, valid
 			p.actionInitErr = fmt.Errorf("audit.action_pairing requires an available durable audit writer")
 			return p
 		}
+		if engine.HasToolPinConstraints(agent) && !auditor.SigningEnabled() {
+			p.actionInitErr = fmt.Errorf("tool pins require a signed audit writer")
+			return p
+		}
 		var runID [16]byte
 		if _, err := rand.Read(runID[:]); err != nil {
 			p.actionInitErr = fmt.Errorf("initialize action audit run id: %w", err)
@@ -255,7 +265,8 @@ func (p *StdioProxy) appendAudit(seq uint64, tool, decision, reason string, refs
 // normal tool-call audit rows leave the field absent.
 func (p *StdioProxy) appendAuditWithApprovalActor(seq uint64, tool, decision, reason string, refs *extract.References, approvalActor string) {
 	p.auditMutex.Lock()
-	defer p.auditMutex.Unlock()
+	actionID := p.actionIDs[seq]
+	p.auditMutex.Unlock()
 
 	// Build the audit event (no card stamp yet — that happens at flush time).
 	// Allocate on the heap so the pointer remains valid after this function returns
@@ -266,10 +277,15 @@ func (p *StdioProxy) appendAuditWithApprovalActor(seq uint64, tool, decision, re
 		Reason:        reason,
 		ApprovalActor: approvalActor,
 	}
-	if actionID := p.actionIDs[seq]; actionID != "" {
+	if actionID != "" {
 		p.setActionFields(ev, actionID)
+		// Resolve the observation before auditMutex: a cache miss locks
+		// catalog.mu, which must never be acquired while auditMutex is held.
 		p.applyToolObservation(ev)
 	}
+
+	p.auditMutex.Lock()
+	defer p.auditMutex.Unlock()
 
 	// Set extracted references if provided.
 	if refs != nil {
@@ -1192,14 +1208,10 @@ func (p *StdioProxy) appendActionObservation(seq uint64, card *pendingCard, obse
 		if stored, ok := p.actionObserved.Load(card.actionID); ok {
 			card.observed = stored.(toolObservation)
 		} else {
-			card.observed = p.catalog.observe(card.tool)
+			card.observed, _ = p.pinObservation(card.tool, p.catalog.observe(card.tool))
 		}
 	}
-	ev.ToolPinStatus = card.observed.status
-	if card.observed.hash != "" {
-		ev.ToolHashVersion = toolHashVersion
-		ev.ToolDefinitionHash = card.observed.hash
-	}
+	setToolObservationFields(&ev, card.observed)
 
 	p.auditMutex.Lock()
 	if seq < p.auditNext || p.auditSequenceResolvedLocked(seq) {
@@ -1530,8 +1542,21 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 		if p.actionPairing && p.runStopping.Load() {
 			return fmt.Errorf("audit run is shutting down")
 		}
+		listingCandidate := false
+		if p.actionPairing {
+			var candidate jsonrpc.Message
+			if json.Unmarshal(scanner.Bytes(), &candidate) == nil && candidate.Method == "tools/list" {
+				listingCandidate = true
+				if _, exact := exactListParams(scanner.Bytes()); !exact {
+					p.catalog.invalidate()
+				}
+			}
+		}
 		if p.requiredAudit {
 			if err := p.auditor.RequiredError(); err != nil {
+				if listingCandidate {
+					p.catalog.invalidate()
+				}
 				p.logger.Printf("AUDIT-ERROR agent=%s audit failing: calls refused: %v", p.agent, err)
 				id := json.RawMessage("null")
 				if msg, decodeErr := jsonrpc.Decode(scanner.Bytes()); decodeErr == nil {
@@ -1561,6 +1586,9 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 					name, _, _ = canonicalToolCall(canonicalMsg.Params)
 				}
 				if d, rejected := p.rejectOversizedName(kind, name, canonicalMsg.ID); rejected {
+					if listingCandidate {
+						p.catalog.invalidate()
+					}
 					p.resolveAudit(seq)
 					if p.requiredAudit && p.auditor.RequiredError() != nil {
 						d.rejectCode, d.rejectMsg = -32603, AuditBeforeForwardError
@@ -1584,6 +1612,9 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			}
 		}
 		if p.actionPairing && canonicalMsg != nil && canonicalMsg.IsRequest() && p.requestIDInUse(pending, canonicalMsg.ID) {
+			if listingCandidate {
+				p.catalog.invalidate()
+			}
 			if actionID != "" {
 				tool, params, _ := canonicalToolCall(canonicalMsg.Params)
 				refs := extract.FromToolCall(tool, params)
@@ -1631,9 +1662,21 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			// until after filtering and appending hide audits.
 			buildID := uint64(0)
 			if p.actionPairing {
-				var request jsonrpc.Message
-				_ = json.Unmarshal(d.forward, &request)
-				buildID = p.catalog.beginList(request.Params)
+				params, exact := exactListParams(scanner.Bytes())
+				if !exact {
+					p.catalog.invalidate()
+				} else {
+					buildID = p.catalog.beginList(params)
+				}
+				if buildID == 0 && p.engine.HasToolPinConstraints(p.agent) {
+					p.logger.Printf("TOOL-CATALOG-DISCARDED agent=%s reason=unattributed-list", p.agent)
+					p.appendAudit(seq, "tools/list", "block", "tool_catalog_refresh_required", nil)
+					p.resolveAudit(seq)
+					if err := p.rejectToAgent(d.toolsListID, -32603, "nockguard: tool catalog refresh required"); err != nil {
+						return err
+					}
+					continue
+				}
 			}
 			pending.Store(string(d.toolsListID), toolsListSeq{seq: seq, buildID: buildID})
 			if p.actionPairing {
@@ -1642,6 +1685,9 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			deferred = true
 		}
 		if d.reject {
+			if listingCandidate {
+				p.catalog.invalidate()
+			}
 			p.resolveAudit(seq)
 			if actionID != "" {
 				card := d.actionCard(seq, actionID)
@@ -1664,9 +1710,58 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			if p.actionPairing && request.Method == "notifications/cancelled" {
 				p.markCancelledAction(pending, cancellationRequestID(&request))
 			}
+			// Serialize the last pin check and durable dispatch with catalog
+			// invalidation. Dispatch is the authorization point: a notification
+			// after it blocks later calls, while this call is already in flight.
+			// Release the lock before upstream I/O so a blocked write cannot stop
+			// the response reader from processing list_changed.
+			catalogLocked := request.Method == "tools/call" && p.engine.HasToolPinConstraints(p.agent)
+			if catalogLocked {
+				p.catalog.mu.Lock()
+				observed := toolObservation{status: "unobserved"}
+				if !p.catalog.publishedPaginated {
+					if current, ok := p.catalog.published[d.tool]; ok {
+						observed = current
+					}
+				}
+				current, cause := p.pinObservation(d.tool, observed)
+				if cause != "" {
+					p.catalog.mu.Unlock()
+					if actionID != "" {
+						p.actionObserved.Store(actionID, current)
+					}
+					p.logger.Printf("TOOL-PIN-BLOCK agent=%s tool=%s cause=%s", p.agent, d.tool, cause)
+					p.resolveAudit(seq)
+					p.audit(d.tool, "block", cause, d.refsForAudit, actionID)
+					if actionID != "" {
+						card := d.actionCard(seq, actionID)
+						card.observed = current
+						if err := p.observeAction(card, "not_forwarded", cause, "", nil); err != nil {
+							p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, d.tool, err)
+						}
+					}
+					reason := "nockguard: tool definition is not approved"
+					if p.requiredAudit && p.auditor.RequiredError() != nil {
+						reason = AuditBeforeForwardError
+					}
+					if err := p.rejectToAgent(request.ID, -32600, reason); err != nil {
+						return err
+					}
+					continue
+				}
+				// The dispatch row below runs with catalog.mu held. Cache the
+				// checked observation so applyToolObservation never calls
+				// catalog.observe (which locks catalog.mu) for this action.
+				if actionID != "" {
+					p.actionObserved.Store(actionID, current)
+				}
+			}
 			if p.requiredAudit && request.Method == "tools/call" {
 				p.audit(d.tool, "dispatch", "required-audit-before-forward", d.refsForAudit, actionID)
 				if p.auditor.RequiredError() != nil {
+					if catalogLocked {
+						p.catalog.mu.Unlock()
+					}
 					p.resolveAudit(seq)
 					p.actionObserved.Delete(actionID)
 					if err := p.rejectToAgent(request.ID, -32603, AuditBeforeForwardError); err != nil {
@@ -1674,6 +1769,9 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 					}
 					continue
 				}
+			}
+			if catalogLocked {
+				p.catalog.mu.Unlock()
 			}
 			// Register response state before the write: an upstream may reply while
 			// Write is still returning, and the response reader must be able to
@@ -1690,7 +1788,11 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				pendingCard.requestID = append(json.RawMessage(nil), d.forwardID...)
 				pending.Store(string(d.forwardID), pendingCard)
 			}
-			if _, writeErr := fmt.Fprintf(w, "%s\n", d.forward); writeErr != nil {
+			_, writeErr := fmt.Fprintf(w, "%s\n", d.forward)
+			if writeErr != nil {
+				if request.Method == "tools/list" {
+					p.catalog.invalidate()
+				}
 				id := d.forwardID
 				if id == nil {
 					id = d.toolsListID
@@ -1914,6 +2016,13 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 		p.resolveAudit(seq)
 		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
 			rejectMsg: fmt.Sprintf("nockguard: tool %q denied by policy", toolName), notForwardedCause: "policy_denied"}
+	}
+	if observed, cause := p.pinObservation(toolName, p.catalog.observe(toolName)); cause != "" {
+		p.logger.Printf("TOOL-PIN-BLOCK agent=%s tool=%s status=%s cause=%s", p.agent, toolName, observed.status, cause)
+		p.appendAudit(seq, toolName, "block", cause, &refs)
+		p.resolveAudit(seq)
+		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
+			rejectMsg: "nockguard: tool definition is not approved", notForwardedCause: cause}
 	}
 	// N8328: legacy require_approval is promoted to a hard `ask` and
 	// FAILS CLOSED when no approver is wired — identical to a native `ask`
@@ -2315,6 +2424,9 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ..
 		return jsonrpc.ErrorResponse(json.RawMessage("null"), -32603, "nockguard: invalid tools/list response")
 	}
 	invalid := func() []byte {
+		if p.engine.HasToolPinConstraints(p.agent) {
+			p.appendAudit(seq, "tools/list", "block", "tool_catalog_refresh_required", nil)
+		}
 		return jsonrpc.ErrorResponse(resp["id"], -32603, "nockguard: invalid tools/list response")
 	}
 	if _, hasError := resp["error"]; hasError {
@@ -2336,10 +2448,12 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ..
 	}
 	var observations map[string]toolObservation
 	var nextCursor string
+	var paginated bool
 	if buildID != 0 {
 		// Observation never changes the listing: a catalog failure discards
 		// the generation and the page is filtered exactly as without one.
-		active, bounded := p.catalog.pageWithinBounds(buildID, len(line), len(tools))
+		var active, bounded bool
+		active, bounded, paginated = p.catalog.pageWithinBounds(buildID, len(line), len(tools))
 		if active && !bounded {
 			discard("bound-exceeded")
 		}
@@ -2373,6 +2487,9 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ..
 			}
 		}
 	}
+	if buildID == 0 && p.engine.HasToolPinConstraints(p.agent) {
+		return invalid()
+	}
 	filtered := make([]map[string]json.RawMessage, 0, len(tools))
 	for _, raw := range tools {
 		var tool map[string]json.RawMessage
@@ -2383,16 +2500,33 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ..
 		if json.Unmarshal(tool["name"], &name) != nil || name == "" {
 			return invalid()
 		}
-		if dec := p.engine.Evaluate(p.agent, name); dec.Allowed() || dec.Verdict == policy.Ask {
+		dec := p.engine.Evaluate(p.agent, name)
+		allowed := dec.Allowed() || dec.Verdict == policy.Ask
+		observation := toolObservation{status: "unobserved"}
+		if current, ok := observations[name]; ok && buildID != 0 {
+			observation = current
+		}
+		if paginated || nextCursor != "" {
+			observation = toolObservation{status: "unobserved"}
+		}
+		pinStatus, pinCause := p.pinObservation(name, observation)
+		if allowed && pinCause == "" {
 			filtered = append(filtered, tool)
 		} else {
-			p.logger.Printf("HIDE agent=%s tool=%s reason=%q", p.agent, name, dec.Reason)
-			p.appendAudit(seq, name, "hide", dec.Reason, nil)
+			reason := dec.Reason
+			if allowed {
+				reason = pinCause
+			}
+			p.logger.Printf("HIDE agent=%s tool=%s reason=%q status=%s", p.agent, name, reason, pinStatus.status)
+			p.appendAudit(seq, name, "hide", reason, nil)
 		}
 	}
 	if buildID != 0 {
 		if err := p.catalog.addPage(buildID, len(line), observations, nextCursor); err != nil {
 			p.logger.Printf("TOOL-CATALOG-DISCARDED agent=%s reason=%v", p.agent, err)
+			if p.engine.HasToolPinConstraints(p.agent) {
+				return invalid()
+			}
 		}
 	}
 	// All values below are validated RawMessages; marshaling cannot fail.

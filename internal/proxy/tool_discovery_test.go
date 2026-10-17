@@ -254,6 +254,7 @@ func TestHTTPToolDiscoverySSEResolvesAuditBeforeStreamCloses(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	var evs []audit.Event
+	var foundHide, foundDeny bool
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(auditPath)
 		if err == nil {
@@ -267,7 +268,12 @@ func TestHTTPToolDiscoverySSEResolvesAuditBeforeStreamCloses(t *testing.T) {
 					evs = append(evs, ev)
 				}
 			}
-			if len(evs) >= 2 {
+			foundHide, foundDeny = false, false
+			for _, ev := range evs {
+				foundHide = foundHide || (ev.Decision == "hide" && ev.Tool == "blocked")
+				foundDeny = foundDeny || (ev.Decision == "deny" && ev.Tool == "not_allowed_tool")
+			}
+			if foundHide && foundDeny {
 				break
 			}
 		}
@@ -276,15 +282,6 @@ func TestHTTPToolDiscoverySSEResolvesAuditBeforeStreamCloses(t *testing.T) {
 	if len(evs) < 2 {
 		close(release)
 		t.Fatalf("audit queue stalled behind the open discovery SSE stream: got %d row(s) (want >=2: hide + deny) while the stream was still open: %+v", len(evs), evs)
-	}
-	var foundHide, foundDeny bool
-	for _, ev := range evs {
-		if ev.Decision == "hide" && ev.Tool == "blocked" {
-			foundHide = true
-		}
-		if ev.Decision == "deny" && ev.Tool == "not_allowed_tool" {
-			foundDeny = true
-		}
 	}
 	if !foundHide || !foundDeny {
 		close(release)

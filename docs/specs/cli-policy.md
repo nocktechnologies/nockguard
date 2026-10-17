@@ -67,7 +67,19 @@ Top level `audit` is optional. Source: [internal/policy/policy.go](../../interna
 | `agents.<name>.spend_cap` | `max_calls` cumulative for the proxy session; not dollar spend. |
 | `agents.<name>.trust` | `enabled` and optional `path`; changes only rate-limit headroom. |
 | `agents.<name>.inject` | Rules with `tools`, `ref`, `arg`, optional `template`; see [injection limits](../how-it-works/approvals-and-injection.md). |
+| `agents.<name>.tool_pins` | Operator-authored map of stable upstream ID to exact tool name to `{hash_version: jcs-rfc8785-v1, sha256: <64 lowercase hex>}`. Every configured pin is enforced. Requires signed `audit.action_pairing`. |
+| `agents.<name>.strict_tool_pins` | Opt-in requirement that every policy-allowed tool have a matching pin; missing, stale, unhashable and changed definitions are blocked. Requires signed `audit.action_pairing`. |
 | `audit` | `enabled`, optional `path`, `sign_key_env` (HMAC), `sign_ed25519_key_env` (Ed25519), optional `forward` with `enabled`, `url`, `api_key_env`. |
+
+To approve a tool definition, first run a signed action-pairing observe session,
+inspect the signed `tool_definition_hash` for a complete single-page listing,
+then edit the operator-owned policy to copy that value into `tool_pins`. For
+example, `tool_pins: {filesystem-local: {read_file: {hash_version:
+jcs-rfc8785-v1, sha256: <reviewed 64-character digest>}}}` under the agent.
+Launch `nockguard proxy` with `--upstream-id filesystem-local`; the ID is an
+operator-chosen stable label, not a command or URL. A review and policy change
+are required to approve a changed definition. `tools/list` and per-call
+approval cannot rewrite the pin. Pinning currently supports the stdio proxy.
 
 The key names and nested shapes are Go YAML fields in
 [internal/policy/policy.go](../../internal/policy/policy.go); the detailed policy examples and validation
@@ -86,6 +98,8 @@ invalid policy values must not silently grant access.
 | `selftest` | At least one check passed, none failed | Inconclusive setup or all checks skipped | Enforcement gap |
 | `evidence` | Integrity verified | Setup/input error | Broken chain; pack still produced |
 | Other commands | Success | Usage or runtime failure | Command-specific; do not assume `2` means tampering |
+
+`verify --completeness` keeps the integrity-only exit status; BROKEN, INCOMPLETE or UNASSESSABLE completeness verdicts do not change the exit code; read `completeness[].verdict` in --json.
 
 Parse `--json` for scripts where offered. Text output is for humans. Sources:
 [cmd/nockguard/main.go](../../cmd/nockguard/main.go),
