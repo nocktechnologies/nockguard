@@ -15,6 +15,12 @@ supplied. An unknown agent in a loaded policy has no permissions unless
 listener. Source: `internal/proxy/stdio.go`, `internal/proxy/httplisten.go`,
 [cmd/nockguard/main.go](../../cmd/nockguard/main.go).
 
+In opt-in stdio action-pairing mode, a complete client `tools/list` pagination
+chain builds the observed definition catalog used by signed v2 call rows.
+`notifications/tools/list_changed` invalidates it; clients must list again to
+restore observed hashes. The digest identifies an advertised definition, not
+the server's behavior. See [audit](audit.md) for the signed fields and limits.
+
 `mcp-http` bridges a stdio client to an HTTP MCP server in observe-only mode;
 it is not an enforcement listener ([cmd/nockguard/main.go](../../cmd/nockguard/main.go)). A managed
 cloud connector cannot reach an operator's loopback listener. The separate
