@@ -587,7 +587,8 @@ func TestProxyUpstreamIDCannotConsumePolicyFlag(t *testing.T) {
 	}
 }
 
-func TestProxyRefusesUnsignedPinPolicyBeforeStartingUpstream(t *testing.T) {
+func TestProxyRefusesUnsignedPinPolicyAtStartup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	path := filepath.Join(t.TempDir(), "policy.yaml")
 	policyText := fmt.Sprintf(`audit:
   enabled: true
