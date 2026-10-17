@@ -6,6 +6,7 @@ All notable changes to NockGuard are documented here.
 
 - Use standard Go flag parsing for `proxy`, `mcp-http`, `mcp-listen`,
   `egress-proxy`, and `init`; reject malformed flags before startup or file writes.
+- Reuse one named-agent/default policy lookup and remove unused internal helpers.
 
 ## [0.10.0] - 2026-10-17
 

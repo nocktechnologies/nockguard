@@ -170,27 +170,6 @@ agents:
 	}
 }
 
-func TestFilterTools(t *testing.T) {
-	path := writePolicy(t, `
-agents:
-  kit:
-    allow:
-      - "nockcc_nock_*"
-    deny:
-      - "nockcc_kill_switch_set"
-`)
-	eng, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tools := []string{"nockcc_nock_list", "nockcc_nock_get", "nockcc_kill_switch_set", "nockcc_spend_add"}
-	got := eng.FilterTools("kit", tools)
-	if len(got) != 2 || got[0] != "nockcc_nock_list" || got[1] != "nockcc_nock_get" {
-		t.Errorf("FilterTools = %v, want [nockcc_nock_list nockcc_nock_get]", got)
-	}
-}
-
 func TestDefaultDenyMode(t *testing.T) {
 	path := writePolicy(t, `
 agents:
@@ -260,6 +239,32 @@ agents:
 			// Check must never disagree with Evaluate's verdict — it delegates.
 			if got := eng.Check(tt.agent, tt.tool); got != dec.Allowed() {
 				t.Errorf("Check(%q, %q) = %v but Evaluate.Allowed() = %v — verdict drift", tt.agent, tt.tool, got, dec.Allowed())
+			}
+		})
+	}
+}
+
+func TestAgentPolicyFallbackPreservesNamedEmptyPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name, policy string
+		found        bool
+		verdict      Verdict
+	}{
+		{"named empty overrides default", "agents:\n  kit: {}\n  default:\n    mode: allow\n", true, Deny},
+		{"named allow overrides default", "agents:\n  kit:\n    mode: allow\n  default:\n    mode: deny\n", true, Allow},
+		{"unknown uses default", "agents:\n  default:\n    mode: allow\n", true, Allow},
+		{"unknown without default fails closed", "agents: {}\n", false, Deny},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eng, err := LoadBytes([]byte(tc.policy))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := eng.HasPolicyFor("kit"); got != tc.found {
+				t.Errorf("HasPolicyFor = %v, want %v", got, tc.found)
+			}
+			if got := eng.Evaluate("kit", "read").Verdict; got != tc.verdict {
+				t.Errorf("Evaluate verdict = %v, want %v", got, tc.verdict)
 			}
 		})
 	}

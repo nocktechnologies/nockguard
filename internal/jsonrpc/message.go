@@ -18,7 +18,6 @@ type Error struct {
 }
 
 func (m *Message) IsRequest() bool  { return m.Method != "" && m.ID != nil }
-func (m *Message) IsNotify() bool   { return m.Method != "" && m.ID == nil }
 func (m *Message) IsResponse() bool { return m.Method == "" && m.ID != nil }
 
 func Decode(data []byte) (*Message, error) {

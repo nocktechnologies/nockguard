@@ -442,34 +442,31 @@ func (e *Engine) AgentCount() int {
 // (denies every tool), so callers should warn loudly at startup that the agent
 // is unconfigured rather than let the deny-all surprise the operator.
 func (e *Engine) HasPolicyFor(agent string) bool {
-	if _, ok := e.config.Agents[agent]; ok {
-		return true
-	}
-	_, ok := e.config.Agents["default"]
+	_, ok := e.agentPolicy(agent)
 	return ok
 }
 
-func (e *Engine) toolPinPolicy(agent string) AgentPolicy {
+func (e *Engine) agentPolicy(agent string) (AgentPolicy, bool) {
 	pol, ok := e.config.Agents[agent]
 	if !ok {
-		pol = e.config.Agents["default"]
+		pol, ok = e.config.Agents["default"]
 	}
-	return pol
+	return pol, ok
 }
 
 func (e *Engine) ToolPin(agent, upstreamID, tool string) (ToolPin, bool) {
-	pol := e.toolPinPolicy(agent)
+	pol, _ := e.agentPolicy(agent)
 	pin, exists := pol.ToolPins[upstreamID][tool]
 	return pin, exists
 }
 
 func (e *Engine) HasToolPinConstraints(agent string) bool {
-	pol := e.toolPinPolicy(agent)
+	pol, _ := e.agentPolicy(agent)
 	return pol.StrictToolPins || len(pol.ToolPins) > 0
 }
 
 func (e *Engine) StrictToolPins(agent string) bool {
-	pol := e.toolPinPolicy(agent)
+	pol, _ := e.agentPolicy(agent)
 	return pol.StrictToolPins
 }
 
@@ -489,7 +486,7 @@ func ValidateUpstreamID(id string) error {
 }
 
 func (e *Engine) ValidateToolPinScope(agent, upstreamID string) error {
-	pol := e.toolPinPolicy(agent)
+	pol, _ := e.agentPolicy(agent)
 	if !pol.StrictToolPins && len(pol.ToolPins) == 0 {
 		return nil
 	}
@@ -505,10 +502,7 @@ func (e *Engine) ValidateToolPinScope(agent, upstreamID string) error {
 // DeniesMethod applies the named agent policy, falling back to default.
 // Tool calls retain their existing tool-name policy gate.
 func (e *Engine) DeniesMethod(agent, method string) bool {
-	pol, ok := e.config.Agents[agent]
-	if !ok {
-		pol = e.config.Agents["default"]
-	}
+	pol, _ := e.agentPolicy(agent)
 	for _, denied := range pol.DenyMethods {
 		if method == denied {
 			return true
@@ -587,16 +581,13 @@ func (d Decision) Allowed() bool {
 // so callers can record a non-opaque audit reason. Check delegates here, so the
 // boolean verdict and the reason can never drift apart.
 func (e *Engine) Evaluate(agent, tool string) Decision {
-	pol, ok := e.config.Agents[agent]
+	pol, ok := e.agentPolicy(agent)
 	if !ok {
-		pol, ok = e.config.Agents["default"]
-		if !ok {
-			// Fail CLOSED: an agent with no named policy and no "default" is
-			// unrecognized, so denying every tool is the only safe reading of
-			// "default-deny". (Previously Check returned true — allow-everything —
-			// which silently unrestricted any unconfigured --agent value.)
-			return Decision{Verdict: Deny, Reason: "no policy for agent (fail-closed)"}
-		}
+		// Fail CLOSED: an agent with no named policy and no "default" is
+		// unrecognized, so denying every tool is the only safe reading of
+		// "default-deny". (Previously Check returned true — allow-everything —
+		// which silently unrestricted any unconfigured --agent value.)
+		return Decision{Verdict: Deny, Reason: "no policy for agent (fail-closed)"}
 	}
 
 	shadowMiss := len(pol.Shadow) > 0 && !matchesAny(pol.Shadow, tool)
@@ -669,12 +660,9 @@ func (e *Engine) Check(agent, tool string) bool {
 // Absence of any require_approval rule (or no policy for the agent and no
 // "default") means no approval gate — Phase 1-4 behavior is preserved.
 func (e *Engine) RequiresApproval(agent, tool string) bool {
-	pol, ok := e.config.Agents[agent]
+	pol, ok := e.agentPolicy(agent)
 	if !ok {
-		pol, ok = e.config.Agents["default"]
-		if !ok {
-			return false
-		}
+		return false
 	}
 	for _, pattern := range pol.RequireApproval {
 		if matchPattern(pattern, tool) {
@@ -689,12 +677,9 @@ func (e *Engine) RequiresApproval(agent, tool string) bool {
 // The rules are unfiltered; callers should check the policy verdict (Allow) separately
 // to ensure injection only happens on forwarded calls.
 func (e *Engine) InjectRulesFor(agent, tool string) []InjectRule {
-	pol, ok := e.config.Agents[agent]
+	pol, ok := e.agentPolicy(agent)
 	if !ok {
-		pol, ok = e.config.Agents["default"]
-		if !ok {
-			return nil
-		}
+		return nil
 	}
 	var matches []InjectRule
 	for _, rule := range pol.Inject {
@@ -737,12 +722,9 @@ func (e *Engine) InjectEnvNames() []string {
 }
 
 func (e *Engine) FailModeVerdict(agent, reason string) Decision {
-	pol, ok := e.config.Agents[agent]
+	pol, ok := e.agentPolicy(agent)
 	if !ok {
-		pol, ok = e.config.Agents["default"]
-		if !ok {
-			return Decision{Verdict: Deny, Reason: reason}
-		}
+		return Decision{Verdict: Deny, Reason: reason}
 	}
 	if pol.FailMode == "ask" {
 		return Decision{
@@ -758,10 +740,7 @@ func (e *Engine) FailModeVerdict(agent, reason string) Decision {
 // "default" policy). Returns a nil validator if the agent has no validation
 // configured — callers should treat a nil/disabled validator as "no checks".
 func (e *Engine) ValidatorFor(agent string) (*validate.Validator, error) {
-	pol, ok := e.config.Agents[agent]
-	if !ok {
-		pol = e.config.Agents["default"]
-	}
+	pol, _ := e.agentPolicy(agent)
 	if len(pol.ValidateInput) == 0 && len(pol.BlockParams) == 0 {
 		return nil, nil
 	}
@@ -774,10 +753,7 @@ func (e *Engine) ValidatorFor(agent string) (*validate.Validator, error) {
 // ValidatorFor. A rate_limit with a missing, nonpositive or unparseable window is a
 // misconfiguration and returns an error so it fails loud at startup.
 func (e *Engine) LimiterFor(agent string) (*ratelimit.Limiter, error) {
-	pol, ok := e.config.Agents[agent]
-	if !ok {
-		pol = e.config.Agents["default"]
-	}
+	pol, _ := e.agentPolicy(agent)
 	if pol.RateLimit == nil && pol.SpendCap == nil {
 		return nil, nil
 	}
@@ -818,10 +794,7 @@ func (e *Engine) TrustFor(agent string) (*trust.Accumulator, error) {
 	if !ValidAgentName(agent) {
 		return nil, fmt.Errorf("invalid agent name %q: only alphanumerics, hyphens, and dots are allowed", agent)
 	}
-	pol, ok := e.config.Agents[agent]
-	if !ok {
-		pol = e.config.Agents["default"]
-	}
+	pol, _ := e.agentPolicy(agent)
 	if pol.Trust == nil || !pol.Trust.Enabled {
 		return nil, nil
 	}
@@ -1103,16 +1076,6 @@ func (e *Engine) Forwarder() (*forward.Forwarder, error) {
 		// POSTs are erroring. Surface forward errors on stderr.
 		Logger: log.New(os.Stderr, "[nockguard-forward] ", log.LstdFlags),
 	}), nil
-}
-
-func (e *Engine) FilterTools(agent string, tools []string) []string {
-	var allowed []string
-	for _, t := range tools {
-		if e.Check(agent, t) {
-			allowed = append(allowed, t)
-		}
-	}
-	return allowed
 }
 
 func matchPattern(pattern, tool string) bool {

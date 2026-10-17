@@ -140,9 +140,6 @@ func TestSeverityMapping(t *testing.T) {
 }
 
 func TestSeverityThreatTiers(t *testing.T) {
-	if IsRejection(DecisionUnparseable) {
-		t.Fatal("unparseable decision must not count as a rejection")
-	}
 	cases := []struct {
 		decision, reason, want string
 	}{
@@ -230,9 +227,6 @@ func TestEmittedDecisionCensus(t *testing.T) {
 		}
 		if _, ok := decisionBuckets[c.decision]; !ok {
 			t.Errorf("%s emits %q: missing from decision table", c.site, c.decision)
-		}
-		if got := IsRejection(c.decision); got != (c.bucket == "blocked") {
-			t.Errorf("%s emits %q: rejection = %v", c.site, c.decision, got)
 		}
 	}
 	// Scan literal emit sites so adding a new decision at a known audit or

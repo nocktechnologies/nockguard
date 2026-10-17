@@ -222,9 +222,6 @@ func DecisionBucket(decision string) string {
 	return "other"
 }
 
-// IsRejection reports decisions that actually refused a call.
-func IsRejection(decision string) bool { return DecisionBucket(decision) == "blocked" }
-
 // Severity classifies a (decision, reason) pair into a threat tier. It is a PURE
 // function (no I/O, no state) so the forwarder and the Live Wall share one source
 // of truth for "how bad is this?" rather than re-deriving it in two places.
