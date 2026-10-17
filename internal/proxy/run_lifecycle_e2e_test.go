@@ -58,9 +58,13 @@ func TestSignedRunLifecycleCleanAndKilled(t *testing.T) {
 				}
 				deadline := time.Now().Add(5 * time.Second)
 				for {
+					// run/open is durable once the signed checkpoint covers it;
+					// the trail line alone lands before the .hwm update.
 					data, _ := os.ReadFile(path)
 					if strings.Contains(string(data), `"run_event":"open"`) {
-						break
+						if rows, count, err := audit.VerifyEd25519WithCheckpoint(path, pub); err == nil && rows > 0 && rows == count {
+							break
+						}
 					}
 					if time.Now().After(deadline) {
 						_ = cmd.Process.Kill()
