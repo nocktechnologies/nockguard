@@ -38,7 +38,7 @@ do not weaken existing protections to make promotion pass.
 
 ## Release checks
 
-1. Run one whole-repo cleanup pass. Before the release notes, open one focused
+1. Run one whole-repo cleanup pass. Before the release notes (step 2), open one focused
    cleanup PR into `next` that removes what the batch left behind: code whose
    last caller is gone, superseded APIs, inert config, and duplicated helpers.
    The standard: the smallest useful change, delete before adding, keep every
@@ -46,7 +46,8 @@ do not weaken existing protections to make promotion pass.
    features and no edge hunting. Same review and CI as any card PR. If a read of
    the batch finds nothing worth removing, skip the step and say so in the
    release PR body. Merge it before the freeze starts, because the freeze admits
-   only release-fix PRs. Per-PR simplification sees one diff at a time; this pass
+   only release-fix PRs. If `next` moves after the cleanup merge (or the
+   nothing-to-remove read) and before the freeze, read the new commits too. Per-PR simplification sees one diff at a time; this pass
    catches what builds up between PRs.
 2. On `next` (or the release branch described above), choose the release tag
    and update the hardcoded version in `cmd/nockguard/main.go`,
