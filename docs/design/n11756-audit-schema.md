@@ -93,6 +93,12 @@ future-dated heartbeat, mixed legacy/v2 producers, or unavailable verification.
 These are observation-stream statuses; the independent integrity verdict
 remains authoritative about signatures and the checkpoint.
 An unsigned trail (no signed rows) is `UNASSESSABLE`; an empty-`sig` row in an otherwise signed trail is structural damage and its run is `BROKEN`.
+Only `tools/call` creates an action. Inside a run, a decision row with no
+`action_id` is valid only as `method-allow`, `method-deny` or `hide`; any other
+action-less decision makes the run `BROKEN`. A refused `tools/list` request is
+the refusal of a non-tool method, so it is recorded as `method-deny` with the
+cause in `reason` (for example `tool_catalog_refresh_required` for an
+unattributed continuation or an invalid listing response under pins).
 
 ## Compatibility and rollout
 

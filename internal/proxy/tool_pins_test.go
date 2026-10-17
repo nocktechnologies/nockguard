@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"runtime"
 	"strings"
 	"sync"
@@ -541,4 +542,150 @@ func waitParkedInCatalogObserve(bound time.Duration) bool {
 		}
 	}
 	return false
+}
+
+// A refused tools/list creates no action. During a signed paired run with
+// pins, its row must be one the completeness analyzer accepts without an
+// action_id (method-deny), so a cleanly closed run stays LIMITED.
+func TestPinnedDiscoveryRefusalKeepsRunAssessable(t *testing.T) {
+	definition := `{"name":"read","inputSchema":{}}`
+	_, hash, err := digestToolDefinition([]byte(definition))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name     string
+		request  string
+		response string // empty: refused before forwarding
+	}{
+		{name: "unexpected continuation cursor", request: listRequest(1, "stale-cursor")},
+		{name: "invalid tools member", request: listRequest(1, ""), response: `{"jsonrpc":"2.0","id":1,"result":{"tools":"x"}}`},
+		{name: "invalid result", request: listRequest(1, ""), response: `{"jsonrpc":"2.0","id":1,"result":7}`},
+		{name: "empty next cursor", request: listRequest(1, ""), response: listResponse(1, `[`+definition+`]`, `,"nextCursor":""`)},
+		{name: "malformed tool entry", request: listRequest(1, ""), response: listResponse(1, `[1]`, "")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auditor, path, pub := newEd25519Auditor(t)
+			defer auditor.Close()
+			gate := pinGate(t, hash, false, auditor)
+			var agent bytes.Buffer
+			gate.agentOut = &agent
+			run := func(event string) {
+				t.Helper()
+				if err := auditor.RecordRequired(audit.Event{Agent: httpTestAgent, SchemaVersion: 2, RecordType: "run", RunID: gate.actionRunID, RunEvent: event}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			run("open")
+			gate.runActive.Store(true)
+			pending := &sync.Map{}
+			var upstream bytes.Buffer
+			if err := gate.agentToUpstream(strings.NewReader(tc.request+"\n"), &upstream, pending); err != nil {
+				t.Fatal(err)
+			}
+			if tc.response == "" {
+				if upstream.Len() != 0 {
+					t.Fatalf("refused listing was forwarded: %s", upstream.String())
+				}
+			} else if err := gate.upstreamToAgent(strings.NewReader(tc.response+"\n"), &agent, pending, nil); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(agent.String(), `"code":-32603`) {
+				t.Fatalf("listing was not refused: %s", agent.String())
+			}
+			gate.drainAudits()
+			gate.runActive.Store(false)
+			run("close")
+
+			if rows, count, err := audit.VerifyEd25519WithCheckpoint(path, pub); err != nil || rows != count {
+				t.Fatalf("integrity rows=%d checkpoint=%d err=%v", rows, count, err)
+			}
+			if got := audit.AssessRuns(mustRead(t, path), true, time.Now()); len(got) != 1 || got[0].Verdict != "LIMITED" {
+				t.Errorf("assessment = %+v, want one LIMITED run", got)
+			}
+			refused := false
+			for _, ev := range readAuditEvents(t, path) {
+				if ev.RecordType != "decision" {
+					continue
+				}
+				if ev.ActionID == "" && ev.Decision != "method-allow" && ev.Decision != "method-deny" && ev.Decision != "hide" {
+					t.Errorf("action-less %s row: %+v", ev.Decision, ev)
+				}
+				if ev.Tool == "tools/list" && ev.Decision == "method-deny" && ev.Reason == "tool_catalog_refresh_required" && ev.ActionID == "" {
+					refused = true
+				}
+			}
+			if !refused {
+				t.Fatalf("no method-deny tool_catalog_refresh_required row:\n%s", mustRead(t, path))
+			}
+		})
+	}
+}
+
+// closingLogWriter closes the auditor when the forward-path pin block is
+// logged, so the block row's required write is the one that fails.
+type closingLogWriter struct {
+	auditor *audit.Auditor
+	once    sync.Once
+}
+
+func (w *closingLogWriter) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), "TOOL-PIN-BLOCK") {
+		w.once.Do(func() { _ = w.auditor.Close() })
+	}
+	return len(p), nil
+}
+
+// The forward-path pin block reports an audit failure with the same JSON-RPC
+// code as every other required-audit rejection.
+func TestPinBlockAuditFailureUsesInternalErrorCode(t *testing.T) {
+	definition := `{"name":"read","inputSchema":{}}`
+	_, hash, err := digestToolDefinition([]byte(definition))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditor, _, _ := newEd25519Auditor(t)
+	defer auditor.Close()
+	policyText := fmt.Sprintf(`audit:
+  enabled: true
+  action_pairing: true
+  sign_key_env: TEST_TOOL_PIN_SIGN_KEY
+agents:
+  demo:
+    mode: allow
+    ask: [read]
+    tool_pins:
+      filesystem-local:
+        read:
+          hash_version: jcs-rfc8785-v1
+          sha256: %s
+`, hash)
+	gate := newGate(t, policyText, nil, auditor).WithUpstreamID("filesystem-local")
+	gate.agentOut = io.Discard
+	// The approver invalidates the catalog, so the call passes the decision
+	// pin check and is blocked by the forward-path check.
+	gate.WithApprover(invalidatingApprover{catalog: &gate.catalog})
+	pending := &sync.Map{}
+	listedNames(t, listPage(t, gate, pending, listRequest(1, ""), listResponse(1, `[`+definition+`]`, "")))
+	gate.logger = log.New(&closingLogWriter{auditor: auditor}, "", 0)
+	var agent, upstream bytes.Buffer
+	gate.agentOut = &agent
+	if err := gate.agentToUpstream(strings.NewReader(callLine("2", "read", "private")+"\n"), &upstream, pending); err != nil {
+		t.Fatal(err)
+	}
+	if upstream.Len() != 0 {
+		t.Fatal("blocked call was forwarded")
+	}
+	var resp struct {
+		Error struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(agent.Bytes(), &resp); err != nil {
+		t.Fatalf("agent response %q: %v", agent.String(), err)
+	}
+	if resp.Error.Code != -32603 || resp.Error.Message != AuditBeforeForwardError {
+		t.Fatalf("pin block with failed audit = %+v, want -32603 %q", resp.Error, AuditBeforeForwardError)
+	}
 }

@@ -1670,7 +1670,10 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				}
 				if buildID == 0 && p.engine.HasToolPinConstraints(p.agent) {
 					p.logger.Printf("TOOL-CATALOG-DISCARDED agent=%s reason=unattributed-list", p.agent)
-					p.appendAudit(seq, "tools/list", "block", "tool_catalog_refresh_required", nil)
+					// tools/list creates no action, so a refused listing is a
+					// method refusal: an action-less block row would make a
+					// paired run BROKEN.
+					p.appendAudit(seq, "tools/list", "method-deny", "tool_catalog_refresh_required", nil)
 					p.resolveAudit(seq)
 					if err := p.rejectToAgent(d.toolsListID, -32603, "nockguard: tool catalog refresh required"); err != nil {
 						return err
@@ -1740,11 +1743,11 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 							p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, d.tool, err)
 						}
 					}
-					reason := "nockguard: tool definition is not approved"
+					code, reason := -32600, "nockguard: tool definition is not approved"
 					if p.requiredAudit && p.auditor.RequiredError() != nil {
-						reason = AuditBeforeForwardError
+						code, reason = -32603, AuditBeforeForwardError
 					}
-					if err := p.rejectToAgent(request.ID, -32600, reason); err != nil {
+					if err := p.rejectToAgent(request.ID, code, reason); err != nil {
 						return err
 					}
 					continue
@@ -2425,7 +2428,8 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ..
 	}
 	invalid := func() []byte {
 		if p.engine.HasToolPinConstraints(p.agent) {
-			p.appendAudit(seq, "tools/list", "block", "tool_catalog_refresh_required", nil)
+			// Action-less like the request-side refusal: record a method refusal.
+			p.appendAudit(seq, "tools/list", "method-deny", "tool_catalog_refresh_required", nil)
 		}
 		return jsonrpc.ErrorResponse(resp["id"], -32603, "nockguard: invalid tools/list response")
 	}
