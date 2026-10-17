@@ -78,21 +78,23 @@ type StdioProxy struct {
 	cardMu      sync.Mutex // serializes currentCard updates
 
 	// Audit ordering: track request sequence to ensure audits are emitted in request order
-	auditSeq      uint64                    // next request sequence, protected by auditMutex
-	auditTodo     map[uint64][]*audit.Event // buffered audits awaiting emission in sequence order
-	auditMutex    sync.Mutex
-	auditNext     uint64               // next sequence number ready to emit
-	auditResolved []auditSequenceRange // compact sorted ranges of resolved sequences
-	auditPending  map[uint64]struct{}  // allocated sequences whose audit lifecycle is unsettled
-	auditFailed   map[uint64]struct{}  // action sequences with a row rejected before append
-	cardAfterSeq  map[uint64]int       // seq -> card state after that commit
-	requestIDMu   sync.Mutex
-	activeIDs     map[uint64]json.RawMessage // request ids held until their agent-facing response is delivered
-	actionPairing bool
-	actionRunID   string
-	actionInitErr error
-	actionSeq     uint64
-	actionIDs     map[uint64]string // audit request sequence -> generated action id
+	auditSeq       uint64                    // next request sequence, protected by auditMutex
+	auditTodo      map[uint64][]*audit.Event // buffered audits awaiting emission in sequence order
+	auditMutex     sync.Mutex
+	auditNext      uint64               // next sequence number ready to emit
+	auditResolved  []auditSequenceRange // compact sorted ranges of resolved sequences
+	auditPending   map[uint64]struct{}  // allocated sequences whose audit lifecycle is unsettled
+	auditFailed    map[uint64]struct{}  // action sequences with a row rejected before append
+	cardAfterSeq   map[uint64]int       // seq -> card state after that commit
+	requestIDMu    sync.Mutex
+	activeIDs      map[uint64]json.RawMessage // request ids held until their agent-facing response is delivered
+	actionPairing  bool
+	actionRunID    string
+	actionInitErr  error
+	actionSeq      uint64
+	actionIDs      map[uint64]string // audit request sequence -> generated action id
+	catalog        toolCatalog
+	actionObserved sync.Map // action id -> definition observed at first decision
 }
 
 // writeAgentLine writes one newline-terminated line to the agent-facing channel
@@ -263,6 +265,7 @@ func (p *StdioProxy) appendAuditWithApprovalActor(seq uint64, tool, decision, re
 	}
 	if actionID := p.actionIDs[seq]; actionID != "" {
 		p.setActionFields(ev, actionID)
+		p.applyToolObservation(ev)
 	}
 
 	// Set extracted references if provided.
@@ -508,6 +511,7 @@ func (p *StdioProxy) audit(tool, decision, reason string, refs *extract.Referenc
 	}
 	if len(actionIDs) > 0 && actionIDs[0] != "" {
 		p.setActionFields(&ev, actionIDs[0])
+		p.applyToolObservation(&ev)
 	}
 
 	// Set extracted references if provided.
@@ -942,6 +946,7 @@ type pendingCard struct {
 	auditSeq             uint64             // sequence number for audit ordering
 	actionID             string
 	requestID            json.RawMessage
+	observed             toolObservation // frozen through a possible late response
 	mu                   sync.Mutex
 	observation          string
 	lateResponseRecorded bool
@@ -949,7 +954,8 @@ type pendingCard struct {
 	answered             bool
 }
 type toolsListSeq struct {
-	seq uint64
+	seq     uint64
+	buildID uint64
 }
 
 type mcpDecision struct {
@@ -1016,6 +1022,8 @@ func (p *StdioProxy) queueActionID(seq uint64, actionID string) {
 	p.auditMutex.Unlock()
 }
 
+// appendActionObservation must be called with card.mu held (observeAction),
+// which serializes card.observed across response, timeout and cancel paths.
 func (p *StdioProxy) appendActionObservation(seq uint64, card *pendingCard, observation, cause, responseClass string, mcpIsError *bool) error {
 	if card == nil || card.actionID == "" {
 		return nil
@@ -1036,6 +1044,18 @@ func (p *StdioProxy) appendActionObservation(seq uint64, card *pendingCard, obse
 	}
 	if card.refs.NockID > 0 {
 		ev.NockID = card.refs.NockID
+	}
+	if card.observed.status == "" {
+		if stored, ok := p.actionObserved.Load(card.actionID); ok {
+			card.observed = stored.(toolObservation)
+		} else {
+			card.observed = p.catalog.observe(card.tool)
+		}
+	}
+	ev.ToolPinStatus = card.observed.status
+	if card.observed.hash != "" {
+		ev.ToolHashVersion = toolHashVersion
+		ev.ToolDefinitionHash = card.observed.hash
 	}
 
 	p.auditMutex.Lock()
@@ -1073,7 +1093,11 @@ func (p *StdioProxy) observeAction(card *pendingCard, observation, cause, respon
 	} else {
 		return nil
 	}
-	return p.appendActionObservation(card.auditSeq, card, observation, cause, responseClass, mcpIsError)
+	err := p.appendActionObservation(card.auditSeq, card, observation, cause, responseClass, mcpIsError)
+	if observation != "late_response_observed" {
+		p.actionObserved.Delete(card.actionID)
+	}
+	return err
 }
 
 func (p *StdioProxy) markActionUnknown(card *pendingCard, cause string) error {
@@ -1427,6 +1451,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 		}
 		if p.requiredAudit && p.auditor.RequiredError() != nil {
 			p.resolveAudit(seq)
+			p.actionObserved.Delete(actionID)
 			id := d.rejectID
 			if d.forward != nil {
 				if msg, err := jsonrpc.Decode(d.forward); err == nil {
@@ -1442,7 +1467,13 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			// tools/list (always a request) — track the id so the response can be
 			// filtered by upstreamToAgent. Mark as deferred so we don't resolve
 			// until after filtering and appending hide audits.
-			pending.Store(string(d.toolsListID), toolsListSeq{seq: seq})
+			buildID := uint64(0)
+			if p.actionPairing {
+				var request jsonrpc.Message
+				_ = json.Unmarshal(d.forward, &request)
+				buildID = p.catalog.beginList(request.Params)
+			}
+			pending.Store(string(d.toolsListID), toolsListSeq{seq: seq, buildID: buildID})
 			if p.actionPairing {
 				p.trackRequestID(seq, d.toolsListID)
 			}
@@ -1475,6 +1506,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				p.audit(d.tool, "dispatch", "required-audit-before-forward", d.refsForAudit, actionID)
 				if p.auditor.RequiredError() != nil {
 					p.resolveAudit(seq)
+					p.actionObserved.Delete(actionID)
 					if err := p.rejectToAgent(request.ID, -32603, AuditBeforeForwardError); err != nil {
 						return err
 					}
@@ -1919,6 +1951,10 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 		var releaseSeq uint64
 		releaseRequest := false
 		msg, err := jsonrpc.Decode(line)
+		if err == nil && msg.Method == "notifications/tools/list_changed" {
+			p.catalog.invalidate()
+			p.logger.Printf("TOOL-CATALOG-INVALIDATED agent=%s reason=list_changed", p.agent)
+		}
 		suppressAgentResponse := false
 		var answeredCard *pendingCard
 		if p.actionPairing {
@@ -1965,7 +2001,7 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 				if toolListVal, ok := val.(toolsListSeq); ok {
 					releaseSeq, releaseRequest = toolListVal.seq, true
 					// tools/list response — filter it
-					filtered := p.filterToolListResponse(line, toolListVal.seq)
+					filtered := p.filterToolListResponse(line, toolListVal.seq, toolListVal.buildID)
 					// Resolve the tools/list audits
 					p.resolveAudit(toolListVal.seq)
 					if filtered != nil {
@@ -2098,15 +2134,29 @@ func actionResponseDetails(line []byte) (string, *bool) {
 
 // filterToolListResponse replaces only result.tools, retaining extension fields,
 // pagination and tool metadata without decoding numbers through float64.
-func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64) []byte {
+func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ...uint64) []byte {
+	buildID := uint64(0)
+	if len(buildIDs) > 0 {
+		buildID = buildIDs[0]
+	}
+	discard := func(reason string) {
+		if buildID == 0 {
+			return
+		}
+		if p.catalog.discard(buildID) {
+			p.logger.Printf("TOOL-CATALOG-DISCARDED agent=%s reason=%s", p.agent, reason)
+		}
+	}
 	var resp map[string]json.RawMessage
 	if json.Unmarshal(line, &resp) != nil || resp == nil {
+		discard("invalid-response")
 		return jsonrpc.ErrorResponse(json.RawMessage("null"), -32603, "nockguard: invalid tools/list response")
 	}
 	invalid := func() []byte {
 		return jsonrpc.ErrorResponse(resp["id"], -32603, "nockguard: invalid tools/list response")
 	}
 	if _, hasError := resp["error"]; hasError {
+		discard("upstream-error")
 		if _, hasResult := resp["result"]; hasResult {
 			return invalid()
 		}
@@ -2114,14 +2164,59 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64) []byte {
 	}
 	var result map[string]json.RawMessage
 	if json.Unmarshal(resp["result"], &result) != nil || result == nil {
+		discard("invalid-result")
 		return invalid()
 	}
-	var tools []map[string]json.RawMessage
+	var tools []json.RawMessage
 	if json.Unmarshal(result["tools"], &tools) != nil || tools == nil {
+		discard("invalid-tools")
 		return invalid()
+	}
+	var observations map[string]toolObservation
+	var nextCursor string
+	if buildID != 0 {
+		// Observation never changes the listing: a catalog failure discards
+		// the generation and the page is filtered exactly as without one.
+		active, bounded := p.catalog.pageWithinBounds(buildID, len(line), len(tools))
+		if active && !bounded {
+			discard("bound-exceeded")
+		}
+		if !active || !bounded {
+			buildID = 0
+		}
+	}
+	if buildID != 0 {
+		var err error
+		observations, err = pageObservations(tools)
+		if err != nil {
+			discard("invalid-page")
+			buildID = 0
+		}
+	}
+	if buildID != 0 {
+		unhashable := 0
+		for _, observation := range observations {
+			if observation.status == "unhashable" {
+				unhashable++
+			}
+		}
+		if unhashable > 0 {
+			p.logger.Printf("TOOL-DEFINITION-UNHASHABLE agent=%s count=%d", p.agent, unhashable)
+		}
+		// A null nextCursor means no further pages, the same as an absent one.
+		if raw, exists := result["nextCursor"]; exists && string(raw) != "null" {
+			if json.Unmarshal(raw, &nextCursor) != nil || nextCursor == "" {
+				discard("invalid-cursor")
+				buildID = 0
+			}
+		}
 	}
 	filtered := make([]map[string]json.RawMessage, 0, len(tools))
-	for _, tool := range tools {
+	for _, raw := range tools {
+		var tool map[string]json.RawMessage
+		if json.Unmarshal(raw, &tool) != nil || tool == nil {
+			return invalid()
+		}
 		var name string
 		if json.Unmarshal(tool["name"], &name) != nil || name == "" {
 			return invalid()
@@ -2131,6 +2226,11 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64) []byte {
 		} else {
 			p.logger.Printf("HIDE agent=%s tool=%s reason=%q", p.agent, name, dec.Reason)
 			p.appendAudit(seq, name, "hide", dec.Reason, nil)
+		}
+	}
+	if buildID != 0 {
+		if err := p.catalog.addPage(buildID, len(line), observations, nextCursor); err != nil {
+			p.logger.Printf("TOOL-CATALOG-DISCARDED agent=%s reason=%v", p.agent, err)
 		}
 	}
 	// All values below are validated RawMessages; marshaling cannot fail.
