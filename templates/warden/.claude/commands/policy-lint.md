@@ -60,7 +60,7 @@ if extra:
 
 ### E002 — Unknown agent-policy keys (ERROR)
 
-Valid keys under each agent: `allow`, `deny`, `deny_methods` (exact non-tool method names), `ask`, `shadow`, `mode`, `fail_mode`, `validate_input`, `block_params`, `rate_limit`, `spend_cap`, `trust`, `require_approval` (legacy; prefer `ask`), `inject`. Anything else makes the policy fail to load. Source: `AgentPolicy` in `internal/policy/policy.go`.
+Valid keys under each agent: `allow`, `deny`, `deny_methods` (exact non-tool method names), `ask`, `shadow`, `mode`, `fail_mode`, `validate_input`, `block_params`, `rate_limit`, `spend_cap`, `trust`, `require_approval` (legacy; prefer `ask`), `inject`, `tool_pins` (operator pins keyed by `--upstream-id`, then tool name), `strict_tool_pins`. Anything else makes the policy fail to load. Source: `AgentPolicy` in `internal/policy/policy.go`.
 
 ```bash
 POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"

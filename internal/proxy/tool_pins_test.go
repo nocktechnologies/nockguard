@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -339,5 +341,132 @@ func TestPinWriteDoesNotBlockCatalogInvalidation(t *testing.T) {
 	}
 	if forwarded.Len() != 0 {
 		t.Fatal("pin remained callable after invalidation")
+	}
+}
+
+// A stale or discarded build yields a zero observation. It is not evidence of
+// a different definition, so it must not be recorded as a mismatch.
+func TestZeroObservationIsUnobservedNotMismatch(t *testing.T) {
+	auditor, _, _ := newEd25519Auditor(t)
+	defer auditor.Close()
+	hash := strings.Repeat("a", 64)
+	gate := pinGate(t, hash, true, auditor)
+	observed, cause := gate.pinObservation("read", toolObservation{})
+	if observed.status != "unobserved" || cause != "tool_catalog_refresh_required" || observed.pinHash != hash || observed.hash != "" {
+		t.Fatalf("zero observation = %+v cause=%q, want unobserved/tool_catalog_refresh_required", observed, cause)
+	}
+}
+
+// clearingApprover empties the per-action observation cache while the call
+// waits for approval, so the dispatch row cannot rely on an earlier row.
+type clearingApprover struct{ gate *StdioProxy }
+
+func (a clearingApprover) Ask(approval.Request) approval.Verdict {
+	a.gate.actionObserved.Range(func(key, _ any) bool {
+		a.gate.actionObserved.Delete(key)
+		return true
+	})
+	return approval.Verdict{Approved: true, Reason: "approved"}
+}
+
+// Pinned dispatches run concurrently with upstream action rows while the
+// observation cache is emptied during approval (the closest real path to a
+// cache miss; the allow row still precedes dispatch). The dispatch row is
+// written with catalog.mu held, so it must carry the checked observation and
+// never re-enter catalog.observe. Run under -race; bounded to catch a hang.
+func TestPinnedDispatchAfterObservationCacheClearCompletes(t *testing.T) {
+	definition := `{"name":"read","inputSchema":{}}`
+	_, hash, err := digestToolDefinition([]byte(definition))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditor, path, pub := newEd25519Auditor(t)
+	defer auditor.Close()
+	gate := newGate(t, fmt.Sprintf(`audit:
+  enabled: true
+  action_pairing: true
+  sign_key_env: TEST_TOOL_PIN_SIGN_KEY
+agents:
+  demo:
+    mode: allow
+    ask: [read]
+    tool_pins:
+      filesystem-local:
+        read:
+          hash_version: jcs-rfc8785-v1
+          sha256: %s
+`, hash), nil, auditor).WithUpstreamID("filesystem-local")
+	gate.agentOut = io.Discard
+	gate.WithApprover(clearingApprover{gate: gate})
+	pending := &sync.Map{}
+	listedNames(t, listPage(t, gate, pending, listRequest(1, ""), listResponse(1, `[`+definition+`]`, "")))
+
+	const calls = 50
+	var agentLines strings.Builder
+	for i := 0; i < calls; i++ {
+		agentLines.WriteString(callLine(fmt.Sprint(100+i), "read", "private") + "\n")
+	}
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	upstreamDone := make(chan error, 1)
+	go func() {
+		defer stdoutW.Close()
+		scanner := bufio.NewScanner(stdinR)
+		for scanner.Scan() {
+			var msg struct {
+				ID json.RawMessage `json:"id"`
+			}
+			if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+				upstreamDone <- err
+				return
+			}
+			if _, err := io.WriteString(stdoutW, `{"jsonrpc":"2.0","id":`+string(msg.ID)+`,"result":{}}`+"\n"); err != nil {
+				upstreamDone <- err
+				return
+			}
+		}
+		upstreamDone <- scanner.Err()
+	}()
+	agentDone := make(chan error, 1)
+	go func() {
+		err := gate.agentToUpstream(strings.NewReader(agentLines.String()), stdinW, pending)
+		stdinW.Close()
+		agentDone <- err
+	}()
+	responsesDone := make(chan error, 1)
+	go func() { responsesDone <- gate.upstreamToAgent(stdoutR, io.Discard, pending, nil) }()
+	for _, step := range []struct {
+		name string
+		done chan error
+	}{{"agent to upstream", agentDone}, {"upstream", upstreamDone}, {"upstream to agent", responsesDone}} {
+		select {
+		case err := <-step.done:
+			if err != nil {
+				t.Fatalf("%s: %v", step.name, err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s hung: pinned dispatch deadlocked on catalog.mu", step.name)
+		}
+	}
+	dispatched, observed := 0, 0
+	for _, row := range actionEvents(readAuditEvents(t, path)) {
+		if row.Tool != "read" {
+			continue
+		}
+		if row.Decision == "dispatch" {
+			if row.ToolPinStatus != "matched" || row.ToolDefinitionHash != hash || row.ToolPinHash != hash {
+				t.Fatalf("dispatch row lost the checked observation: %+v", row)
+			}
+			dispatched++
+		}
+		if row.Observation == "response_observed" {
+			observed++
+		}
+	}
+	if dispatched != calls || observed != calls {
+		t.Fatalf("dispatch rows=%d response rows=%d, want %d", dispatched, observed, calls)
+	}
+	if _, err := audit.VerifyEd25519(path, pub); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -232,8 +232,11 @@ func loadFrom(r io.Reader, name string) (*Engine, error) {
 			return nil, fmt.Errorf("agent %q: tool pins require audit.action_pairing", agent)
 		}
 		for upstream, tools := range pol.ToolPins {
-			if upstream == "" || len(tools) == 0 {
-				return nil, fmt.Errorf("agent %q: empty upstream ID or pin set", agent)
+			if err := ValidateUpstreamID(upstream); err != nil {
+				return nil, fmt.Errorf("agent %q: tool_pins upstream ID %q: %w", agent, upstream, err)
+			}
+			if len(tools) == 0 {
+				return nil, fmt.Errorf("agent %q: empty pin set for upstream %q", agent, upstream)
 			}
 			for tool, pin := range tools {
 				if tool == "" || pin.HashVersion != "jcs-rfc8785-v1" || len(pin.SHA256) != 64 || strings.ToLower(pin.SHA256) != pin.SHA256 {
@@ -469,13 +472,22 @@ func (e *Engine) StrictToolPins(agent string) bool {
 	return pol.StrictToolPins
 }
 
+// ValidateUpstreamID applies the stable upstream ID format shared by
+// --upstream-id and tool_pins keys.
+func ValidateUpstreamID(id string) error {
+	if id == "" || len(id) > 128 || strings.ContainsAny(id, "\r\n\t ") {
+		return fmt.Errorf("upstream ID must be 1-128 bytes with no whitespace")
+	}
+	return nil
+}
+
 func (e *Engine) ValidateToolPinScope(agent, upstreamID string) error {
 	pol := e.toolPinPolicy(agent)
 	if !pol.StrictToolPins && len(pol.ToolPins) == 0 {
 		return nil
 	}
-	if upstreamID == "" || len(upstreamID) > 128 || strings.ContainsAny(upstreamID, "\r\n\t ") {
-		return fmt.Errorf("tool pins require a stable --upstream-id (1-128 bytes, no whitespace)")
+	if err := ValidateUpstreamID(upstreamID); err != nil {
+		return fmt.Errorf("tool pins require a stable --upstream-id: %w", err)
 	}
 	if len(pol.ToolPins) > 0 && len(pol.ToolPins[upstreamID]) == 0 {
 		return fmt.Errorf("upstream ID %q has no configured tool_pins", upstreamID)

@@ -68,3 +68,33 @@ agents:
 		}
 	}
 }
+
+func TestToolPinUpstreamKeysUseUpstreamIDRule(t *testing.T) {
+	pinPolicy := func(upstream string) string {
+		return `audit:
+  enabled: true
+  action_pairing: true
+  sign_key_env: TEST_PIN_KEY
+agents:
+  demo:
+    mode: allow
+    tool_pins:
+      "` + upstream + `":
+        read:
+          hash_version: jcs-rfc8785-v1
+          sha256: ` + strings.Repeat("a", 64) + "\n"
+	}
+	for _, bad := range []string{"local fs", "local\\tfs", "local\\nfs", strings.Repeat("u", 129)} {
+		if _, err := LoadBytes([]byte(pinPolicy(bad))); err == nil {
+			t.Errorf("tool_pins upstream key %q accepted; --upstream-id rejects it", bad)
+		}
+	}
+	upstream := strings.Repeat("u", 128)
+	engine, err := LoadBytes([]byte(pinPolicy(upstream)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.ValidateToolPinScope("demo", upstream); err != nil {
+		t.Fatalf("valid upstream ID rejected: %v", err)
+	}
+}

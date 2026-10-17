@@ -1581,6 +1581,12 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 					}
 					continue
 				}
+				// The dispatch row below runs with catalog.mu held. Cache the
+				// checked observation so applyToolObservation never calls
+				// catalog.observe (which locks catalog.mu) for this action.
+				if actionID != "" {
+					p.actionObserved.Store(actionID, current)
+				}
 			}
 			if p.requiredAudit && request.Method == "tools/call" {
 				p.audit(d.tool, "dispatch", "required-audit-before-forward", d.refsForAudit, actionID)
@@ -2329,8 +2335,8 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ..
 		dec := p.engine.Evaluate(p.agent, name)
 		allowed := dec.Allowed() || dec.Verdict == policy.Ask
 		observation := toolObservation{status: "unobserved"}
-		if buildID != 0 {
-			observation = observations[name]
+		if current, ok := observations[name]; ok && buildID != 0 {
+			observation = current
 		}
 		if paginated || nextCursor != "" {
 			observation = toolObservation{status: "unobserved"}

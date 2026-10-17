@@ -287,7 +287,9 @@ func (p *StdioProxy) pinObservation(tool string, observed toolObservation) (tool
 	}
 	observed.pinHash = pin.SHA256
 	switch observed.status {
-	case "unobserved":
+	case "", "unobserved":
+		// A zero observation (stale or discarded build) is not a definition.
+		observed.status = "unobserved"
 		return observed, "tool_catalog_refresh_required"
 	case "unhashable":
 		return observed, "pin_unverified"
