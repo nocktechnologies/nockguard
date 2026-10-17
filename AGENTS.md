@@ -60,8 +60,8 @@ A new commit needs fresh checks and review.
   PR. `main` receives squash-promoted releases and is back-synced into
   `next` after each tag. Never merge to `main` yourself.
 - Do not touch the release flow without a maintainer. It is in
-  `docs/runbooks/release.md`: freeze `next`, promote by squash PR, tag from
-  `main`, back-sync `main` into `next`.
+  `docs/runbooks/release.md`: one cleanup PR, freeze `next`, promote by squash
+  PR, tag from `main`, back-sync `main` into `next`.
 - The release version is hardcoded in `cmd/nockguard/main.go` and must move
   with `docs/ROADMAP.md` and the `CHANGELOG.md` heading;
   `scripts/check-release-version.sh` rejects a mismatch.
