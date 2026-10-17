@@ -40,11 +40,15 @@ type runState struct {
 }
 
 // AssessRuns analyzes a previously verified, fully checkpointed trail snapshot.
-// A false checkpointed argument or an unsigned row yields UNASSESSABLE; this
-// function never turns failed integrity verification into a completeness claim.
+// A false checkpointed argument, a mixed legacy/v2 trail, or an unsigned trail
+// (rows present, none signed) yields UNASSESSABLE. A row with an empty sig in a
+// trail that otherwise has signed rows is structural damage: its run is BROKEN.
+// This function never turns failed integrity verification into a completeness
+// claim.
 func AssessRuns(trail []byte, checkpointed bool, now time.Time) []RunAssessment {
 	runs := make(map[string]*runState)
 	legacy := false
+	rows, signed := 0, false
 	scan := bufio.NewScanner(bytes.NewReader(trail))
 	scan.Buffer(make([]byte, 64*1024), scanBufferCap)
 	for scan.Scan() {
@@ -53,7 +57,12 @@ func AssessRuns(trail []byte, checkpointed bool, now time.Time) []RunAssessment 
 			continue
 		}
 		var ev Event
-		if err := json.Unmarshal(line, &ev); err != nil || ev.SchemaVersion != 2 {
+		err := json.Unmarshal(line, &ev)
+		rows++
+		if err == nil && ev.Sig != "" {
+			signed = true
+		}
+		if err != nil || ev.SchemaVersion != 2 {
 			legacy = true
 			continue
 		}
@@ -134,7 +143,11 @@ func AssessRuns(trail []byte, checkpointed bool, now time.Time) []RunAssessment 
 	if scan.Err() != nil {
 		checkpointed = false
 	}
+	unsigned := rows > 0 && !signed
 	if len(runs) == 0 {
+		if unsigned {
+			return []RunAssessment{{Verdict: "UNASSESSABLE", Reason: "trail is unsigned"}}
+		}
 		if !checkpointed {
 			return []RunAssessment{{Verdict: "UNASSESSABLE", Reason: "trail is not verified and checkpointed"}}
 		}
@@ -157,6 +170,8 @@ func AssessRuns(trail []byte, checkpointed bool, now time.Time) []RunAssessment 
 		switch {
 		case !checkpointed || legacy:
 			a.Verdict, a.Reason = "UNASSESSABLE", "trail is not exclusively verified and checkpointed v2 rows"
+		case unsigned:
+			a.Verdict, a.Reason = "UNASSESSABLE", "trail is unsigned"
 		case !run.open:
 			a.Verdict, a.Reason = "BROKEN", fmt.Sprintf("run %s has no open", id)
 		case run.broken:

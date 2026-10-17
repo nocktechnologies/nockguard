@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -241,6 +242,54 @@ func TestRunWithoutOpenKeepsUnassessableVerdict(t *testing.T) {
 	if got := AssessRuns(mustRead(t, path), true, now)[0].Verdict; got != "UNASSESSABLE" {
 		t.Fatalf("mixed trail with run without open = %s, want UNASSESSABLE", got)
 	}
+}
+
+func TestRunAssessmentUnsignedTrailAndUnsignedRow(t *testing.T) {
+	now := time.Date(2026, 10, 17, 6, 0, 0, 0, time.UTC)
+	write := func(t *testing.T, events []string, opts ...Option) (*Auditor, string) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "audit.jsonl")
+		a, err := New(path, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = a.Close() })
+		a.clock = func() time.Time { return now }
+		for _, event := range events {
+			if err := a.RecordRequired(Event{Agent: "demo", SchemaVersion: 2, RecordType: "run", RunID: testRunID, RunEvent: event}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return a, path
+	}
+	t.Run("unsigned trail", func(t *testing.T) {
+		// An unsigned writer cannot commit a close head, so the run is open.
+		_, path := write(t, []string{"open", "heartbeat"})
+		data := mustRead(t, path)
+		if strings.Contains(string(data), `"sig"`) {
+			t.Fatalf("expected an unsigned trail: %s", data)
+		}
+		if got := AssessRuns(data, true, now); len(got) != 1 || got[0].Verdict != "UNASSESSABLE" {
+			t.Fatalf("unsigned trail = %+v, want UNASSESSABLE", got)
+		}
+	})
+	t.Run("unsigned row in signed trail", func(t *testing.T) {
+		_, path := write(t, []string{"open", "close"}, WithSigningKey([]byte("test signing key")))
+		lines := strings.Split(strings.TrimSpace(string(mustRead(t, path))), "\n")
+		var ev Event
+		if err := json.Unmarshal([]byte(lines[1]), &ev); err != nil {
+			t.Fatal(err)
+		}
+		ev.Sig = ""
+		stripped, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data := []byte(lines[0] + "\n" + string(stripped) + "\n")
+		if got := AssessRuns(data, true, now); len(got) != 1 || got[0].Verdict != "BROKEN" {
+			t.Fatalf("empty-sig row in a signed trail = %+v, want BROKEN", got)
+		}
+	})
 }
 
 func mustRead(t *testing.T, path string) []byte {

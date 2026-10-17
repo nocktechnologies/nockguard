@@ -92,6 +92,7 @@ recorded action without a terminal observation. `UNASSESSABLE` remains for a
 future-dated heartbeat, mixed legacy/v2 producers, or unavailable verification.
 These are observation-stream statuses; the independent integrity verdict
 remains authoritative about signatures and the checkpoint.
+An unsigned trail (no signed rows) is `UNASSESSABLE`; an empty-`sig` row in an otherwise signed trail is structural damage and its run is `BROKEN`.
 
 ## Compatibility and rollout
 
