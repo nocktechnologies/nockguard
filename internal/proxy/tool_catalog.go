@@ -101,12 +101,14 @@ func (c *toolCatalog) invalidate() {
 	c.mu.Unlock()
 }
 
-func (c *toolCatalog) discard(id uint64) {
+func (c *toolCatalog) discard(id uint64) bool {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.build != nil && c.build.id == id {
 		c.build = nil
+		return true
 	}
-	c.mu.Unlock()
+	return false
 }
 
 func (c *toolCatalog) observe(name string) toolObservation {

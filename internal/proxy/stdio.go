@@ -2135,16 +2135,24 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ..
 	if len(buildIDs) > 0 {
 		buildID = buildIDs[0]
 	}
+	discard := func(reason string) {
+		if buildID == 0 {
+			return
+		}
+		if p.catalog.discard(buildID) {
+			p.logger.Printf("TOOL-CATALOG-DISCARDED agent=%s reason=%s", p.agent, reason)
+		}
+	}
 	var resp map[string]json.RawMessage
 	if json.Unmarshal(line, &resp) != nil || resp == nil {
-		p.catalog.discard(buildID)
+		discard("invalid-response")
 		return jsonrpc.ErrorResponse(json.RawMessage("null"), -32603, "nockguard: invalid tools/list response")
 	}
 	invalid := func() []byte {
 		return jsonrpc.ErrorResponse(resp["id"], -32603, "nockguard: invalid tools/list response")
 	}
 	if _, hasError := resp["error"]; hasError {
-		p.catalog.discard(buildID)
+		discard("upstream-error")
 		if _, hasResult := resp["result"]; hasResult {
 			return invalid()
 		}
@@ -2152,12 +2160,12 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ..
 	}
 	var result map[string]json.RawMessage
 	if json.Unmarshal(resp["result"], &result) != nil || result == nil {
-		p.catalog.discard(buildID)
+		discard("invalid-result")
 		return invalid()
 	}
 	var tools []json.RawMessage
 	if json.Unmarshal(result["tools"], &tools) != nil || tools == nil {
-		p.catalog.discard(buildID)
+		discard("invalid-tools")
 		return invalid()
 	}
 	var observations map[string]toolObservation
@@ -2168,8 +2176,7 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ..
 			buildID = 0
 		}
 		if active && !bounded {
-			p.catalog.discard(buildID)
-			p.logger.Printf("TOOL-CATALOG-DISCARDED agent=%s reason=bound-exceeded", p.agent)
+			discard("bound-exceeded")
 			return invalid()
 		}
 	}
@@ -2177,8 +2184,7 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ..
 		var err error
 		observations, err = pageObservations(tools)
 		if err != nil {
-			p.catalog.discard(buildID)
-			p.logger.Printf("TOOL-CATALOG-DISCARDED agent=%s reason=invalid-page", p.agent)
+			discard("invalid-page")
 			return invalid()
 		}
 		unhashable := 0
@@ -2192,7 +2198,7 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ..
 		}
 		if raw, exists := result["nextCursor"]; exists {
 			if json.Unmarshal(raw, &nextCursor) != nil || nextCursor == "" {
-				p.catalog.discard(buildID)
+				discard("invalid-cursor")
 				return invalid()
 			}
 		}
