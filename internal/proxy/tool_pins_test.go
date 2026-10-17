@@ -470,3 +470,57 @@ agents:
 		t.Fatal(err)
 	}
 }
+
+// A queued audit row whose action has no cached observation must not hold
+// auditMutex while it waits for catalog.mu (held here as a pinned dispatch
+// holds it). Lock order is catalog.mu -> auditMutex only; never the reverse.
+func TestAuditRowCacheMissDoesNotHoldAuditMutexForCatalog(t *testing.T) {
+	auditor, path, pub := newEd25519Auditor(t)
+	defer auditor.Close()
+	hash := strings.Repeat("a", 64)
+	gate := pinGate(t, hash, true, auditor)
+	seq := gate.reserveAuditSequence()
+	actionID, err := gate.newActionID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate.queueActionID(seq, actionID)
+
+	gate.catalog.mu.Lock() // the pinned dispatch critical section
+	rowDone := make(chan struct{})
+	go func() {
+		defer close(rowDone)
+		gate.appendAudit(seq, "read", "state-write", "cache-miss", nil)
+	}()
+	time.Sleep(200 * time.Millisecond) // let the row reach its catalog lookup
+	acquired := false
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if gate.auditMutex.TryLock() {
+			gate.auditMutex.Unlock()
+			acquired = true
+			break
+		}
+	}
+	gate.catalog.mu.Unlock()
+	select {
+	case <-rowDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("audit row did not complete after catalog.mu was released")
+	}
+	if !acquired {
+		t.Fatal("auditMutex was held while waiting for catalog.mu (auditMutex -> catalog.mu order)")
+	}
+	gate.resolveAudit(seq)
+	var found bool
+	for _, row := range actionEvents(readAuditEvents(t, path)) {
+		if row.ActionID == actionID && row.Decision == "state-write" {
+			found = row.ToolPinStatus == "unobserved" && row.ToolPinHash == hash
+		}
+	}
+	if !found {
+		t.Fatal("cache-miss row lost its pin observation")
+	}
+	if _, err := audit.VerifyEd25519(path, pub); err != nil {
+		t.Fatal(err)
+	}
+}

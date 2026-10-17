@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/forward"
@@ -473,10 +474,16 @@ func (e *Engine) StrictToolPins(agent string) bool {
 }
 
 // ValidateUpstreamID applies the stable upstream ID format shared by
-// --upstream-id and tool_pins keys.
+// --upstream-id and tool_pins keys: 1-128 bytes, no Unicode whitespace and
+// no control characters.
 func ValidateUpstreamID(id string) error {
-	if id == "" || len(id) > 128 || strings.ContainsAny(id, "\r\n\t ") {
-		return fmt.Errorf("upstream ID must be 1-128 bytes with no whitespace")
+	if id == "" || len(id) > 128 {
+		return fmt.Errorf("upstream ID must be 1-128 bytes with no whitespace or control characters")
+	}
+	for _, r := range id {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("upstream ID must be 1-128 bytes with no whitespace or control characters")
+		}
 	}
 	return nil
 }

@@ -98,3 +98,16 @@ agents:
 		t.Fatalf("valid upstream ID rejected: %v", err)
 	}
 }
+
+func TestValidateUpstreamIDRejectsWhitespaceAndControl(t *testing.T) {
+	for _, bad := range []string{"", "local fs", "local\tfs", "local\nfs", "local\rfs", "local\x00fs", "local\x7ffs", "local fs", "local\vfs", strings.Repeat("u", 129)} {
+		if err := ValidateUpstreamID(bad); err == nil {
+			t.Errorf("ValidateUpstreamID(%q) accepted", bad)
+		}
+	}
+	for _, good := range []string{"filesystem-local", "fs.local_2", strings.Repeat("u", 128)} {
+		if err := ValidateUpstreamID(good); err != nil {
+			t.Errorf("ValidateUpstreamID(%q): %v", good, err)
+		}
+	}
+}

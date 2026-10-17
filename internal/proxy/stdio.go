@@ -262,7 +262,8 @@ func (p *StdioProxy) appendAudit(seq uint64, tool, decision, reason string, refs
 // normal tool-call audit rows leave the field absent.
 func (p *StdioProxy) appendAuditWithApprovalActor(seq uint64, tool, decision, reason string, refs *extract.References, approvalActor string) {
 	p.auditMutex.Lock()
-	defer p.auditMutex.Unlock()
+	actionID := p.actionIDs[seq]
+	p.auditMutex.Unlock()
 
 	// Build the audit event (no card stamp yet — that happens at flush time).
 	// Allocate on the heap so the pointer remains valid after this function returns
@@ -273,10 +274,15 @@ func (p *StdioProxy) appendAuditWithApprovalActor(seq uint64, tool, decision, re
 		Reason:        reason,
 		ApprovalActor: approvalActor,
 	}
-	if actionID := p.actionIDs[seq]; actionID != "" {
+	if actionID != "" {
 		p.setActionFields(ev, actionID)
+		// Resolve the observation before auditMutex: a cache miss locks
+		// catalog.mu, which must never be acquired while auditMutex is held.
 		p.applyToolObservation(ev)
 	}
+
+	p.auditMutex.Lock()
+	defer p.auditMutex.Unlock()
 
 	// Set extracted references if provided.
 	if refs != nil {
