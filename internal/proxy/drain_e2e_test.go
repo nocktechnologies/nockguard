@@ -62,7 +62,7 @@ exit 0
 	requests := []string{
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nockcc_nock_claim","arguments":{"id":12345}}}`,
 	}
-	proxyCmd := exec.Command(binary, "proxy", "--upstream", "bash", scriptPath, "--agent", "kit", "--policy", policyFile)
+	proxyCmd := exec.Command(binary, "proxy", "--upstream", "bash "+scriptPath, "--agent", "kit", "--policy", policyFile)
 	proxyCmd.Stdin = strings.NewReader(strings.Join(requests, "\n") + "\n")
 	proxyCmd.Env = append(os.Environ(), "NOCKGUARD_AUDIT_ED25519_KEY="+seedHex)
 	out, err := proxyCmd.CombinedOutput()
