@@ -27,6 +27,11 @@ dispatches commands and lists their flags in `printUsage`.
 weakening fail-closed audit enforcement. `mcp-gateway` has no such option and
 requires auditing to be enabled.
 
+`proxy`, `mcp-http`, `mcp-listen`, `egress-proxy`, and `init` use Go's standard
+flag parser. Unknown flags, missing flag values, and unexpected positional
+arguments return an error before setup. Both `--policy PATH` and
+`--policy=PATH` count as explicitly choosing a policy for `proxy`.
+
 `egress-proxy --listen` requires an explicit loopback host (`127.0.0.1`,
 `localhost`, or `::1`) unless `--allow-remote` is passed. Remote binds print a
 warning: the proxy has no caller authentication, so restrict access with external

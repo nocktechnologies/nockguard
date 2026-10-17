@@ -4,6 +4,32 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-17
+
+v0.10.1 rejects malformed CLI arguments before setup and removes redundant
+approval audit bookkeeping. Approval gates and historical trail verification
+are unchanged.
+
+### Upgrade notes
+
+- `proxy`, `mcp-http`, `mcp-listen`, `egress-proxy`, and `init` now reject
+  unknown flags, missing flag values, and unexpected positional arguments.
+  Correct invocations that previously relied on ignored arguments before upgrading.
+- Approved native `ask` and `fail_mode: ask` calls no longer add the synthetic
+  `state-write` audit row. `approval-granted` remains; scripts that count rows
+  will see one fewer row per approved call. Existing signed `state-write` rows
+  still verify and display unchanged.
+
+### Changed
+
+- Use standard Go flag parsing for `proxy`, `mcp-http`, `mcp-listen`,
+  `egress-proxy`, and `init`; reject malformed flags before startup or file writes.
+- Reuse one named-agent/default policy lookup and remove unused internal helpers.
+- Stop emitting redundant synthetic `state-write` rows on approved calls;
+  approval gates and verification of historical signed trails are unchanged.
+- Consolidate contributor guidance in `AGENTS.md`, check its file references
+  in CI, and require a whole-batch cleanup pass before release preparation.
+
 ## [0.10.0] - 2026-10-17
 
 v0.10.0 extends the opt-in paired stdio audit (`audit.action_pairing: true`). Signed action rows now record a digest of each tool definition the server advertised. Operators can pin reviewed definitions with `tool_pins` and `--upstream-id`; a pinned tool whose definition is missing, unhashable or changed is hidden from `tools/list` and its calls are blocked. Each paired proxy run writes signed open, heartbeat and close rows, and `verify --completeness` reports a per-run assessment next to the integrity verdict. Paired audit now needs a signing key. This release also fixes concurrent Telegram approval routing, the bracketed IPv6 loopback Host on `mcp-listen`, oversized method and tool names, and a malformed `approval_actor` latching the required audit writer.

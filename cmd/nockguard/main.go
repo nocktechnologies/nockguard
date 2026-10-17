@@ -102,7 +102,7 @@ func runCLI(args []string) int {
 	}
 
 	if args[0] == "version" {
-		fmt.Println("nockguard v0.10.0")
+		fmt.Println("nockguard v0.10.1")
 		return 0
 	}
 
@@ -182,38 +182,31 @@ func runCLI(args []string) int {
 		auditBestEffort bool
 	)
 
-	for i := 1; i < len(args); i++ {
-		switch args[i] {
-		case "--upstream":
-			if i+1 < len(args) {
-				i++
-				upstreamCmd = args[i]
-			}
-		case "--upstream-id":
-			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
-				fmt.Fprintln(os.Stderr, "error: --upstream-id requires a value")
-				return 1
-			}
-			i++
-			upstreamID = args[i]
-		case "--agent":
-			if i+1 < len(args) {
-				i++
-				agent = args[i]
-			}
-		case "--policy":
-			// Mark provided the moment the flag is SEEN, before consuming its value:
-			// a dangling `--policy` (no path) still means "the user named a policy",
-			// so it must fall through to load-or-error, never be reinterpreted as
-			// zero-config observe. An explicit --policy is never bypassed.
+	fs := flag.NewFlagSet("proxy", flag.ContinueOnError)
+	fs.StringVar(&upstreamCmd, "upstream", "", "upstream command")
+	fs.StringVar(&upstreamID, "upstream-id", "", "stable upstream ID for tool pins")
+	fs.StringVar(&agent, "agent", "", "agent name")
+	fs.StringVar(&policyPath, "policy", "", "policy file")
+	fs.BoolVar(&auditBestEffort, "audit-best-effort", false, "allow forwarding after audit failures")
+	if err := fs.Parse(args[1:]); err != nil {
+		return 1
+	}
+	if strings.HasPrefix(upstreamID, "--") {
+		fmt.Fprintln(os.Stderr, "error: --upstream-id requires a value")
+		return 1
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", fs.Arg(0))
+		return 1
+	}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "policy" {
 			policyProvided = true
-			if i+1 < len(args) {
-				i++
-				policyPath = args[i]
-			}
-		case "--audit-best-effort":
-			auditBestEffort = true
 		}
+	})
+	if policyProvided && policyPath == "" {
+		fmt.Fprintln(os.Stderr, "error: --policy requires a non-empty path")
+		return 1
 	}
 
 	if upstreamCmd == "" {
@@ -508,33 +501,19 @@ func runEgressProxy(args []string) int {
 		allowRemote bool
 	)
 
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--listen":
-			if i+1 < len(args) {
-				i++
-				listen = args[i]
-			}
-		case "--agent":
-			if i+1 < len(args) {
-				i++
-				agent = args[i]
-			}
-		case "--policy":
-			if i+1 < len(args) {
-				i++
-				policyPath = args[i]
-			}
-		case "--audit":
-			if i+1 < len(args) {
-				i++
-				auditPath = args[i]
-			}
-		case "--allow-remote":
-			allowRemote = true
-		case "--enforce":
-			enforce = true
-		}
+	fs := flag.NewFlagSet("egress-proxy", flag.ContinueOnError)
+	fs.StringVar(&listen, "listen", "", "listen address")
+	fs.StringVar(&agent, "agent", "", "agent name")
+	fs.StringVar(&policyPath, "policy", "", "policy file")
+	fs.StringVar(&auditPath, "audit", "", "audit trail path")
+	fs.BoolVar(&enforce, "enforce", false, "block denied hosts")
+	fs.BoolVar(&allowRemote, "allow-remote", false, "allow a non-loopback listen address")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", fs.Arg(0))
+		return 1
 	}
 
 	if policyPath == "" {
@@ -599,36 +578,19 @@ func runMCPListen(args []string) int {
 		auditBestEffort bool
 	)
 
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--listen":
-			if i+1 < len(args) {
-				i++
-				listen = args[i]
-			}
-		case "--upstream":
-			if i+1 < len(args) {
-				i++
-				upstream = args[i]
-			}
-		case "--agent":
-			if i+1 < len(args) {
-				i++
-				agent = args[i]
-			}
-		case "--policy":
-			if i+1 < len(args) {
-				i++
-				policyPath = args[i]
-			}
-		case "--audit":
-			if i+1 < len(args) {
-				i++
-				auditPath = args[i]
-			}
-		case "--audit-best-effort":
-			auditBestEffort = true
-		}
+	fs := flag.NewFlagSet("mcp-listen", flag.ContinueOnError)
+	fs.StringVar(&listen, "listen", "", "loopback listen address")
+	fs.StringVar(&upstream, "upstream", "", "upstream HTTP MCP URL")
+	fs.StringVar(&agent, "agent", "", "agent name")
+	fs.StringVar(&policyPath, "policy", "", "policy file")
+	fs.StringVar(&auditPath, "audit", "", "audit trail path")
+	fs.BoolVar(&auditBestEffort, "audit-best-effort", false, "allow forwarding after audit failures")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", fs.Arg(0))
+		return 1
 	}
 
 	if listen == "" {
@@ -1514,17 +1476,17 @@ func runStatus(args []string) int {
 func runInit(args []string) int {
 	var policyPath string
 	force := false
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--policy":
-			if i+1 < len(args) {
-				i++
-				policyPath = args[i]
-			}
-		case "--force":
-			force = true
-		}
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	fs.StringVar(&policyPath, "policy", "", "policy file to create")
+	fs.BoolVar(&force, "force", false, "overwrite an existing policy")
+	if err := fs.Parse(args); err != nil {
+		return 1
 	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", fs.Arg(0))
+		return 1
+	}
+
 	if policyPath == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -1561,32 +1523,20 @@ func runMCPHTTP(args []string) int {
 		authEnv         string
 		auditBestEffort bool
 	)
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--upstream":
-			if i+1 < len(args) {
-				i++
-				upstreamURL = args[i]
-			}
-		case "--agent":
-			if i+1 < len(args) {
-				i++
-				agent = args[i]
-			}
-		case "--policy":
-			if i+1 < len(args) {
-				i++
-				policyPath = args[i]
-			}
-		case "--auth-env":
-			if i+1 < len(args) {
-				i++
-				authEnv = args[i]
-			}
-		case "--audit-best-effort":
-			auditBestEffort = true
-		}
+	fs := flag.NewFlagSet("mcp-http", flag.ContinueOnError)
+	fs.StringVar(&upstreamURL, "upstream", "", "upstream HTTP MCP URL")
+	fs.StringVar(&agent, "agent", "", "agent name")
+	fs.StringVar(&policyPath, "policy", "", "policy file")
+	fs.StringVar(&authEnv, "auth-env", "", "environment variable with upstream authorization")
+	fs.BoolVar(&auditBestEffort, "audit-best-effort", false, "allow forwarding after audit failures")
+	if err := fs.Parse(args); err != nil {
+		return 1
 	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", fs.Arg(0))
+		return 1
+	}
+
 	if upstreamURL == "" {
 		fmt.Fprintln(os.Stderr, "error: --upstream is required (the HTTP MCP upstream URL, e.g. https://command.example.com/mcp)")
 		return 1

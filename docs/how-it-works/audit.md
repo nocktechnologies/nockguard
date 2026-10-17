@@ -18,6 +18,10 @@ that carry `approval_actor`; use a verifier that understands the field for new
 local-approval rows.
 Source: `internal/audit/audit.go`, `internal/audit/export.go`.
 
+Approval outcomes produce `approval-granted` or `approval-denied` rows. New
+approvals no longer append the redundant synthetic `state-write` row. Existing
+signed trails containing `state-write` still verify and display unchanged.
+
 Local `proxy` and `mcp-listen` require a durable `dispatch` row before
 forwarding a tool call. Deferred decisions are written in request order, so an
 out-of-order response can be released before its decision row is written. A

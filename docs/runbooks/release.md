@@ -11,7 +11,7 @@ and macOS checks on pushes to both `next` and `main`.
 
 Prepare the version and changelog on `next`, or on a short-lived
 `release/vX.Y.Z` branch cut from `next` that carries only the release metadata
-listed in step 1. Freeze `next` when release preparation starts: before
+listed in step 2. Freeze `next` when release preparation starts: before
 preparing metadata directly on `next`, or before cutting a release branch.
 Keep the freeze through the post-release `main`-to-`next` back-sync. During the freeze, only maintainer-approved
 release-fix card PRs may merge into `next`; a maintainer must incorporate each
@@ -38,27 +38,37 @@ do not weaken existing protections to make promotion pass.
 
 ## Release checks
 
-1. On `next` (or the release branch described above), choose the release tag
+1. Run one whole-repo cleanup pass. Before the release notes (step 2), open one
+   focused cleanup PR into `next` that removes what the batch left behind: code
+   whose last caller is gone, superseded APIs, inert config, and duplicated
+   helpers. The standard: the smallest useful change, delete before adding,
+   keep every real guarantee and every compatibility path that has a real
+   consumer, no new features and no edge hunting. Same review and CI as any
+   card PR. If a read of the batch finds nothing worth removing, skip the step
+   and say so in the release PR body. Merge it before the freeze starts,
+   because the freeze admits only release-fix PRs. Per-PR simplification sees
+   one diff at a time; this pass catches what builds up between PRs.
+2. On `next` (or the release branch described above), choose the release tag
    and update the hardcoded version in `cmd/nockguard/main.go`,
    `docs/ROADMAP.md`, and the heading in `CHANGELOG.md`. Build the CLI and run
    `scripts/check-release-version.sh vX.Y.Z <binary>`. Verify customer docs
    against the code that will ship, then promote through the release PR above.
-2. Run the [CI checks](../../CLAUDE.md#build-and-test), including the
+3. Run the [CI checks](../../AGENTS.md#build-and-test), including the
    [macOS test job](../../.github/workflows/ci.yml), against the exact `main`
    commit selected for release.
-3. Run `scripts/build-release-assets.sh vX.Y.Z dist` on Linux with GNU tar and
+4. Run `scripts/build-release-assets.sh vX.Y.Z dist` on Linux with GNU tar and
    `sha256sum`. It builds four archives containing `nockguard` and
    `nockguard-wall` (Linux/macOS, amd64/arm64) and `SHA256SUMS`; run
    `scripts/check-release-version.sh vX.Y.Z <binary>`. Run
    `govulncheck -mode=binary` on both binaries in each archive. The build script
    rejects wrong tag syntax; the version checker rejects a version mismatch.
-4. Use `workflow_dispatch` on `release-assets` for a dry run; it uploads CI
+5. Use `workflow_dispatch` on `release-assets` for a dry run; it uploads CI
    artifacts only. After maintainer review, publish the tag/release from the
    selected `main` commit. The published release workflow rechecks checksums
    and attaches archives and `SHA256SUMS`.
-5. Immediately after tagging, back-sync `main` into `next` as described below,
+6. Immediately after tagging, back-sync `main` into `next` as described below,
    before accepting more work into `next`.
-6. A maintainer updates the Homebrew tap, then downloads each intended platform
+7. A maintainer updates the Homebrew tap, then downloads each intended platform
    archive, checks its SHA256 against `SHA256SUMS`, and runs `nockguard version`
    plus the customer quickstart on a clean host before announcing the release.
 

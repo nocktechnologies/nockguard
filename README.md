@@ -170,7 +170,7 @@ agents:
       max_calls: 5000
 ```
 
-Policy verdict precedence is `deny` first, then `ask`, then normal allow/mode logic. An `Ask` verdict is not a warning or "flag but pass" result: the call is withheld until approval. Any state-write intents attached to the policy decision are also withheld; NockGuard applies them only after approval, and drops them on denial or timeout. The legacy `require_approval` key remains accepted for existing policies, but new policies should use `ask`. An `ask` call needs an approver: the dedicated Telegram bot, or the network-free local approver (`NOCKGUARD_APPROVER=local`, see "Local approver" under Phase 5 below). With neither, every `ask` call is denied.
+Policy verdict precedence is `deny` first, then `ask`, then normal allow/mode logic. An `Ask` verdict is not a warning or "flag but pass" result: the call is withheld until approval. Approval outcomes are recorded as `approval-granted` or `approval-denied`. The legacy `require_approval` key remains accepted for existing policies, but new policies should use `ask`. An `ask` call needs an approver: the dedicated Telegram bot, or the network-free local approver (`NOCKGUARD_APPROVER=local`, see "Local approver" under Phase 5 below). With neither, every `ask` call is denied.
 
 For Telegram approval, set `NOCKGUARD_APPROVAL_BOT_TOKEN`, `NOCKGUARD_APPROVAL_CHAT_ID`, and `NOCKGUARD_APPROVER_IDS` (a comma-separated list of numeric Telegram user IDs). A callback approves or denies only when its sender is listed and its message belongs to the configured chat. Missing or invalid approver IDs prevent the Telegram approver from starting; gated calls fail closed. Rejected taps receive a short refusal and leave the call held. The stdio proxy and HTTP enforcement listener share the approval gate, so the first rejected tap on each held request records one `block` audit row and forwards one `high` severity NockCC event when forwarding is enabled. Later taps are counted in a local summary log without adding audit rows or alerts. The `mcp-http` bridge is observe-only and does not ask for approval.
 
@@ -244,7 +244,7 @@ Each decision is one JSON object per line (JSON Lines):
 {"ts":"2026-06-03T18:30:01Z","agent":"coder","tool":"read_file","decision":"allow","reason":"allow-rule \"read_*\""}
 ```
 
-`decision` is one of `allow`, `deny`, `would-deny` (shadow dry-run miss), `block` (input validation or a rejected Telegram approval tap), `ratelimit`, `approval-granted`, `approval-denied`, `state-write`, `hide` (filtered from `tools/list`), or `dispatch` (required-audit permission to forward).
+`decision` is one of `allow`, `deny`, `would-deny` (shadow dry-run miss), `block` (input validation or a rejected Telegram approval tap), `ratelimit`, `approval-granted`, `approval-denied`, `hide` (filtered from `tools/list`), or `dispatch` (required-audit permission to forward).
 
 When auditing is enabled, `proxy`, `mcp-http`, and `mcp-listen` persist a decision
 before forwarding a tool call. A pre-forward write failure refuses that call;
@@ -315,7 +315,7 @@ legacy-only trails are `UNVERIFIED`; invalid run structure is `BROKEN`.
 
 ### Forwarding to the NockCC ops-log
 
-NockGuard can stream **enforcement decisions** (`deny`, `block`, `ratelimit`, `approval-granted`, `approval-denied`) to the NockCC ops-log, so what the firewall blocks or parks across the fleet shows up in one Command Center feed. Allowed calls, state-write records, and tool-list hides are not forwarded — the centralized feed stays high-signal, while the local JSONL keeps the complete record.
+NockGuard can stream **enforcement decisions** (`deny`, `block`, `ratelimit`, `approval-granted`, `approval-denied`) to the NockCC ops-log, so what the firewall blocks or parks across the fleet shows up in one Command Center feed. Allowed calls and tool-list hides are not forwarded — the centralized feed stays high-signal, while the local JSONL keeps the complete record.
 
 ```yaml
 audit:
@@ -488,7 +488,7 @@ With `--lock-db`, the `/export` CSV and JSON include every Guard row in the wind
 NockGuard intercepts two MCP methods:
 
 - **tools/list**: Keeps allowed and ask-verdict tools visible and hides denied tools. An ask tool is held for approval when called.
-- **tools/call**: Checks the tool name against policy before forwarding. `Deny` rejects immediately. `Ask` holds the call for the configured approver and forwards only on approval, applying any withheld state writes after that approval. With Phase 2 validation enabled, NockGuard also scans the call's arguments (recursively, keys and values) against the configured rule categories and custom patterns, blocking injection attempts and outbound sensitive-data leaks. With Phase 3 limits enabled, a call that clears policy and validation is then metered against the agent's rate limit and spend cap. Denied, ask-denied, blocked, or over-limit calls get a JSON-RPC error response.
+- **tools/call**: Checks the tool name against policy before forwarding. `Deny` rejects immediately. `Ask` holds the call for the configured approver and forwards only on approval. With Phase 2 validation enabled, NockGuard also scans the call's arguments (recursively, keys and values) against the configured rule categories and custom patterns, blocking injection attempts and outbound sensitive-data leaks. With Phase 3 limits enabled, a call that clears policy and validation is then metered against the agent's rate limit and spend cap. Denied, ask-denied, blocked, or over-limit calls get a JSON-RPC error response.
 
 Other method-bearing MCP messages pass through by default and, with auditing enabled, record `method-allow` or `method-deny` containing the method name in `tool`, never params. These rows are excluded from tool allowlist proposals and tool decision counts. Method rows are written immediately and can precede earlier tool decisions waiting on upstream responses. Denied method requests return JSON-RPC `-32601` (method not found). Set per-agent `deny_methods: [resources/read, prompts/get, completion/complete]` to refuse exact method names before upstream contact. The named agent policy takes precedence over `default`; entries are case-sensitive literals, not globs. `tools/call` cannot appear in this list: use tool `deny` rules instead. Tool rules, validation, approvals and limits do not inspect other methods' params. Notifications follow the same method policy; denied notifications are dropped without a JSON-RPC response. Responses without a method pass through without a method audit row. NockGuard is version-transparent — it works with any MCP protocol version. Input validation is opt-in: an allowlist-only policy behaves exactly as in Phase 1.
 
