@@ -30,7 +30,10 @@ name. Pass `--upstream-id` to `proxy`; a configured pin always gates discovery
 and direct calls, while `strict_tool_pins` additionally requires a pin for every
 allowed tool. Re-list after `notifications/tools/list_changed`; a paginated
 catalog cannot authorize pinned calls. See [policy and limits](policy-and-limits.md).
-`mcp-listen` and `mcp-gateway` refuse pin policies until HTTP catalog
+The final pin check and durable dispatch are serialized with catalog changes.
+A call dispatched before `list_changed` remains in flight, even if the upstream
+write completes afterward; later calls require a fresh verified listing.
+`mcp-http`, `mcp-listen`, and `mcp-gateway` refuse pin policies until HTTP catalog
 observations can be bound to individual upstream sessions.
 
 `mcp-http` bridges a stdio client to an HTTP MCP server in observe-only mode;

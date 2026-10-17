@@ -1526,6 +1526,10 @@ func runMCPHTTP(args []string) int {
 		fmt.Fprintf(os.Stderr, "error loading policy %s: %v\n", policyPath, err)
 		return 1
 	}
+	if engine.HasToolPinConstraints(agent) {
+		fmt.Fprintln(os.Stderr, "error: tool pins require the stdio proxy with a session-scoped tool catalog")
+		return 1
+	}
 
 	for _, warn := range engine.Warnings() {
 		fmt.Fprintf(os.Stderr, "warning policy: %s\n", warn)

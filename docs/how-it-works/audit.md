@@ -86,7 +86,8 @@ After `notifications/tools/list_changed`, re-list from the first page or
 reconnect before calling a pinned tool. A paginated catalog remains unverified
 for later calls because upstream cursors can be reused; pinned tools are hidden
 from such a listing and direct pinned calls stay blocked. The current verified
-catalog is stdio-scoped.
+catalog is stdio-scoped. A call with a durable dispatch row before
+`list_changed` remains in flight; invalidation blocks subsequent calls.
 
 When pairing is enabled, the writer resumes unsigned `run_seq` counters from
 valid v2 rows already in the trail. Unsigned audit opens without pairing retain

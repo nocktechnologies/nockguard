@@ -574,12 +574,37 @@ agents:
 	if code != 1 || !strings.Contains(stderr, "require the stdio proxy") {
 		t.Fatalf("pin policy was not refused: code=%d stderr=%s", code, stderr)
 	}
+	code, _, stderr = runCommandForTest(t, "mcp-http", "--upstream", "http://127.0.0.1:1/mcp", "--agent", "demo", "--policy", path)
+	if code != 1 || !strings.Contains(stderr, "require the stdio proxy") {
+		t.Fatalf("observe-only bridge accepted pin policy: code=%d stderr=%s", code, stderr)
+	}
 }
 
 func TestProxyUpstreamIDCannotConsumePolicyFlag(t *testing.T) {
 	code, _, stderr := runCommandForTest(t, "proxy", "--upstream", "cat", "--agent", "demo", "--upstream-id", "--policy", "/missing/policy.yaml")
 	if code != 1 || !strings.Contains(stderr, "--upstream-id requires a value") {
 		t.Fatalf("missing upstream ID consumed --policy: code=%d stderr=%s", code, stderr)
+	}
+}
+
+func TestProxyRefusesUnsignedPinPolicyBeforeStartingUpstream(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	policyText := fmt.Sprintf(`audit:
+  enabled: true
+  path: %s
+  action_pairing: true
+agents:
+  pinunsignedtest:
+    mode: allow
+    strict_tool_pins: true
+`, filepath.Join(t.TempDir(), "audit.jsonl"))
+	if err := os.WriteFile(path, []byte(policyText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(policy.AgentKeyEnvName("pinunsignedtest"), "")
+	code, _, stderr := runCommandForTest(t, "proxy", "--upstream", "cat", "--agent", "pinunsignedtest", "--upstream-id", "stable", "--policy", path)
+	if code != 1 || !strings.Contains(stderr, "tool pins require a signed audit writer") {
+		t.Fatalf("unsigned pin policy started: code=%d stderr=%s", code, stderr)
 	}
 }
 
