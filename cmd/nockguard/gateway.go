@@ -57,6 +57,9 @@ func serveMCPGateway(ctx context.Context, path string) error {
 	if !engine.HasPolicyFor(c.Agent) {
 		return fmt.Errorf("configured agent has no policy")
 	}
+	if engine.HasToolPinConstraints(c.Agent) {
+		return fmt.Errorf("tool pins currently require the stdio proxy")
+	}
 	validator, err := engine.ValidatorFor(c.Agent)
 	if err != nil {
 		return err

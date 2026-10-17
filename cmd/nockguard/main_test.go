@@ -556,6 +556,33 @@ func TestPolicyShadowReportCommandCountsWouldDeny(t *testing.T) {
 	}
 }
 
+func TestMCPListenRejectsPinPolicyWithoutHTTPSessionCatalog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	policyText := `audit:
+  enabled: true
+  action_pairing: true
+  sign_key_env: TEST_TOOL_PIN_SIGN_KEY
+agents:
+  demo:
+    mode: allow
+    strict_tool_pins: true
+`
+	if err := os.WriteFile(path, []byte(policyText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := runCommandForTest(t, "mcp-listen", "--listen", "127.0.0.1:0", "--upstream", "http://127.0.0.1:1/mcp", "--agent", "demo", "--policy", path)
+	if code != 1 || !strings.Contains(stderr, "require the stdio proxy") {
+		t.Fatalf("pin policy was not refused: code=%d stderr=%s", code, stderr)
+	}
+}
+
+func TestProxyUpstreamIDCannotConsumePolicyFlag(t *testing.T) {
+	code, _, stderr := runCommandForTest(t, "proxy", "--upstream", "cat", "--agent", "demo", "--upstream-id", "--policy", "/missing/policy.yaml")
+	if code != 1 || !strings.Contains(stderr, "--upstream-id requires a value") {
+		t.Fatalf("missing upstream ID consumed --policy: code=%d stderr=%s", code, stderr)
+	}
+}
+
 func TestMCPListenRejectsNonLoopbackBind(t *testing.T) {
 	dir := t.TempDir()
 	policyPath := writeMCPListenPolicy(t, dir, "")

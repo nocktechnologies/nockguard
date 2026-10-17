@@ -73,8 +73,20 @@ In observation-only mode, raw upstream cursors can be reused across listing
 generations, so even a completed paginated catalog leaves later calls
 `unobserved` without an attached digest. A single page complete listing can
 bind its observed digest to later calls.
-These observation statuses do not enforce operator pins. Configured pins and
-strict pin mode are a separate follow-up.
+An operator can configure `tool_pins` by stable upstream ID and exact tool name.
+Run the stdio proxy with the matching `--upstream-id`. Pin policies require a
+signing key and `audit.action_pairing: true`; `--audit-best-effort` is refused.
+The signed action rows then carry both `tool_pin_hash` (expected) and
+`tool_definition_hash` (observed), with `matched`, `mismatch`, `unobserved`,
+`unhashable`, or `unpinned` status. Re-listing only changes the observed hash.
+An ordinary call approval cannot update a pin. A mismatch or unverified pinned
+tool is hidden from `tools/list` and blocked on direct `tools/call`, even with
+strict mode off. `strict_tool_pins: true` also blocks unpinned tools.
+After `notifications/tools/list_changed`, re-list from the first page or
+reconnect before calling a pinned tool. A paginated catalog remains unverified
+for later calls because upstream cursors can be reused; pinned tools are hidden
+from such a listing and direct pinned calls stay blocked. The current verified
+catalog is stdio-scoped.
 
 When pairing is enabled, the writer resumes unsigned `run_seq` counters from
 valid v2 rows already in the trail. Unsigned audit opens without pairing retain

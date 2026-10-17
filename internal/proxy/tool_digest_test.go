@@ -155,8 +155,8 @@ func TestCatalogPublishesOnlyCompleteGeneration(t *testing.T) {
 		t.Fatal("published a discarded generation")
 	}
 	newBuild = c.beginList(nil)
-	if err := c.addPage(first, 50, a, ""); err != nil {
-		t.Fatal(err)
+	if err := c.addPage(first, 50, a, ""); err == nil {
+		t.Fatal("stale page was accepted")
 	}
 	if c.observe("a").status != "unobserved" {
 		t.Fatal("stale page published over a new build")

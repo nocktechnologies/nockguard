@@ -175,6 +175,7 @@ func runCLI(args []string) int {
 
 	var (
 		upstreamCmd     string
+		upstreamID      string
 		agent           string
 		policyPath      string
 		policyProvided  bool
@@ -188,6 +189,13 @@ func runCLI(args []string) int {
 				i++
 				upstreamCmd = args[i]
 			}
+		case "--upstream-id":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+				fmt.Fprintln(os.Stderr, "error: --upstream-id requires a value")
+				return 1
+			}
+			i++
+			upstreamID = args[i]
 		case "--agent":
 			if i+1 < len(args) {
 				i++
@@ -285,6 +293,13 @@ func runCLI(args []string) int {
 	}
 
 	validator, err := engine.ValidatorFor(agent)
+	if err == nil {
+		err = engine.ValidateToolPinScope(agent, upstreamID)
+	}
+	if engine.HasToolPinConstraints(agent) && auditBestEffort {
+		fmt.Fprintln(os.Stderr, "error: --audit-best-effort is incompatible with tool pins")
+		return 1
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error building input validator for agent %s: %v\n", agent, err)
 		return 1
@@ -318,6 +333,7 @@ func runCLI(args []string) int {
 	approver := buildApprover(logger)
 	defer closeApprover(approver)
 	p := proxy.NewStdioProxy(upstream, agent, engine, validator, limiter, auditor, forwarder, logger).
+		WithUpstreamID(upstreamID).
 		WithTrust(trustAccumulator).
 		WithApprover(approver)
 	if auditBestEffort {
@@ -651,6 +667,10 @@ func runMCPListen(args []string) int {
 	}
 	if !engine.HasPolicyFor(agent) {
 		fmt.Fprintf(os.Stderr, "warning: no policy for agent %q and no \"default\" — ALL tools will be DENIED (fail-closed). Add an agent or \"default\" policy in %s.\n", agent, policyPath)
+	}
+	if engine.HasToolPinConstraints(agent) {
+		fmt.Fprintln(os.Stderr, "error: tool pins currently require the stdio proxy")
+		return 1
 	}
 
 	validator, err := engine.ValidatorFor(agent)
@@ -1570,6 +1590,7 @@ Usage:
 
 Options:
   --upstream         MCP server command to proxy (for: proxy) or HTTP MCP upstream URL (for: mcp-http, mcp-listen)
+  --upstream-id      Stable operator-chosen upstream ID for stdio tool pins (for: proxy)
   --auth-env         Env var whose value is sent as the Authorization header to the HTTP upstream (for: mcp-http)
   --allow-remote     Permit a non-loopback egress-proxy bind (warns; no caller authentication)
   --listen           Listen address (for: mcp-listen use explicit loopback only; for: egress-proxy loopback unless --allow-remote)

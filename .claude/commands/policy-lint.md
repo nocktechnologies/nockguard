@@ -68,7 +68,7 @@ python3 -c "
 import yaml, sys
 with open('$POLICY') as f:
     doc = yaml.safe_load(f) or {}
-valid = {'allow','deny','deny_methods','ask','shadow','mode','fail_mode','validate_input','block_params','rate_limit','spend_cap','trust','require_approval','inject'}
+valid = {'allow','deny','deny_methods','ask','shadow','mode','fail_mode','validate_input','block_params','rate_limit','spend_cap','trust','require_approval','inject','tool_pins','strict_tool_pins'}
 for agent, pol in (doc.get('agents') or {}).items():
     if not isinstance(pol, dict): continue
     extra = set(pol) - valid
