@@ -151,7 +151,7 @@ func TestApprovalActorNullCannotCollapseToOmittedField(t *testing.T) {
 	}
 }
 
-func TestInvalidRequiredApprovalActorLatchesWriter(t *testing.T) {
+func TestInvalidRequiredApprovalActorDoesNotLatchWriter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
 	a, err := New(path)
 	if err != nil {
@@ -160,8 +160,8 @@ func TestInvalidRequiredApprovalActorLatchesWriter(t *testing.T) {
 	if err := a.RecordRequired(Event{Agent: "kit", Tool: "deploy", Decision: "approval-granted", ApprovalActor: "local:uid:01"}); err == nil {
 		t.Fatal("RecordRequired accepted non-canonical approval_actor")
 	}
-	if err := a.RecordRequired(Event{Agent: "kit", Tool: "deploy", Decision: "dispatch"}); err == nil || !strings.Contains(err.Error(), "failed") {
-		t.Fatalf("required writer did not stay latched after invalid event: %v", err)
+	if err := a.RecordRequired(Event{Agent: "kit", Tool: "deploy", Decision: "dispatch"}); err != nil {
+		t.Fatalf("required writer latched after rejected input: %v", err)
 	}
 }
 

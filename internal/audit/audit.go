@@ -436,6 +436,7 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 		return nil
 	}
 	if err := validateApprovalActor(ev); err != nil {
+		latchRequiredFailure = false // rejected input; nothing was written
 		return err
 	}
 	if a.signing() {
