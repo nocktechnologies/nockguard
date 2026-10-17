@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -98,8 +99,8 @@ func TestSignedRunLifecycleCleanAndKilled(t *testing.T) {
 				want = "INCOMPLETE"
 				now = now.Add(91 * time.Second)
 			}
-			if got := audit.AssessRuns(data, true, now)[0].Verdict; got != want {
-				t.Fatalf("assessment = %s, want %s; trail=%s", got, want, data)
+			if got := audit.AssessRuns(data, true, now); len(got) != 1 || got[0].Verdict != want {
+				t.Fatalf("assessment = %+v, want one %s run; trail=%s", got, want, data)
 			}
 		})
 	}
@@ -344,6 +345,18 @@ func TestLegacyProxyKeepsReadingInputAfterUpstreamLeaderExits(t *testing.T) {
 // the command, the client's stdin, and the trail path and public key.
 func startPairedProxy(t *testing.T, upstreamBody string) (*exec.Cmd, io.WriteCloser, string, ed25519.PublicKey) {
 	t.Helper()
+	return startPairedProxyWith(t, pairedProxyOptions{upstreamBody: upstreamBody})
+}
+
+type pairedProxyOptions struct {
+	upstreamBody string   // script written as the upstream server
+	upstreamArg  string   // overrides --upstream when set
+	policyExtra  string   // extra lines under the demo agent
+	env          []string // extra proxy environment
+}
+
+func startPairedProxyWith(t *testing.T, opts pairedProxyOptions) (*exec.Cmd, io.WriteCloser, string, ed25519.PublicKey) {
+	t.Helper()
 	binary := buildBinary(t)
 	keygenOut, err := exec.Command(binary, "keygen", "--print-env").Output()
 	if err != nil {
@@ -357,16 +370,19 @@ func startPairedProxy(t *testing.T, upstreamBody string) (*exec.Cmd, io.WriteClo
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")
 	policyPath := filepath.Join(dir, "policy.yaml")
-	body := "agents:\n  demo:\n    mode: allow\naudit:\n  enabled: true\n  action_pairing: true\n  path: " + path + "\n  sign_ed25519_key_env: NOCKGUARD_AUDIT_ED25519_KEY\n"
+	body := "agents:\n  demo:\n    mode: allow\n" + opts.policyExtra + "audit:\n  enabled: true\n  action_pairing: true\n  path: " + path + "\n  sign_ed25519_key_env: NOCKGUARD_AUDIT_ED25519_KEY\n"
 	if err := os.WriteFile(policyPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	server := filepath.Join(dir, "server.sh")
-	if err := os.WriteFile(server, []byte(upstreamBody), 0o700); err != nil {
-		t.Fatal(err)
+	server := opts.upstreamArg
+	if server == "" {
+		server = filepath.Join(dir, "server.sh")
+		if err := os.WriteFile(server, []byte(opts.upstreamBody), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cmd := exec.Command(binary, "proxy", "--upstream", server, "--agent", "demo", "--policy", policyPath)
-	cmd.Env = append(os.Environ(), "NOCKGUARD_AUDIT_ED25519_KEY="+seed)
+	cmd.Env = append(append(os.Environ(), "NOCKGUARD_AUDIT_ED25519_KEY="+seed), opts.env...)
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -458,4 +474,115 @@ func TestPairedRunClosesOnSignalWithInFlightDispatch(t *testing.T) {
 		t.Fatalf("signal shutdown took %s", elapsed)
 	}
 	assertClosedWithUnknown(t, path, pub)
+}
+
+// A paired proxy whose upstream cannot be launched never accepted input, so it
+// must not leave an open run that later reads INCOMPLETE.
+func TestPairedRunNotLeftOpenWhenUpstreamFailsToStart(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-server")
+	cmd, _, path, pub := startPairedProxyWith(t, pairedProxyOptions{upstreamArg: missing})
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	select {
+	case err := <-exited:
+		if err == nil {
+			t.Fatal("proxy exited 0 with a missing upstream")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy did not exit with a missing upstream")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if len(data) > 0 {
+		if rows, count, err := audit.VerifyEd25519WithCheckpoint(path, pub); err != nil || rows != count {
+			t.Fatalf("integrity rows=%d checkpoint=%d err=%v", rows, count, err)
+		}
+	}
+	if strings.Contains(string(data), `"run_event":"open"`) && !strings.Contains(string(data), `"run_event":"close"`) {
+		t.Fatalf("launch failure left an unclosed run:\n%s", data)
+	}
+	for _, run := range audit.AssessRuns(data, true, time.Now().Add(91*time.Second)) {
+		if run.Verdict == "INCOMPLETE" {
+			t.Fatalf("launch failure assessed %+v", run)
+		}
+	}
+}
+
+// A line still inside approval when shutdown starts can register a dispatch
+// after the pending-call sweep. Close must wait for that line first: the run
+// either records outcome_unknown for it before run/close, or stays unclosed.
+// A detached upstream child keeps the pipe open so the late forward succeeds
+// and only the shutdown sweep can terminate the action.
+func TestPairedSignalWaitsForLineInApprovalBeforeSweep(t *testing.T) {
+	home, err := os.MkdirTemp("/tmp", "ngh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	pidFile := filepath.Join(home, "child.pid")
+	upstream := "#!/usr/bin/env python3\nimport os, sys, time\nif os.fork() == 0:\n    os.setsid()\n    open(" + strconv.Quote(pidFile) + ", 'w').write(str(os.getpid()))\n    time.sleep(20)\n    sys.exit(0)\ntime.sleep(20)\n"
+	env := []string{"HOME=" + home, "NOCKGUARD_APPROVER=local"}
+	cmd, in, path, pub := startPairedProxyWith(t, pairedProxyOptions{upstreamBody: upstream, policyExtra: "    ask: [\"held_tool\"]\n", env: env})
+	t.Cleanup(func() {
+		if raw, err := os.ReadFile(pidFile); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	waitForTrail(t, path, pub, `"run_event":"open"`)
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if raw, err := os.ReadFile(pidFile); err == nil && len(raw) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("detached upstream child never started")
+		}
+	}
+	if _, err := io.WriteString(in, callLine("1", "held_tool", "x")+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	approvalDir := filepath.Join(home, ".nockguard", "approvals")
+	var id string
+	for i := 0; i < 250 && id == ""; i++ {
+		if held, err := approval.ListPending(approvalDir); err == nil {
+			for _, h := range held {
+				if h.Tool == "held_tool" {
+					id = h.ID
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if id == "" {
+		t.Fatal("held call never appeared in the local approver")
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	// Release the held line after shutdown has started.
+	time.Sleep(20 * time.Millisecond)
+	if err := approval.Decide(approvalDir, id, true); err != nil {
+		t.Logf("approve after SIGTERM: %v", err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy did not exit after SIGTERM")
+	}
+	if rows, count, err := audit.VerifyEd25519WithCheckpoint(path, pub); err != nil || rows != count {
+		t.Fatalf("integrity rows=%d checkpoint=%d err=%v", rows, count, err)
+	}
+	data := mustRead(t, path)
+	if !strings.Contains(string(data), `"run_event":"close"`) {
+		return // unclosed is an honest result
+	}
+	got := audit.AssessRuns(data, true, time.Now())
+	if len(got) != 1 || got[0].Verdict != "LIMITED" {
+		t.Fatalf("closed run must have every dispatch terminated: %+v\n%s", got, data)
+	}
 }

@@ -673,60 +673,6 @@ func (p *StdioProxy) Run() error {
 		if !p.auditor.Signed() {
 			return fmt.Errorf("audit.action_pairing requires a signed audit writer for run lifecycle")
 		}
-		if err := p.auditor.RecordRequired(audit.Event{Agent: p.agent, SchemaVersion: 2, RecordType: "run", RunID: p.actionRunID, RunEvent: "open"}); err != nil {
-			return fmt.Errorf("open audit run: %w", err)
-		}
-		p.logger.Printf("AUDIT-RUN open run_id=%s", p.actionRunID)
-		p.runActive.Store(true)
-		stopHeartbeat := make(chan struct{})
-		var heartbeats sync.WaitGroup
-		heartbeats.Add(1)
-		go func() {
-			defer heartbeats.Done()
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-stopHeartbeat:
-					return
-				case <-ticker.C:
-					if err := p.auditor.RecordRequired(audit.Event{Agent: p.agent, SchemaVersion: 2, RecordType: "run", RunID: p.actionRunID, RunEvent: "heartbeat"}); err != nil {
-						p.logger.Printf("AUDIT-RUN heartbeat failed run_id=%s: %v", p.actionRunID, err)
-						return
-					}
-				}
-			}
-		}()
-		defer func() {
-			p.runStopping.Store(true)
-			close(stopHeartbeat)
-			heartbeatDone := make(chan struct{})
-			go func() { heartbeats.Wait(); close(heartbeatDone) }()
-			select {
-			case <-heartbeatDone:
-			case <-time.After(auditDrainBound):
-				runCloseAllowed = false
-				p.logger.Printf("AUDIT-RUN heartbeat drain timed out run_id=%s", p.actionRunID)
-			}
-			p.runActive.Store(false)
-			if runCloseAllowed && p.auditor.RequiredError() == nil {
-				// Bound the close write so a stuck writer cannot hold the exit.
-				closed := make(chan error, 1)
-				go func() {
-					closed <- p.auditor.RecordRequired(audit.Event{Agent: p.agent, SchemaVersion: 2, RecordType: "run", RunID: p.actionRunID, RunEvent: "close"})
-				}()
-				select {
-				case err := <-closed:
-					if err != nil {
-						p.logger.Printf("AUDIT-RUN close failed run_id=%s: %v", p.actionRunID, err)
-					} else {
-						p.logger.Printf("AUDIT-RUN close run_id=%s", p.actionRunID)
-					}
-				case <-time.After(auditDrainBound):
-					p.logger.Printf("AUDIT-RUN close timed out run_id=%s", p.actionRunID)
-				}
-			}
-		}()
 	}
 
 	cmd := exec.Command(p.upstream[0], p.upstream[1:]...)
@@ -789,6 +735,66 @@ func (p *StdioProxy) Run() error {
 	}
 	defer upstreamIn.Close()
 	waitCh := observeLeaderExit(cmd)
+	if p.actionPairing {
+		// Open the run only once the upstream has launched, so a launch
+		// failure leaves no open run. Input is not read until after this.
+		if err := p.auditor.RecordRequired(audit.Event{Agent: p.agent, SchemaVersion: 2, RecordType: "run", RunID: p.actionRunID, RunEvent: "open"}); err != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = reapLeader(cmd, <-waitCh)
+			return fmt.Errorf("open audit run: %w", err)
+		}
+		p.logger.Printf("AUDIT-RUN open run_id=%s", p.actionRunID)
+		p.runActive.Store(true)
+		stopHeartbeat := make(chan struct{})
+		var heartbeats sync.WaitGroup
+		heartbeats.Add(1)
+		go func() {
+			defer heartbeats.Done()
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopHeartbeat:
+					return
+				case <-ticker.C:
+					if err := p.auditor.RecordRequired(audit.Event{Agent: p.agent, SchemaVersion: 2, RecordType: "run", RunID: p.actionRunID, RunEvent: "heartbeat"}); err != nil {
+						p.logger.Printf("AUDIT-RUN heartbeat failed run_id=%s: %v", p.actionRunID, err)
+						return
+					}
+				}
+			}
+		}()
+		defer func() {
+			p.runStopping.Store(true)
+			close(stopHeartbeat)
+			heartbeatDone := make(chan struct{})
+			go func() { heartbeats.Wait(); close(heartbeatDone) }()
+			select {
+			case <-heartbeatDone:
+			case <-time.After(auditDrainBound):
+				runCloseAllowed = false
+				p.logger.Printf("AUDIT-RUN heartbeat drain timed out run_id=%s", p.actionRunID)
+			}
+			p.runActive.Store(false)
+			if runCloseAllowed && p.auditor.RequiredError() == nil {
+				// Bound the close write so a stuck writer cannot hold the exit.
+				closed := make(chan error, 1)
+				go func() {
+					closed <- p.auditor.RecordRequired(audit.Event{Agent: p.agent, SchemaVersion: 2, RecordType: "run", RunID: p.actionRunID, RunEvent: "close"})
+				}()
+				select {
+				case err := <-closed:
+					if err != nil {
+						p.logger.Printf("AUDIT-RUN close failed run_id=%s: %v", p.actionRunID, err)
+					} else {
+						p.logger.Printf("AUDIT-RUN close run_id=%s", p.actionRunID)
+					}
+				case <-time.After(auditDrainBound):
+					p.logger.Printf("AUDIT-RUN close timed out run_id=%s", p.actionRunID)
+				}
+			}
+		}()
+	}
 
 	errCh := make(chan error, 1)
 	var agentEOF atomic.Bool
@@ -816,18 +822,7 @@ func (p *StdioProxy) Run() error {
 		if p.actionPairing {
 			p.runStopping.Store(true)
 			auditCleanupStarted = true
-			audited := make(chan struct{})
-			go func() {
-				p.finishPendingActions(pendingCalls, "shutdown")
-				p.drainAudits()
-				close(audited)
-			}()
-			select {
-			case <-audited:
-				runCloseAllowed = p.waitInputIdle(inputDone)
-			case <-time.After(auditDrainBound):
-				p.logger.Printf("AUDIT-RUN signal drain timed out run_id=%s", p.actionRunID)
-			}
+			runCloseAllowed, _ = p.drainRunForClose(inputDone, pendingCalls, "shutdown")
 		}
 		return fmt.Errorf("proxy received %s", sig)
 	}
@@ -969,33 +964,38 @@ func (p *StdioProxy) Run() error {
 	defer cancelAudit()
 	audited := make(chan struct{})
 	auditCleanupStarted = true
-	go func() {
-		cause := "upstream_exit"
-		if outputTimedOut || shutdownTimedOut {
-			cause = "timeout"
+	cause := "upstream_exit"
+	if outputTimedOut || shutdownTimedOut {
+		cause = "timeout"
+	}
+	if p.actionPairing {
+		// The group is already killed. A signal during this bounded drain
+		// still returns its error once the drain and close decision finish.
+		allowed, drainTimedOut := p.drainRunForClose(inputDone, pendingCalls, cause)
+		runCloseAllowed = allowed
+		if drainTimedOut {
+			shutdownTimedOut = true
+			p.logger.Print("upstream exited: audit drain deadline reached")
 		}
-		p.finishPendingActions(pendingCalls, cause)
-		p.drainAudits()
-		close(audited)
-	}()
-	select {
-	case <-audited:
-		if p.actionPairing {
-			runCloseAllowed = p.waitInputIdle(inputDone)
+		select {
+		case sig := <-signals:
+			return fmt.Errorf("proxy received %s", sig)
+		default:
 		}
-	case <-auditShutdown.Done():
-		shutdownTimedOut = true
-		p.logger.Print("upstream exited: audit drain deadline reached")
-	case sig := <-signals:
-		if p.actionPairing {
-			// The group is already killed; finish the bounded drain and close.
-			select {
-			case <-audited:
-				runCloseAllowed = p.waitInputIdle(inputDone)
-			case <-auditShutdown.Done():
-			}
+	} else {
+		go func() {
+			p.finishPendingActions(pendingCalls, cause)
+			p.drainAudits()
+			close(audited)
+		}()
+		select {
+		case <-audited:
+		case <-auditShutdown.Done():
+			shutdownTimedOut = true
+			p.logger.Print("upstream exited: audit drain deadline reached")
+		case sig := <-signals:
+			return fmt.Errorf("proxy received %s", sig)
 		}
-		return fmt.Errorf("proxy received %s", sig)
 	}
 	if !outputTimedOut {
 		select {
@@ -1026,12 +1026,18 @@ func (p *StdioProxy) Run() error {
 	return nil
 }
 
-// waitInputIdle reports whether a paired run's input goroutine has stopped
-// accepting calls. runStopping is already set, so the goroutine either returned
-// or will refuse the next line; holding inputLineMu once proves no accepted
-// line is still being handled. A client that keeps stdin open is therefore
-// not waited on. Bounded by auditDrainBound.
-func (p *StdioProxy) waitInputIdle(inputDone <-chan struct{}) bool {
+// drainRunForClose runs a paired run's shutdown in the design's order, within
+// one auditDrainBound. runStopping is already set, so the input goroutine
+// either returned or will refuse its next line. First wait until it is idle:
+// holding inputLineMu once proves no accepted line (approval, limiter, audit
+// write or upstream write) can still register a dispatch. Only then record
+// outcome_unknown for still-tracked dispatches and drain queued audits. A
+// client that keeps stdin open is not waited on. It reports whether run/close
+// may be written, and whether the audit drain itself ran out of time. If the
+// input does not go idle in time, nothing is swept and the run stays unclosed.
+func (p *StdioProxy) drainRunForClose(inputDone <-chan struct{}, pending *sync.Map, cause string) (closeAllowed, drainTimedOut bool) {
+	deadline := time.NewTimer(auditDrainBound)
+	defer deadline.Stop()
 	idle := make(chan struct{})
 	go func() {
 		p.inputLineMu.Lock()
@@ -1041,11 +1047,23 @@ func (p *StdioProxy) waitInputIdle(inputDone <-chan struct{}) bool {
 	select {
 	case <-inputDone:
 	case <-idle:
-	case <-time.After(auditDrainBound):
+	case <-deadline.C:
 		p.logger.Printf("AUDIT-RUN input drain timed out run_id=%s", p.actionRunID)
-		return false
+		return false, false
 	}
-	return true
+	audited := make(chan struct{})
+	go func() {
+		p.finishPendingActions(pending, cause)
+		p.drainAudits()
+		close(audited)
+	}()
+	select {
+	case <-audited:
+		return true, false
+	case <-deadline.C:
+		p.logger.Printf("AUDIT-RUN audit drain timed out run_id=%s", p.actionRunID)
+		return false, true
+	}
 }
 
 // mcpDecision is the transport-independent verdict for one inbound JSON-RPC
