@@ -57,19 +57,22 @@ func sortedKeys(m map[string]bool) []string {
 	return out
 }
 
-func TestWallDecisionFilterMatchesEmittedDecisions(t *testing.T) {
+func TestWallDecisionFilterMatchesCurrentAndHistoricalDecisions(t *testing.T) {
 	emitted := goSourceDecisions(t)
 	if len(emitted) < 10 {
 		t.Fatalf("scan found only %v; the emit patterns no longer match the source", emitted)
 	}
+	// Old signed trails still contain the synthetic approval row removed in 0.10.0 cleanup.
+	readable := append(emitted, "state-write")
+	sort.Strings(readable)
 	known := map[string]bool{}
 	for d := range decisionBuckets {
 		if d != "" && d != DecisionUnparseable { // unparseable is Wall-synthesized, never written to the audit log
 			known[d] = true
 		}
 	}
-	if got, want := strings.Join(emitted, ","), strings.Join(sortedKeys(known), ","); got != want {
-		t.Fatalf("decisionBuckets differs from decisions emitted in Go source:\n source: %s\n buckets: %s", got, want)
+	if got, want := strings.Join(readable, ","), strings.Join(sortedKeys(known), ","); got != want {
+		t.Fatalf("decisionBuckets differs from current and historical decisions:\n readable: %s\n buckets: %s", got, want)
 	}
 	page, err := os.ReadFile("../../cmd/nockguard-wall/index.html")
 	if err != nil {
@@ -80,7 +83,7 @@ func TestWallDecisionFilterMatchesEmittedDecisions(t *testing.T) {
 	for _, m := range regexp.MustCompile(`<option value="([a-z-]+)"`).FindAllStringSubmatch(sel, -1) {
 		filter[m[1]] = true
 	}
-	if got, want := strings.Join(sortedKeys(filter), ","), strings.Join(emitted, ","); got != want {
-		t.Fatalf("Wall decision filter differs from decisions emitted in Go source:\n filter: %s\n source: %s", got, want)
+	if got, want := strings.Join(sortedKeys(filter), ","), strings.Join(readable, ","); got != want {
+		t.Fatalf("Wall decision filter differs from current and historical decisions:\n filter: %s\n readable: %s", got, want)
 	}
 }
