@@ -69,6 +69,23 @@ legacy trails are `UNVERIFIED`, and invalid run structure is `BROKEN`. The
 dispatch itself never proves execution or success. Source:
 `internal/audit/audit.go`, `internal/proxy/stdio.go`.
 
+With pairing enabled, a complete client-initiated `tools/list` pagination chain
+publishes a session catalog. Each advertised full tool definition receives a
+versioned RFC 8785 SHA-256 digest. Applicable v2 decision and observation rows
+sign `tool_hash_version`, `tool_definition_hash`, and `tool_pin_status`:
+`unpinned` for a hashable observed definition, `unobserved` before a complete
+listing or after `notifications/tools/list_changed`, and `unhashable` when a
+definition has ambiguous keys, invalid shape, or an unsupported number. A
+failed, repeated, or oversized page discards the incomplete catalog. No raw
+definition or schema is written to the trail. This records the definition the
+server advertised; it does not establish how the server behaved when called.
+In observation-only mode, raw upstream cursors can be reused across listing
+generations, so even a completed paginated catalog leaves later calls
+`unobserved` without an attached digest. A single page complete listing can
+bind its observed digest to later calls.
+These observation statuses do not enforce operator pins. Configured pins and
+strict pin mode are a separate follow-up.
+
 When pairing is enabled, the writer resumes unsigned `run_seq` counters from
 valid v2 rows already in the trail. Unsigned audit opens without pairing retain
 the legacy path and do not scan the trail for sequence state.
