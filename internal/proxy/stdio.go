@@ -42,6 +42,7 @@ type auditSequenceRange struct {
 
 type StdioProxy struct {
 	upstream      []string
+	upstreamID    string
 	agent         string
 	engine        *policy.Engine
 	validator     *validate.Validator
@@ -78,21 +79,26 @@ type StdioProxy struct {
 	cardMu      sync.Mutex // serializes currentCard updates
 
 	// Audit ordering: track request sequence to ensure audits are emitted in request order
-	auditSeq      uint64                    // next request sequence, protected by auditMutex
-	auditTodo     map[uint64][]*audit.Event // buffered audits awaiting emission in sequence order
-	auditMutex    sync.Mutex
-	auditNext     uint64               // next sequence number ready to emit
-	auditResolved []auditSequenceRange // compact sorted ranges of resolved sequences
-	auditPending  map[uint64]struct{}  // allocated sequences whose audit lifecycle is unsettled
-	auditFailed   map[uint64]struct{}  // action sequences with a row rejected before append
-	cardAfterSeq  map[uint64]int       // seq -> card state after that commit
-	requestIDMu   sync.Mutex
-	activeIDs     map[uint64]json.RawMessage // request ids held until their agent-facing response is delivered
-	actionPairing bool
-	actionRunID   string
-	actionInitErr error
-	actionSeq     uint64
-	actionIDs     map[uint64]string // audit request sequence -> generated action id
+	auditSeq       uint64                    // next request sequence, protected by auditMutex
+	auditTodo      map[uint64][]*audit.Event // buffered audits awaiting emission in sequence order
+	auditMutex     sync.Mutex
+	auditNext      uint64               // next sequence number ready to emit
+	auditResolved  []auditSequenceRange // compact sorted ranges of resolved sequences
+	auditPending   map[uint64]struct{}  // allocated sequences whose audit lifecycle is unsettled
+	auditFailed    map[uint64]struct{}  // action sequences with a row rejected before append
+	cardAfterSeq   map[uint64]int       // seq -> card state after that commit
+	requestIDMu    sync.Mutex
+	activeIDs      map[uint64]json.RawMessage // request ids held until their agent-facing response is delivered
+	actionPairing  bool
+	actionRunID    string
+	actionInitErr  error
+	actionSeq      uint64
+	actionIDs      map[uint64]string // audit request sequence -> generated action id
+	catalog        toolCatalog
+	actionObserved sync.Map // action id -> definition observed at first decision
+	runStopping    atomic.Bool
+	runActive      atomic.Bool
+	inputLineMu    sync.Mutex // held by a paired proxy while it handles one accepted input line
 }
 
 // writeAgentLine writes one newline-terminated line to the agent-facing channel
@@ -199,6 +205,11 @@ func (p *StdioProxy) WithResolver(r secrets.Resolver) *StdioProxy {
 	return p
 }
 
+func (p *StdioProxy) WithUpstreamID(id string) *StdioProxy {
+	p.upstreamID = id
+	return p
+}
+
 func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, validator *validate.Validator, limiter *ratelimit.Limiter, auditor *audit.Auditor, forwarder *forward.Forwarder, logger *log.Logger) *StdioProxy {
 	resolver := secrets.Chain()
 	p := &StdioProxy{
@@ -226,6 +237,10 @@ func NewStdioProxy(upstream []string, agent string, engine *policy.Engine, valid
 			p.actionInitErr = fmt.Errorf("audit.action_pairing requires an available durable audit writer")
 			return p
 		}
+		if engine.HasToolPinConstraints(agent) && !auditor.SigningEnabled() {
+			p.actionInitErr = fmt.Errorf("tool pins require a signed audit writer")
+			return p
+		}
 		var runID [16]byte
 		if _, err := rand.Read(runID[:]); err != nil {
 			p.actionInitErr = fmt.Errorf("initialize action audit run id: %w", err)
@@ -250,7 +265,8 @@ func (p *StdioProxy) appendAudit(seq uint64, tool, decision, reason string, refs
 // normal tool-call audit rows leave the field absent.
 func (p *StdioProxy) appendAuditWithApprovalActor(seq uint64, tool, decision, reason string, refs *extract.References, approvalActor string) {
 	p.auditMutex.Lock()
-	defer p.auditMutex.Unlock()
+	actionID := p.actionIDs[seq]
+	p.auditMutex.Unlock()
 
 	// Build the audit event (no card stamp yet — that happens at flush time).
 	// Allocate on the heap so the pointer remains valid after this function returns
@@ -261,9 +277,15 @@ func (p *StdioProxy) appendAuditWithApprovalActor(seq uint64, tool, decision, re
 		Reason:        reason,
 		ApprovalActor: approvalActor,
 	}
-	if actionID := p.actionIDs[seq]; actionID != "" {
+	if actionID != "" {
 		p.setActionFields(ev, actionID)
+		// Resolve the observation before auditMutex: a cache miss locks
+		// catalog.mu, which must never be acquired while auditMutex is held.
+		p.applyToolObservation(ev)
 	}
+
+	p.auditMutex.Lock()
+	defer p.auditMutex.Unlock()
 
 	// Set extracted references if provided.
 	if refs != nil {
@@ -508,6 +530,7 @@ func (p *StdioProxy) audit(tool, decision, reason string, refs *extract.Referenc
 	}
 	if len(actionIDs) > 0 && actionIDs[0] != "" {
 		p.setActionFields(&ev, actionIDs[0])
+		p.applyToolObservation(&ev)
 	}
 
 	// Set extracted references if provided.
@@ -661,6 +684,12 @@ func (p *StdioProxy) Run() error {
 	if p.actionInitErr != nil {
 		return p.actionInitErr
 	}
+	runCloseAllowed := false
+	if p.actionPairing {
+		if !p.auditor.Signed() {
+			return fmt.Errorf("audit.action_pairing requires a signed audit writer for run lifecycle")
+		}
+	}
 
 	cmd := exec.Command(p.upstream[0], p.upstream[1:]...)
 	cmd.Stderr = os.Stderr
@@ -722,12 +751,73 @@ func (p *StdioProxy) Run() error {
 	}
 	defer upstreamIn.Close()
 	waitCh := observeLeaderExit(cmd)
+	if p.actionPairing {
+		// Open the run only once the upstream has launched, so a launch
+		// failure leaves no open run. Input is not read until after this.
+		if err := p.auditor.RecordRequired(audit.Event{Agent: p.agent, SchemaVersion: 2, RecordType: "run", RunID: p.actionRunID, RunEvent: "open"}); err != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = reapLeader(cmd, <-waitCh)
+			return fmt.Errorf("open audit run: %w", err)
+		}
+		p.logger.Printf("AUDIT-RUN open run_id=%s", p.actionRunID)
+		p.runActive.Store(true)
+		stopHeartbeat := make(chan struct{})
+		var heartbeats sync.WaitGroup
+		heartbeats.Add(1)
+		go func() {
+			defer heartbeats.Done()
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopHeartbeat:
+					return
+				case <-ticker.C:
+					if err := p.auditor.RecordRequired(audit.Event{Agent: p.agent, SchemaVersion: 2, RecordType: "run", RunID: p.actionRunID, RunEvent: "heartbeat"}); err != nil {
+						p.logger.Printf("AUDIT-RUN heartbeat failed run_id=%s: %v", p.actionRunID, err)
+						return
+					}
+				}
+			}
+		}()
+		defer func() {
+			p.runStopping.Store(true)
+			close(stopHeartbeat)
+			heartbeatDone := make(chan struct{})
+			go func() { heartbeats.Wait(); close(heartbeatDone) }()
+			select {
+			case <-heartbeatDone:
+			case <-time.After(auditDrainBound):
+				runCloseAllowed = false
+				p.logger.Printf("AUDIT-RUN heartbeat drain timed out run_id=%s", p.actionRunID)
+			}
+			p.runActive.Store(false)
+			if runCloseAllowed && p.auditor.RequiredError() == nil {
+				// Bound the close write so a stuck writer cannot hold the exit.
+				closed := make(chan error, 1)
+				go func() {
+					closed <- p.auditor.RecordRequired(audit.Event{Agent: p.agent, SchemaVersion: 2, RecordType: "run", RunID: p.actionRunID, RunEvent: "close"})
+				}()
+				select {
+				case err := <-closed:
+					if err != nil {
+						p.logger.Printf("AUDIT-RUN close failed run_id=%s: %v", p.actionRunID, err)
+					} else {
+						p.logger.Printf("AUDIT-RUN close run_id=%s", p.actionRunID)
+					}
+				case <-time.After(auditDrainBound):
+					p.logger.Printf("AUDIT-RUN close timed out run_id=%s", p.actionRunID)
+				}
+			}
+		}()
+	}
 
 	errCh := make(chan error, 1)
 	var agentEOF atomic.Bool
 	var outputFailed atomic.Bool
 	outputErrCh := make(chan error, 1)
 	upstreamDone := make(chan struct{})
+	inputDone := make(chan struct{})
 	outputProgress := make(chan struct{}, 1)
 
 	pendingCalls := &sync.Map{}
@@ -739,7 +829,22 @@ func (p *StdioProxy) Run() error {
 		}
 	}()
 
+	// stopOnSignal kills the upstream group. A paired run then stops accepting
+	// input and runs the same bounded drain as an upstream exit: outcome_unknown
+	// for still-tracked dispatches, then run/close if the run is healthy.
+	// Legacy proxies keep the immediate return.
+	stopOnSignal := func(sig os.Signal) error {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if p.actionPairing {
+			p.runStopping.Store(true)
+			auditCleanupStarted = true
+			runCloseAllowed, _ = p.drainRunForClose(inputDone, pendingCalls, "shutdown")
+		}
+		return fmt.Errorf("proxy received %s", sig)
+	}
+
 	go func() {
+		defer close(inputDone)
 		if err := p.agentToUpstream(os.Stdin, upstreamIn, pendingCalls); err != nil {
 			errCh <- fmt.Errorf("agent->upstream: %w", err)
 		} else {
@@ -763,8 +868,12 @@ func (p *StdioProxy) Run() error {
 		outputComplete = true
 	case observed = <-waitCh:
 	case sig := <-signals:
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		return fmt.Errorf("proxy received %s", sig)
+		return stopOnSignal(sig)
+	}
+	if p.actionPairing {
+		// Only a paired run stops accepting input here; legacy proxies keep
+		// forwarding client input during the output drain.
+		p.runStopping.Store(true)
 	}
 	// Clean output EOF bounds the leader wait to one second. When the leader
 	// exits first, let a reading client receive output while it keeps flowing,
@@ -792,8 +901,7 @@ func (p *StdioProxy) Run() error {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			observed = <-waitCh
 		case sig := <-signals:
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			return fmt.Errorf("proxy received %s", sig)
+			return stopOnSignal(sig)
 		}
 	} else {
 		idle = time.NewTimer(upstreamShutdownBound)
@@ -822,8 +930,7 @@ func (p *StdioProxy) Run() error {
 				drainLimit = "absolute cap"
 				break drainOutput
 			case sig := <-signals:
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				return fmt.Errorf("proxy received %s", sig)
+				return stopOnSignal(sig)
 			}
 		}
 		// If EOF and a deadline became ready together, the completed drain wins.
@@ -859,8 +966,7 @@ func (p *StdioProxy) Run() error {
 			shutdownTimedOut = true
 			p.logger.Print("upstream exited: client reply deadline reached; abandoning remaining replies")
 		case sig := <-signals:
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			return fmt.Errorf("proxy received %s", sig)
+			return stopOnSignal(sig)
 		}
 	}
 	// Linux and macOS waitid leave the leader unreaped until this kill, so
@@ -874,22 +980,38 @@ func (p *StdioProxy) Run() error {
 	defer cancelAudit()
 	audited := make(chan struct{})
 	auditCleanupStarted = true
-	go func() {
-		cause := "upstream_exit"
-		if outputTimedOut || shutdownTimedOut {
-			cause = "timeout"
+	cause := "upstream_exit"
+	if outputTimedOut || shutdownTimedOut {
+		cause = "timeout"
+	}
+	if p.actionPairing {
+		// The group is already killed. A signal during this bounded drain
+		// still returns its error once the drain and close decision finish.
+		allowed, drainTimedOut := p.drainRunForClose(inputDone, pendingCalls, cause)
+		runCloseAllowed = allowed
+		if drainTimedOut {
+			shutdownTimedOut = true
+			p.logger.Print("upstream exited: audit drain deadline reached")
 		}
-		p.finishPendingActions(pendingCalls, cause)
-		p.drainAudits()
-		close(audited)
-	}()
-	select {
-	case <-audited:
-	case <-auditShutdown.Done():
-		shutdownTimedOut = true
-		p.logger.Print("upstream exited: audit drain deadline reached")
-	case sig := <-signals:
-		return fmt.Errorf("proxy received %s", sig)
+		select {
+		case sig := <-signals:
+			return fmt.Errorf("proxy received %s", sig)
+		default:
+		}
+	} else {
+		go func() {
+			p.finishPendingActions(pendingCalls, cause)
+			p.drainAudits()
+			close(audited)
+		}()
+		select {
+		case <-audited:
+		case <-auditShutdown.Done():
+			shutdownTimedOut = true
+			p.logger.Print("upstream exited: audit drain deadline reached")
+		case sig := <-signals:
+			return fmt.Errorf("proxy received %s", sig)
+		}
 	}
 	if !outputTimedOut {
 		select {
@@ -920,6 +1042,47 @@ func (p *StdioProxy) Run() error {
 	return nil
 }
 
+// drainRunForClose runs a paired run's shutdown in the design's order, within
+// one auditDrainBound. runStopping is already set, so the input goroutine
+// either returned or will refuse its next line. First wait until it is idle:
+// holding inputLineMu once proves no accepted line (approval, limiter, audit
+// write or upstream write) can still register a dispatch. Only then record
+// outcome_unknown for still-tracked dispatches and drain queued audits. A
+// client that keeps stdin open is not waited on. It reports whether run/close
+// may be written, and whether the bounded drain ran out of time, in either the
+// input-idle or the audit phase. If the input does not go idle in time,
+// nothing is swept and the run stays unclosed.
+func (p *StdioProxy) drainRunForClose(inputDone <-chan struct{}, pending *sync.Map, cause string) (closeAllowed, drainTimedOut bool) {
+	deadline := time.NewTimer(auditDrainBound)
+	defer deadline.Stop()
+	idle := make(chan struct{})
+	go func() {
+		p.inputLineMu.Lock()
+		p.inputLineMu.Unlock()
+		close(idle)
+	}()
+	select {
+	case <-inputDone:
+	case <-idle:
+	case <-deadline.C:
+		p.logger.Printf("AUDIT-RUN input drain timed out run_id=%s", p.actionRunID)
+		return false, true
+	}
+	audited := make(chan struct{})
+	go func() {
+		p.finishPendingActions(pending, cause)
+		p.drainAudits()
+		close(audited)
+	}()
+	select {
+	case <-audited:
+		return true, false
+	case <-deadline.C:
+		p.logger.Printf("AUDIT-RUN audit drain timed out run_id=%s", p.actionRunID)
+		return false, true
+	}
+}
+
 // mcpDecision is the transport-independent verdict for one inbound JSON-RPC
 // message run through the enforcement gate. Both the stdio proxy and the HTTP
 // listener consume it: the stdio proxy frames the fields as newline lines on
@@ -942,6 +1105,7 @@ type pendingCard struct {
 	auditSeq             uint64             // sequence number for audit ordering
 	actionID             string
 	requestID            json.RawMessage
+	observed             toolObservation // frozen through a possible late response
 	mu                   sync.Mutex
 	observation          string
 	lateResponseRecorded bool
@@ -949,7 +1113,8 @@ type pendingCard struct {
 	answered             bool
 }
 type toolsListSeq struct {
-	seq uint64
+	seq     uint64
+	buildID uint64
 }
 
 type mcpDecision struct {
@@ -1016,6 +1181,8 @@ func (p *StdioProxy) queueActionID(seq uint64, actionID string) {
 	p.auditMutex.Unlock()
 }
 
+// appendActionObservation must be called with card.mu held (observeAction),
+// which serializes card.observed across response, timeout and cancel paths.
 func (p *StdioProxy) appendActionObservation(seq uint64, card *pendingCard, observation, cause, responseClass string, mcpIsError *bool) error {
 	if card == nil || card.actionID == "" {
 		return nil
@@ -1037,6 +1204,14 @@ func (p *StdioProxy) appendActionObservation(seq uint64, card *pendingCard, obse
 	if card.refs.NockID > 0 {
 		ev.NockID = card.refs.NockID
 	}
+	if card.observed.status == "" {
+		if stored, ok := p.actionObserved.Load(card.actionID); ok {
+			card.observed = stored.(toolObservation)
+		} else {
+			card.observed, _ = p.pinObservation(card.tool, p.catalog.observe(card.tool))
+		}
+	}
+	setToolObservationFields(&ev, card.observed)
 
 	p.auditMutex.Lock()
 	if seq < p.auditNext || p.auditSequenceResolvedLocked(seq) {
@@ -1073,7 +1248,11 @@ func (p *StdioProxy) observeAction(card *pendingCard, observation, cause, respon
 	} else {
 		return nil
 	}
-	return p.appendActionObservation(card.auditSeq, card, observation, cause, responseClass, mcpIsError)
+	err := p.appendActionObservation(card.auditSeq, card, observation, cause, responseClass, mcpIsError)
+	if observation != "late_response_observed" {
+		p.actionObserved.Delete(card.actionID)
+	}
+	return err
 }
 
 func (p *StdioProxy) markActionUnknown(card *pendingCard, cause string) error {
@@ -1343,9 +1522,41 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 	}
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
-	for scanner.Scan() {
+	// A paired proxy holds inputLineMu while it handles one line, so run close
+	// can tell an accepted line in progress from a goroutine idle in Scan. The
+	// lock is taken before the runStopping check: a line that saw the run still
+	// accepting is finished before close proceeds.
+	lineLocked := false
+	releaseLine := func() {
+		if lineLocked {
+			lineLocked = false
+			p.inputLineMu.Unlock()
+		}
+	}
+	defer releaseLine()
+	for ; scanner.Scan(); releaseLine() {
+		if p.actionPairing {
+			p.inputLineMu.Lock()
+			lineLocked = true
+		}
+		if p.actionPairing && p.runStopping.Load() {
+			return fmt.Errorf("audit run is shutting down")
+		}
+		listingCandidate := false
+		if p.actionPairing {
+			var candidate jsonrpc.Message
+			if json.Unmarshal(scanner.Bytes(), &candidate) == nil && candidate.Method == "tools/list" {
+				listingCandidate = true
+				if _, exact := exactListParams(scanner.Bytes()); !exact {
+					p.catalog.invalidate()
+				}
+			}
+		}
 		if p.requiredAudit {
 			if err := p.auditor.RequiredError(); err != nil {
+				if listingCandidate {
+					p.catalog.invalidate()
+				}
 				p.logger.Printf("AUDIT-ERROR agent=%s audit failing: calls refused: %v", p.agent, err)
 				id := json.RawMessage("null")
 				if msg, decodeErr := jsonrpc.Decode(scanner.Bytes()); decodeErr == nil {
@@ -1367,6 +1578,27 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 		var canonicalMsg *jsonrpc.Message
 		if p.actionPairing {
 			canonicalTopLevel, canonicalLine, canonicalMsg, canonicalFailure = canonicalizeMessage(scanner.Bytes())
+			// Check before action creation and duplicate-ID auditing, which also record names.
+			if canonicalFailure == canonicalMessageOK && canonicalMsg != nil {
+				kind, name := "method", canonicalMsg.Method
+				if name == "tools/call" {
+					kind = "tool"
+					name, _, _ = canonicalToolCall(canonicalMsg.Params)
+				}
+				if d, rejected := p.rejectOversizedName(kind, name, canonicalMsg.ID); rejected {
+					if listingCandidate {
+						p.catalog.invalidate()
+					}
+					p.resolveAudit(seq)
+					if p.requiredAudit && p.auditor.RequiredError() != nil {
+						d.rejectCode, d.rejectMsg = -32603, AuditBeforeForwardError
+					}
+					if err := p.rejectToAgent(d.rejectID, d.rejectCode, d.rejectMsg); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			if canonicalFailure == canonicalMessageOK && canonicalMsg != nil && canonicalMsg.Method == "tools/call" {
 				var err error
 				actionID, err = p.newActionID()
@@ -1380,6 +1612,9 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			}
 		}
 		if p.actionPairing && canonicalMsg != nil && canonicalMsg.IsRequest() && p.requestIDInUse(pending, canonicalMsg.ID) {
+			if listingCandidate {
+				p.catalog.invalidate()
+			}
 			if actionID != "" {
 				tool, params, _ := canonicalToolCall(canonicalMsg.Params)
 				refs := extract.FromToolCall(tool, params)
@@ -1409,6 +1644,7 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 		}
 		if p.requiredAudit && p.auditor.RequiredError() != nil {
 			p.resolveAudit(seq)
+			p.actionObserved.Delete(actionID)
 			id := d.rejectID
 			if d.forward != nil {
 				if msg, err := jsonrpc.Decode(d.forward); err == nil {
@@ -1424,13 +1660,37 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			// tools/list (always a request) — track the id so the response can be
 			// filtered by upstreamToAgent. Mark as deferred so we don't resolve
 			// until after filtering and appending hide audits.
-			pending.Store(string(d.toolsListID), toolsListSeq{seq: seq})
+			buildID := uint64(0)
+			if p.actionPairing {
+				params, exact := exactListParams(scanner.Bytes())
+				if !exact {
+					p.catalog.invalidate()
+				} else {
+					buildID = p.catalog.beginList(params)
+				}
+				if buildID == 0 && p.engine.HasToolPinConstraints(p.agent) {
+					p.logger.Printf("TOOL-CATALOG-DISCARDED agent=%s reason=unattributed-list", p.agent)
+					// tools/list creates no action, so a refused listing is a
+					// method refusal: an action-less block row would make a
+					// paired run BROKEN.
+					p.appendAudit(seq, "tools/list", "method-deny", "tool_catalog_refresh_required", nil)
+					p.resolveAudit(seq)
+					if err := p.rejectToAgent(d.toolsListID, -32603, "nockguard: tool catalog refresh required"); err != nil {
+						return err
+					}
+					continue
+				}
+			}
+			pending.Store(string(d.toolsListID), toolsListSeq{seq: seq, buildID: buildID})
 			if p.actionPairing {
 				p.trackRequestID(seq, d.toolsListID)
 			}
 			deferred = true
 		}
 		if d.reject {
+			if listingCandidate {
+				p.catalog.invalidate()
+			}
 			p.resolveAudit(seq)
 			if actionID != "" {
 				card := d.actionCard(seq, actionID)
@@ -1453,15 +1713,68 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 			if p.actionPairing && request.Method == "notifications/cancelled" {
 				p.markCancelledAction(pending, cancellationRequestID(&request))
 			}
+			// Serialize the last pin check and durable dispatch with catalog
+			// invalidation. Dispatch is the authorization point: a notification
+			// after it blocks later calls, while this call is already in flight.
+			// Release the lock before upstream I/O so a blocked write cannot stop
+			// the response reader from processing list_changed.
+			catalogLocked := request.Method == "tools/call" && p.engine.HasToolPinConstraints(p.agent)
+			if catalogLocked {
+				p.catalog.mu.Lock()
+				observed := toolObservation{status: "unobserved"}
+				if !p.catalog.publishedPaginated {
+					if current, ok := p.catalog.published[d.tool]; ok {
+						observed = current
+					}
+				}
+				current, cause := p.pinObservation(d.tool, observed)
+				if cause != "" {
+					p.catalog.mu.Unlock()
+					if actionID != "" {
+						p.actionObserved.Store(actionID, current)
+					}
+					p.logger.Printf("TOOL-PIN-BLOCK agent=%s tool=%s cause=%s", p.agent, d.tool, cause)
+					p.resolveAudit(seq)
+					p.audit(d.tool, "block", cause, d.refsForAudit, actionID)
+					if actionID != "" {
+						card := d.actionCard(seq, actionID)
+						card.observed = current
+						if err := p.observeAction(card, "not_forwarded", cause, "", nil); err != nil {
+							p.logger.Printf("AUDIT-ERROR agent=%s tool=%s: %v", p.agent, d.tool, err)
+						}
+					}
+					code, reason := -32600, "nockguard: tool definition is not approved"
+					if p.requiredAudit && p.auditor.RequiredError() != nil {
+						code, reason = -32603, AuditBeforeForwardError
+					}
+					if err := p.rejectToAgent(request.ID, code, reason); err != nil {
+						return err
+					}
+					continue
+				}
+				// The dispatch row below runs with catalog.mu held. Cache the
+				// checked observation so applyToolObservation never calls
+				// catalog.observe (which locks catalog.mu) for this action.
+				if actionID != "" {
+					p.actionObserved.Store(actionID, current)
+				}
+			}
 			if p.requiredAudit && request.Method == "tools/call" {
 				p.audit(d.tool, "dispatch", "required-audit-before-forward", d.refsForAudit, actionID)
 				if p.auditor.RequiredError() != nil {
+					if catalogLocked {
+						p.catalog.mu.Unlock()
+					}
 					p.resolveAudit(seq)
+					p.actionObserved.Delete(actionID)
 					if err := p.rejectToAgent(request.ID, -32603, AuditBeforeForwardError); err != nil {
 						return err
 					}
 					continue
 				}
+			}
+			if catalogLocked {
+				p.catalog.mu.Unlock()
 			}
 			// Register response state before the write: an upstream may reply while
 			// Write is still returning, and the response reader must be able to
@@ -1478,7 +1791,11 @@ func (p *StdioProxy) agentToUpstream(r io.Reader, w io.Writer, pending *sync.Map
 				pendingCard.requestID = append(json.RawMessage(nil), d.forwardID...)
 				pending.Store(string(d.forwardID), pendingCard)
 			}
-			if _, writeErr := fmt.Fprintf(w, "%s\n", d.forward); writeErr != nil {
+			_, writeErr := fmt.Fprintf(w, "%s\n", d.forward)
+			if writeErr != nil {
+				if request.Method == "tools/list" {
+					p.catalog.invalidate()
+				}
 				id := d.forwardID
 				if id == nil {
 					id = d.toolsListID
@@ -1590,6 +1907,20 @@ func (p *StdioProxy) decide(line []byte, seq uint64) mcpDecision {
 	return p.decideCanonical(topLevel, canonicalLine, msg, failure, seq)
 }
 
+// maxRequestNameBytes bounds agent-controlled method and tool names before audit or dispatch.
+const maxRequestNameBytes = 256
+
+func (p *StdioProxy) rejectOversizedName(kind, name string, id json.RawMessage) (mcpDecision, bool) {
+	if len(name) <= maxRequestNameBytes {
+		return mcpDecision{}, false
+	}
+	// Keep the diagnostic small and valid UTF-8 so signed bytes survive JSON decoding.
+	prefix := strings.ToValidUTF8(name[:32], "�")
+	p.auditMethod(prefix, "method-deny", fmt.Sprintf("oversized-%s-name bytes=%d prefix=%q", kind, len(name), prefix))
+	return mcpDecision{reject: true, rejectID: id, rejectCode: -32600,
+		rejectMsg: "nockguard: method or tool name exceeds 256 bytes"}, true
+}
+
 func (p *StdioProxy) decideCanonical(topLevel map[string]json.RawMessage, canonicalLine []byte, msg *jsonrpc.Message, failure canonicalMessageFailure, seq uint64) mcpDecision {
 	switch failure {
 	case canonicalMessageUndecodable:
@@ -1611,6 +1942,10 @@ func (p *StdioProxy) decideCanonical(topLevel map[string]json.RawMessage, canoni
 		p.logger.Printf("REJECT agent=%s reason=undecodable-after-canonicalize", p.agent)
 		return mcpDecision{reject: true, rejectID: json.RawMessage("null"), rejectCode: -32700,
 			rejectMsg: "nockguard: rejected — message is not a well-formed JSON-RPC object"}
+	}
+
+	if d, rejected := p.rejectOversizedName("method", msg.Method, msg.ID); rejected {
+		return d
 	}
 
 	// Gate tools/call by METHOD, regardless of id: a notification-form call
@@ -1648,6 +1983,9 @@ func (p *StdioProxy) decideCanonical(topLevel map[string]json.RawMessage, canoni
 // re-marshaled bytes (used verbatim on the fail-closed unextractable-name path).
 func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]json.RawMessage, canonicalLine []byte, seq uint64) mcpDecision {
 	toolName, canonicalParams, ok := canonicalToolCall(msg.Params)
+	if d, rejected := p.rejectOversizedName("tool", toolName, msg.ID); rejected {
+		return d
+	}
 	// Extract auditable references from tool arguments.
 	refs := extract.FromToolCall(toolName, canonicalParams)
 	if !ok || toolName == "" {
@@ -1681,6 +2019,13 @@ func (p *StdioProxy) decideToolCall(msg *jsonrpc.Message, topLevel map[string]js
 		p.resolveAudit(seq)
 		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
 			rejectMsg: fmt.Sprintf("nockguard: tool %q denied by policy", toolName), notForwardedCause: "policy_denied"}
+	}
+	if observed, cause := p.pinObservation(toolName, p.catalog.observe(toolName)); cause != "" {
+		p.logger.Printf("TOOL-PIN-BLOCK agent=%s tool=%s status=%s cause=%s", p.agent, toolName, observed.status, cause)
+		p.appendAudit(seq, toolName, "block", cause, &refs)
+		p.resolveAudit(seq)
+		return mcpDecision{reject: true, rejectID: msg.ID, rejectCode: -32600, tool: toolName,
+			rejectMsg: "nockguard: tool definition is not approved", notForwardedCause: cause}
 	}
 	// N8328: legacy require_approval is promoted to a hard `ask` and
 	// FAILS CLOSED when no approver is wired — identical to a native `ask`
@@ -1880,6 +2225,10 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 		var releaseSeq uint64
 		releaseRequest := false
 		msg, err := jsonrpc.Decode(line)
+		if err == nil && msg.Method == "notifications/tools/list_changed" {
+			p.catalog.invalidate()
+			p.logger.Printf("TOOL-CATALOG-INVALIDATED agent=%s reason=list_changed", p.agent)
+		}
 		suppressAgentResponse := false
 		var answeredCard *pendingCard
 		if p.actionPairing {
@@ -1926,7 +2275,7 @@ func (p *StdioProxy) upstreamToAgent(r io.Reader, w io.Writer, pending *sync.Map
 				if toolListVal, ok := val.(toolsListSeq); ok {
 					releaseSeq, releaseRequest = toolListVal.seq, true
 					// tools/list response — filter it
-					filtered := p.filterToolListResponse(line, toolListVal.seq)
+					filtered := p.filterToolListResponse(line, toolListVal.seq, toolListVal.buildID)
 					// Resolve the tools/list audits
 					p.resolveAudit(toolListVal.seq)
 					if filtered != nil {
@@ -2059,15 +2408,33 @@ func actionResponseDetails(line []byte) (string, *bool) {
 
 // filterToolListResponse replaces only result.tools, retaining extension fields,
 // pagination and tool metadata without decoding numbers through float64.
-func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64) []byte {
+func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64, buildIDs ...uint64) []byte {
+	buildID := uint64(0)
+	if len(buildIDs) > 0 {
+		buildID = buildIDs[0]
+	}
+	discard := func(reason string) {
+		if buildID == 0 {
+			return
+		}
+		if p.catalog.discard(buildID) {
+			p.logger.Printf("TOOL-CATALOG-DISCARDED agent=%s reason=%s", p.agent, reason)
+		}
+	}
 	var resp map[string]json.RawMessage
 	if json.Unmarshal(line, &resp) != nil || resp == nil {
+		discard("invalid-response")
 		return jsonrpc.ErrorResponse(json.RawMessage("null"), -32603, "nockguard: invalid tools/list response")
 	}
 	invalid := func() []byte {
+		if p.engine.HasToolPinConstraints(p.agent) {
+			// Action-less like the request-side refusal: record a method refusal.
+			p.appendAudit(seq, "tools/list", "method-deny", "tool_catalog_refresh_required", nil)
+		}
 		return jsonrpc.ErrorResponse(resp["id"], -32603, "nockguard: invalid tools/list response")
 	}
 	if _, hasError := resp["error"]; hasError {
+		discard("upstream-error")
 		if _, hasResult := resp["result"]; hasResult {
 			return invalid()
 		}
@@ -2075,23 +2442,95 @@ func (p *StdioProxy) filterToolListResponse(line []byte, seq uint64) []byte {
 	}
 	var result map[string]json.RawMessage
 	if json.Unmarshal(resp["result"], &result) != nil || result == nil {
+		discard("invalid-result")
 		return invalid()
 	}
-	var tools []map[string]json.RawMessage
+	var tools []json.RawMessage
 	if json.Unmarshal(result["tools"], &tools) != nil || tools == nil {
+		discard("invalid-tools")
+		return invalid()
+	}
+	var observations map[string]toolObservation
+	var nextCursor string
+	var paginated bool
+	if buildID != 0 {
+		// Observation never changes the listing: a catalog failure discards
+		// the generation and the page is filtered exactly as without one.
+		var active, bounded bool
+		active, bounded, paginated = p.catalog.pageWithinBounds(buildID, len(line), len(tools))
+		if active && !bounded {
+			discard("bound-exceeded")
+		}
+		if !active || !bounded {
+			buildID = 0
+		}
+	}
+	if buildID != 0 {
+		var err error
+		observations, err = pageObservations(tools)
+		if err != nil {
+			discard("invalid-page")
+			buildID = 0
+		}
+	}
+	if buildID != 0 {
+		unhashable := 0
+		for _, observation := range observations {
+			if observation.status == "unhashable" {
+				unhashable++
+			}
+		}
+		if unhashable > 0 {
+			p.logger.Printf("TOOL-DEFINITION-UNHASHABLE agent=%s count=%d", p.agent, unhashable)
+		}
+		// A null nextCursor means no further pages, the same as an absent one.
+		if raw, exists := result["nextCursor"]; exists && string(raw) != "null" {
+			if json.Unmarshal(raw, &nextCursor) != nil || nextCursor == "" {
+				discard("invalid-cursor")
+				buildID = 0
+			}
+		}
+	}
+	if buildID == 0 && p.engine.HasToolPinConstraints(p.agent) {
 		return invalid()
 	}
 	filtered := make([]map[string]json.RawMessage, 0, len(tools))
-	for _, tool := range tools {
+	for _, raw := range tools {
+		var tool map[string]json.RawMessage
+		if json.Unmarshal(raw, &tool) != nil || tool == nil {
+			return invalid()
+		}
 		var name string
 		if json.Unmarshal(tool["name"], &name) != nil || name == "" {
 			return invalid()
 		}
-		if dec := p.engine.Evaluate(p.agent, name); dec.Allowed() || dec.Verdict == policy.Ask {
+		dec := p.engine.Evaluate(p.agent, name)
+		allowed := dec.Allowed() || dec.Verdict == policy.Ask
+		observation := toolObservation{status: "unobserved"}
+		if current, ok := observations[name]; ok && buildID != 0 {
+			observation = current
+		}
+		if paginated || nextCursor != "" {
+			observation = toolObservation{status: "unobserved"}
+		}
+		pinStatus, pinCause := p.pinObservation(name, observation)
+		if allowed && pinCause == "" {
 			filtered = append(filtered, tool)
 		} else {
-			p.logger.Printf("HIDE agent=%s tool=%s reason=%q", p.agent, name, dec.Reason)
-			p.appendAudit(seq, name, "hide", dec.Reason, nil)
+			reason := dec.Reason
+			if allowed {
+				reason = pinCause
+			}
+			p.logger.Printf("HIDE agent=%s tool=%s reason=%q status=%s", p.agent, name, reason, pinStatus.status)
+			p.appendAudit(seq, name, "hide", reason, nil)
+		}
+	}
+	if buildID != 0 {
+		if err := p.catalog.addPage(buildID, len(line), observations, nextCursor); err != nil {
+			p.logger.Printf("TOOL-CATALOG-DISCARDED agent=%s reason=%v", p.agent, err)
+			if p.engine.HasToolPinConstraints(p.agent) {
+				return invalid()
+			}
 		}
 	}
 	// All values below are validated RawMessages; marshaling cannot fail.

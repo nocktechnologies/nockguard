@@ -287,7 +287,12 @@ func (l *HTTPListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func httpListenerLoopbackHost(authority string) bool {
 	host := authority
-	if strings.Contains(authority, ":") {
+	if strings.HasPrefix(authority, "[") && strings.HasSuffix(authority, "]") {
+		host = authority[1 : len(authority)-1]
+		if !strings.Contains(host, ":") {
+			return false
+		}
+	} else if strings.Contains(authority, ":") {
 		var port string
 		var err error
 		host, port, err = net.SplitHostPort(authority)

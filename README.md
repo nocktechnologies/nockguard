@@ -143,6 +143,7 @@ nockguard proxy \
   by default. With an allow list, unmatched tools are denied.
 - **default**: Fallback policy for agents not listed by name.
 - Tool patterns in `allow`, `deny`, `ask`, `shadow`, `require_approval`, and `inject` support `*`, `?`, and character classes such as `[ab]`. Wildcards do not match `/`.
+- **tool_pins**: operator-approved MCP Tool definition hashes, keyed by stable upstream ID and exact tool name. Run the stdio proxy with `--upstream-id <id>`. Each pin uses `hash_version: jcs-rfc8785-v1` and a lowercase 64-character `sha256`. A configured pin blocks a changed, unobserved, or unhashable definition even when `strict_tool_pins` is false. Set `strict_tool_pins: true` to require pins for every allowed tool. Both settings require signed `audit.action_pairing: true`; ordinary call approval and `tools/list` never update policy pins. After a list-change notification, re-list from page one or reconnect. Paginated catalogs do not authorize pinned calls. These controls currently run in the stdio `proxy`; `mcp-http`, `mcp-listen` and `mcp-gateway` reject pin policies until their HTTP catalogs can be bound to sessions.
 - **validate_input** (Phase 2): built-in input-validation categories applied to tool-call arguments — `sqli`, `path_traversal`, `secrets`. Opt-in per agent.
 - **block_params** (Phase 2): custom regex patterns; a tool call is blocked if any argument matches.
 - **rate_limit** (Phase 3): at most `max_calls` tool calls within a sliding `window` (a positive Go duration — `30s`, `1m`, `1h`). Missing, invalid, zero, and negative windows are rejected when loading the policy. The allowance refills as the window slides — this bounds bursts and runaway tool-call loops without blocking normal traffic.
@@ -181,6 +182,7 @@ An Ed25519-signed audit trail can be checked for signature and hash-chain integr
 
 ```bash
 nockguard verify --agent coder    # one agent's trail (exit 0 = non-empty and fully checkpointed)
+nockguard verify --agent coder --completeness  # integrity plus a separate per-run assessment
 nockguard verify --all          # check every per-agent trail found in the audit directory
 ```
 
@@ -276,7 +278,7 @@ audit:
   action_pairing: true
 ```
 
-The default remains v1. Pairing requires the durable audit writer and is limited
+The default remains v1. Pairing requires a signed durable audit writer and is limited
 to `proxy` over stdio; HTTP listeners continue writing v1. A matching upstream
 JSON-RPC response is recorded as `response_observed`; timeout, cancellation,
 disconnect, and shutdown are recorded as `outcome_unknown`. A response observed
@@ -292,9 +294,19 @@ the historical v1 typed-marshal signature bytes. Older binaries cannot verify
 signed trails containing v2 rows, and their signed writer refuses to reopen
 such a trail after its startup verification fails. An older unsigned writer
 does not authenticate the v2 fields and may append legacy rows instead. Keep
-pairing on a dedicated audit path; a rollback must use a new path. Run
-open/close markers and completeness assessment are not emitted by this opt-in
-writer; v2 pairing provides action correlation, not a completeness verdict.
+pairing on a dedicated audit path; a rollback must use a new path. The signed
+v2 producer writes a fresh random run nonce in durable `open`, 30-second
+`heartbeat`, and bounded-shutdown `close` rows. Each run has its own sequence;
+the close commits to the preceding run count and signature even when other
+processes interleave rows in the shared trail. A write or sync failure prevents
+a clean close. `verify --completeness` reports a separate result per run.
+`LIMITED` is the best result: the signed, checkpointed observation stream is
+internally complete for that run. It cannot prove that every attempted call was
+recorded, that a remote side effect completed, or that an unknown outcome is
+safe to retry. A recent open run is `IN_PROGRESS`; a stale open run is
+`INCOMPLETE`, which can mean abnormal end or truncation without distinguishing
+them. Future-dated heartbeats and unavailable verification are `UNASSESSABLE`;
+legacy-only trails are `UNVERIFIED`; invalid run structure is `BROKEN`.
 `--audit-best-effort` cannot be combined with `action_pairing`.
 
 `reason` names the specific policy rule behind each decision — `deny-rule "…"`, `allow-rule "…"`, `no allow-rule matched`, `default-allow (no allow list)`, or `no policy for agent (fail-closed)` — so the trail is *explainable* rather than an opaque `policy`. The matched rule is recorded operator-side only; the error returned to the agent stays minimal (`denied by policy`), so a hostile agent cannot map the policy surface from rejections.

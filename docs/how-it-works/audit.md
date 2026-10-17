@@ -53,11 +53,51 @@ cannot verify signed v2 trails, and their signed writer refuses to reopen such
 a trail after startup verification fails. An older unsigned writer does not
 authenticate v2 fields and may append legacy rows instead. Keep pairing on a
 dedicated audit path; a rollback must use a new path. Pairing is disabled by
-default, requires required audit writes, applies to stdio only, and cannot be
-combined with `--audit-best-effort`. These action rows do not include run
-open/close records and therefore do not support a completeness verdict; the
+default, requires signed and durable audit writes, applies to stdio only, and cannot be
+combined with `--audit-best-effort`. The signed producer durably appends
+`run/open` before accepting calls, writes `run/heartbeat` every 30 seconds,
+and writes `run/close` after its bounded shutdown drain only if the writer
+stayed healthy. The close commits the preceding per-run count and signature
+under the shared trail's file lock. `verify --completeness` reports a separate
+per-run assessment after ordinary integrity verification. `LIMITED` means
+only that the signed observation stream recorded for that run is internally
+complete; it does not certify every attempt was recorded or that an upstream
+side effect completed. A missing close becomes `INCOMPLETE` after 90 seconds
+without a heartbeat, but cannot distinguish a crash from a cut trail. Recent
+open runs are `IN_PROGRESS`, future-dated heartbeats are `UNASSESSABLE`,
+legacy trails are `UNVERIFIED`, and invalid run structure is `BROKEN`. The
 dispatch itself never proves execution or success. Source:
 `internal/audit/audit.go`, `internal/proxy/stdio.go`.
+
+With pairing enabled, a complete client-initiated `tools/list` pagination chain
+publishes a session catalog. Each advertised full tool definition receives a
+versioned RFC 8785 SHA-256 digest. Applicable v2 decision and observation rows
+sign `tool_hash_version`, `tool_definition_hash`, and `tool_pin_status`:
+`unpinned` for a hashable observed definition, `unobserved` before a complete
+listing or after `notifications/tools/list_changed`, and `unhashable` when a
+definition has ambiguous keys, invalid shape, or an unsupported number. A
+failed, repeated, or oversized page discards the incomplete catalog. No raw
+definition or schema is written to the trail. This records the definition the
+server advertised; it does not establish how the server behaved when called.
+In observation-only mode, raw upstream cursors can be reused across listing
+generations, so even a completed paginated catalog leaves later calls
+`unobserved` without an attached digest. A single page complete listing can
+bind its observed digest to later calls.
+An operator can configure `tool_pins` by stable upstream ID and exact tool name.
+Run the stdio proxy with the matching `--upstream-id`. Pin policies require a
+signing key and `audit.action_pairing: true`; `--audit-best-effort` is refused.
+The signed action rows then carry both `tool_pin_hash` (expected) and
+`tool_definition_hash` (observed), with `matched`, `mismatch`, `unobserved`,
+`unhashable`, or `unpinned` status. Re-listing only changes the observed hash.
+An ordinary call approval cannot update a pin. A mismatch or unverified pinned
+tool is hidden from `tools/list` and blocked on direct `tools/call`, even with
+strict mode off. `strict_tool_pins: true` also blocks unpinned tools.
+After `notifications/tools/list_changed`, re-list from the first page or
+reconnect before calling a pinned tool. A paginated catalog remains unverified
+for later calls because upstream cursors can be reused; pinned tools are hidden
+from such a listing and direct pinned calls stay blocked. The current verified
+catalog is stdio-scoped. A call with a durable dispatch row before
+`list_changed` remains in flight; invalidation blocks subsequent calls.
 
 When pairing is enabled, the writer resumes unsigned `run_seq` counters from
 valid v2 rows already in the trail. Unsigned audit opens without pairing retain

@@ -41,11 +41,18 @@ func runWithOpenStdinStderr(t *testing.T, upstream string, policyPath ...string)
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := cmd.StdoutPipe()
+	// Wait runs concurrently with the client scanner. Own stdout so Wait cannot
+	// close the read end before the client has consumed the final output.
+	out, outW, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Start(); err != nil {
+	t.Cleanup(func() { _ = out.Close() })
+	cmd.Stdout = outW
+	err = cmd.Start()
+	_ = outW.Close()
+	if err != nil {
+		_ = in.Close()
 		t.Fatal(err)
 	}
 	exited := make(chan error, 1)
@@ -621,6 +628,27 @@ func TestProxyDoesNotTreatStoppedUpstreamAsExited(t *testing.T) {
 	waitNonzeroExit(t, exited)
 }
 
+// Force the client to read only after Wait has returned. The harness must
+// preserve buffered stdout even when process exit wins the final-read race.
+func TestProxyOutputRemainsReadableAfterExit(t *testing.T) {
+	in, out, exited := runWithOpenStdin(t, "echo DONE")
+	_ = in.Close()
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy did not exit")
+	}
+	if !out.Scan() || out.Text() != "DONE" {
+		t.Fatalf("output lost after exit: line %q, error %v", out.Text(), out.Err())
+	}
+	if out.Scan() {
+		t.Fatalf("unexpected extra output %q", out.Text())
+	}
+	if err := out.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Output the upstream wrote before exiting must reach a client that is still
 // reading, even when the upstream writes far more than a pipe buffer.
 func TestProxyDeliversOutputWrittenBeforeUpstreamExit(t *testing.T) {
@@ -635,11 +663,17 @@ func TestProxyDeliversOutputWrittenBeforeUpstreamExit(t *testing.T) {
 	for out.Scan() {
 		last = out.Text()
 	}
+	if err := out.Err(); err != nil {
+		t.Fatal(err)
+	}
 	if last != "DONE" {
 		t.Fatalf("output truncated; last line %q", last)
 	}
 	select {
-	case <-exited:
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("proxy failed after output drain: %v", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("proxy did not exit")
 	}

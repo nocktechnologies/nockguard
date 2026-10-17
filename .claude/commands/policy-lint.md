@@ -60,7 +60,7 @@ if extra:
 
 ### E002 — Unknown agent-policy keys (ERROR)
 
-Valid keys under each agent: `allow`, `deny`, `deny_methods` (exact non-tool method names), `ask`, `shadow`, `mode`, `fail_mode`, `validate_input`, `block_params`, `rate_limit`, `spend_cap`, `trust`, `require_approval` (legacy; prefer `ask`), `inject`. Anything else makes the policy fail to load. Source: `AgentPolicy` in `internal/policy/policy.go`.
+Valid keys under each agent: `allow`, `deny`, `deny_methods` (exact non-tool method names), `ask`, `shadow`, `mode`, `fail_mode`, `validate_input`, `block_params`, `rate_limit`, `spend_cap`, `trust`, `require_approval` (legacy; prefer `ask`), `inject`, `tool_pins` (operator pins keyed by `--upstream-id`, then tool name), `strict_tool_pins`. Anything else makes the policy fail to load. Source: `AgentPolicy` in `internal/policy/policy.go`.
 
 ```bash
 POLICY="${POLICY:-$HOME/.nockguard/policy.yaml}"
@@ -68,7 +68,7 @@ python3 -c "
 import yaml, sys
 with open('$POLICY') as f:
     doc = yaml.safe_load(f) or {}
-valid = {'allow','deny','deny_methods','ask','shadow','mode','fail_mode','validate_input','block_params','rate_limit','spend_cap','trust','require_approval','inject'}
+valid = {'allow','deny','deny_methods','ask','shadow','mode','fail_mode','validate_input','block_params','rate_limit','spend_cap','trust','require_approval','inject','tool_pins','strict_tool_pins'}
 for agent, pol in (doc.get('agents') or {}).items():
     if not isinstance(pol, dict): continue
     extra = set(pol) - valid

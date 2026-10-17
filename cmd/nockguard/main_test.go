@@ -75,6 +75,115 @@ func TestVerifyCommandCleanTrailProtected(t *testing.T) {
 	}
 }
 
+func TestVerifyCommandCompletenessIsSeparateFromIntegrity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	key := []byte("run lifecycle command test key")
+	a, err := audit.New(path, audit.WithSigningKey(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	runID := "0123456789abcdef0123456789abcdef"
+	for _, event := range []string{"open", "close"} {
+		if err := a.RecordRequired(audit.Event{Agent: "demo", SchemaVersion: 2, RecordType: "run", RunID: runID, RunEvent: event}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TEST_RUN_AUDIT_KEY", string(key))
+	code, stdout, stderr := runCommandForTest(t, "verify", "--key-env", "TEST_RUN_AUDIT_KEY", "--audit", path, "--completeness", "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit=%d stderr=%q stdout=%s", code, stderr, stdout)
+	}
+	var got verifyResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Verdict != "PROTECTED" || len(got.Completeness) != 1 || got.Completeness[0].Verdict != "LIMITED" {
+		t.Fatalf("integrity and completeness must be separate: %+v", got)
+	}
+}
+
+func TestVerifyCompletenessSnapshotWithConcurrentWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	key := []byte("run lifecycle snapshot test key")
+	a, err := audit.New(path, audit.WithSigningKey(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Record(audit.Event{Agent: "demo", Tool: "read", Decision: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_RUN_AUDIT_KEY", string(key))
+
+	// Each append writes the trail row and then advances the .hwm checkpoint
+	// under the writer's exclusive lock. A verifier that reads the two files
+	// separately can see the old trail with the new checkpoint.
+	stop := make(chan struct{})
+	writerDone := make(chan error, 1)
+	go func() {
+		for i := 0; i < 4000; i++ {
+			select {
+			case <-stop:
+				writerDone <- nil
+				return
+			default:
+			}
+			if err := a.Record(audit.Event{Agent: "demo", Tool: "read", Decision: "allow"}); err != nil {
+				writerDone <- err
+				return
+			}
+		}
+		writerDone <- nil
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for i := 0; i < 300 && time.Now().Before(deadline); i++ {
+		code, stdout, stderr := runCommandForTest(t, "verify", "--key-env", "TEST_RUN_AUDIT_KEY", "--audit", path, "--completeness", "--json")
+		if code != 0 {
+			close(stop)
+			<-writerDone
+			t.Fatalf("verify %d of a healthy live trail: exit=%d stderr=%q stdout=%s", i, code, stderr, stdout)
+		}
+	}
+	close(stop)
+	if err := <-writerDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Negative control: real tail truncation still fails integrity.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trimmed := bytes.TrimSuffix(data, []byte("\n"))
+	if err := os.WriteFile(path, trimmed[:bytes.LastIndexByte(trimmed, '\n')+1], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, _ := runCommandForTest(t, "verify", "--key-env", "TEST_RUN_AUDIT_KEY", "--audit", path, "--completeness", "--json")
+	var got verifyResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatal(err)
+	}
+	if code != 2 || got.Verdict != "TAMPERED" || len(got.Completeness) != 0 {
+		t.Fatalf("truncated trail: exit=%d result=%+v", code, got)
+	}
+}
+
+func TestCloseAuditorTimeoutDoesNotClaimRunState(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	var stderr bytes.Buffer
+	closeAuditorBounded(&stderr, func() error { <-release; return nil }, 10*time.Millisecond)
+	msg := stderr.String()
+	// The run close row is written (or skipped) before the writer closes, so
+	// a close timeout cannot know whether the run is unclosed.
+	if !strings.Contains(msg, "audit close timed out") || strings.Contains(msg, "unclosed") {
+		t.Fatalf("close-timeout message = %q", msg)
+	}
+}
+
 func TestVerifyCommandRequiresRowsAndCompleteCheckpoint(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -553,6 +662,59 @@ func TestPolicyShadowReportCommandCountsWouldDeny(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "Bash 2") || !strings.Contains(stdout, "Write 1") {
 		t.Fatalf("shadow-report should count would-deny by tool, got:\n%s", stdout)
+	}
+}
+
+func TestMCPListenRejectsPinPolicyWithoutHTTPSessionCatalog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	policyText := `audit:
+  enabled: true
+  action_pairing: true
+  sign_key_env: TEST_TOOL_PIN_SIGN_KEY
+agents:
+  demo:
+    mode: allow
+    strict_tool_pins: true
+`
+	if err := os.WriteFile(path, []byte(policyText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := runCommandForTest(t, "mcp-listen", "--listen", "127.0.0.1:0", "--upstream", "http://127.0.0.1:1/mcp", "--agent", "demo", "--policy", path)
+	if code != 1 || !strings.Contains(stderr, "require the stdio proxy") {
+		t.Fatalf("pin policy was not refused: code=%d stderr=%s", code, stderr)
+	}
+	code, _, stderr = runCommandForTest(t, "mcp-http", "--upstream", "http://127.0.0.1:1/mcp", "--agent", "demo", "--policy", path)
+	if code != 1 || !strings.Contains(stderr, "require the stdio proxy") {
+		t.Fatalf("observe-only bridge accepted pin policy: code=%d stderr=%s", code, stderr)
+	}
+}
+
+func TestProxyUpstreamIDCannotConsumePolicyFlag(t *testing.T) {
+	code, _, stderr := runCommandForTest(t, "proxy", "--upstream", "cat", "--agent", "demo", "--upstream-id", "--policy", "/missing/policy.yaml")
+	if code != 1 || !strings.Contains(stderr, "--upstream-id requires a value") {
+		t.Fatalf("missing upstream ID consumed --policy: code=%d stderr=%s", code, stderr)
+	}
+}
+
+func TestProxyRefusesUnsignedPinPolicyAtStartup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	policyText := fmt.Sprintf(`audit:
+  enabled: true
+  path: %s
+  action_pairing: true
+agents:
+  pinunsignedtest:
+    mode: allow
+    strict_tool_pins: true
+`, filepath.Join(t.TempDir(), "audit.jsonl"))
+	if err := os.WriteFile(path, []byte(policyText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(policy.AgentKeyEnvName("pinunsignedtest"), "")
+	code, _, stderr := runCommandForTest(t, "proxy", "--upstream", "cat", "--agent", "pinunsignedtest", "--upstream-id", "stable", "--policy", path)
+	if code != 1 || !strings.Contains(stderr, "tool pins require a signed audit writer") {
+		t.Fatalf("unsigned pin policy started: code=%d stderr=%s", code, stderr)
 	}
 }
 

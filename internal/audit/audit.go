@@ -147,7 +147,9 @@ type Auditor struct {
 	edPriv        ed25519.PrivateKey // Ed25519 signing key; non-nil = non-repudiable trail (takes precedence over key)
 	keyID         string             // hex(sha256(pub)) of edPriv's public key; stamped on Events when edPriv is set
 	runSeqs       map[string]uint64  // last durably appended v2 sequence per fresh process run id
-	actionPairing bool               // seed existing v2 run sequences only for the opt-in pairing writer
+	runHeads      map[string]string  // last durable signature for each run
+	runClosed     map[string]bool
+	actionPairing bool // seed existing v2 run sequences only for the opt-in pairing writer
 	closed        bool
 	requiredErr   error
 }
@@ -189,9 +191,10 @@ func WithActionPairing() Option {
 	return func(a *Auditor) { a.actionPairing = true }
 }
 
-// signing reports whether any signing mode is active.
-func (a *Auditor) signing() bool {
-	return len(a.key) > 0 || a.edPriv != nil
+// SigningEnabled reports whether records are authenticated by HMAC or Ed25519.
+// Signing options are fixed when the auditor is constructed.
+func (a *Auditor) SigningEnabled() bool {
+	return a != nil && (len(a.key) > 0 || a.edPriv != nil)
 }
 
 // sign produces the hex chain signature for canonical bytes linked to prev,
@@ -208,7 +211,7 @@ func (a *Auditor) sign(canonical []byte, prev string) string {
 // is enabled, the chain is seeded from the last signature already in the file so
 // that appends across restarts stay verifiable.
 func New(path string, opts ...Option) (*Auditor, error) {
-	a := &Auditor{clock: time.Now, runSeqs: make(map[string]uint64)}
+	a := &Auditor{clock: time.Now, runSeqs: make(map[string]uint64), runHeads: make(map[string]string), runClosed: make(map[string]bool)}
 	for _, o := range opts {
 		o(a)
 	}
@@ -218,7 +221,7 @@ func New(path string, opts ...Option) (*Auditor, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	if a.signing() {
+	if a.SigningEnabled() {
 		if FailureStatus(path) {
 			if _, err := os.Stat(path); err != nil {
 				return nil, fmt.Errorf("cannot verify failed audit trail on reopen: %w", err)
@@ -248,7 +251,7 @@ func New(path string, opts ...Option) (*Auditor, error) {
 	}
 	a.f = f
 	a.path = path
-	if a.signing() {
+	if a.SigningEnabled() {
 		// A verified reopen is the required writer's recovery boundary.
 		_ = os.Remove(path + ".audit-failing")
 	}
@@ -309,6 +312,8 @@ func (a *Auditor) seedRunSequences(path string) error {
 		}
 		if ev.RunSeq > a.runSeqs[ev.RunID] {
 			a.runSeqs[ev.RunID] = ev.RunSeq
+			a.runHeads[ev.RunID] = ev.Sig
+			a.runClosed[ev.RunID] = ev.RecordType == "run" && ev.RunEvent == "close"
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -326,6 +331,16 @@ func (a *Auditor) Enabled() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.f != nil && !a.closed
+}
+
+// Signed reports whether lifecycle rows from this writer will carry a signature.
+func (a *Auditor) Signed() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.f != nil && !a.closed && a.SigningEnabled()
 }
 
 // Record stamps the event with the current time and appends it as one JSON line.
@@ -422,9 +437,10 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 		return nil
 	}
 	if err := validateApprovalActor(ev); err != nil {
+		latchRequiredFailure = false // rejected input; nothing was written
 		return err
 	}
-	if a.signing() {
+	if a.SigningEnabled() {
 		// Serialize the timestamp with signed appends across processes.
 		if err := lockExclusive(a.f.Fd()); err != nil {
 			return err
@@ -435,6 +451,10 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 	ev.Time = a.clock().Format(time.RFC3339)
 	ev.Sig = "" // canonical content never includes the signature itself
 	if ev.SchemaVersion == 2 {
+		if a.runClosed[ev.RunID] {
+			latchRequiredFailure = false
+			return fmt.Errorf("run %s is closed", ev.RunID)
+		}
 		if !required {
 			latchRequiredFailure = false
 			return fmt.Errorf("schema v2 audit rows require durable writes")
@@ -448,6 +468,10 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 			return fmt.Errorf("schema v2 run_seq exhausted; start a new run")
 		}
 		ev.RunSeq = a.runSeqs[ev.RunID] + 1
+		if ev.RecordType == "run" && ev.RunEvent == "close" {
+			ev.RunCount = a.runSeqs[ev.RunID]
+			ev.RunHead = a.runHeads[ev.RunID]
+		}
 	} else if ev.SchemaVersion != 0 {
 		latchRequiredFailure = false
 		return fmt.Errorf("unsupported audit schema_version %d", ev.SchemaVersion)
@@ -482,7 +506,7 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 	}
 
 	var checkpointCount int
-	if a.signing() {
+	if a.SigningEnabled() {
 		// Cross-process safety. The mutex only serializes writers within ONE
 		// process. Multiple proxy processes each seed prevSig from the tail at
 		// open and, left to their in-memory copy, would chain off a stale head —
@@ -535,13 +559,17 @@ func (a *Auditor) record(ev Event, required bool) (err error) {
 	// Signing mode only, still under the flock held above: advance the
 	// tail-truncation high-water-mark so a later removal of this entry is
 	// detectable (N8154). ev.Sig is this entry's signature.
-	if a.signing() {
+	if a.SigningEnabled() {
 		if err := a.updateHighWaterMark(checkpointCount+1, ev.Sig, required); err != nil {
 			return err
 		}
 	}
 	if ev.SchemaVersion == 2 {
 		a.runSeqs[ev.RunID] = ev.RunSeq
+		a.runHeads[ev.RunID] = ev.Sig
+		if ev.RecordType == "run" && ev.RunEvent == "close" {
+			a.runClosed[ev.RunID] = true
+		}
 	}
 	return nil
 }
