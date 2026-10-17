@@ -127,4 +127,4 @@ A new commit needs fresh checks and review.
 - Name repo files as plain paths in backticks.
   `scripts/check-agents-paths.py` fails CI when one is not git-tracked; write
   example file names as a `<placeholder>`.
-- Move stale docs and dated handoffs to docs/archive/ instead of deleting them.
+- Move stale docs and dated handoffs to `docs/archive/` instead of deleting them.
