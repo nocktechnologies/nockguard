@@ -758,6 +758,41 @@ type verifyResult struct {
 	Completeness    []audit.RunAssessment `json:"completeness,omitempty"`
 }
 
+// readVerifySnapshot reads the checkpoint and trail as one consistent
+// snapshot. A regular trail is held under the shared flock that signed writers
+// take exclusively for each append and checkpoint update, so a live writer
+// cannot land a row or checkpoint between the two reads. The checkpoint is read
+// first so that, even without the lock, its count never runs ahead of the trail.
+func readVerifySnapshot(path string) (trail, hwm []byte, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if info.Mode().IsRegular() {
+		if err := audit.LockShared(f.Fd()); err != nil {
+			return nil, nil, fmt.Errorf("locking audit trail: %w", err)
+		}
+		defer func() { _ = audit.UnlockFile(f.Fd()) }()
+	}
+	hwm, err = os.ReadFile(path + ".hwm")
+	if os.IsNotExist(err) {
+		hwm, err = nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	trail, err = io.ReadAll(f)
+	if err != nil {
+		return nil, nil, err
+	}
+	return trail, hwm, nil
+}
+
 type verifyAllResult struct {
 	Verdict      string              `json:"verdict"`
 	AuditDir     string              `json:"audit_dir"`
@@ -1047,13 +1082,7 @@ func runAudit(args []string) int {
 		hwmSnapshot     []byte
 	)
 	if completeness {
-		trailSnapshot, err = os.ReadFile(auditPath)
-		if err == nil {
-			hwmSnapshot, err = os.ReadFile(auditPath + ".hwm")
-			if os.IsNotExist(err) {
-				err = nil
-			}
-		}
+		trailSnapshot, hwmSnapshot, err = readVerifySnapshot(auditPath)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error reading audit snapshot: %v\n", err)

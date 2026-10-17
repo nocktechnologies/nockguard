@@ -103,6 +103,74 @@ func TestVerifyCommandCompletenessIsSeparateFromIntegrity(t *testing.T) {
 	}
 }
 
+func TestVerifyCompletenessSnapshotWithConcurrentWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	key := []byte("run lifecycle snapshot test key")
+	a, err := audit.New(path, audit.WithSigningKey(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Record(audit.Event{Agent: "demo", Tool: "read", Decision: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_RUN_AUDIT_KEY", string(key))
+
+	// Each append writes the trail row and then advances the .hwm checkpoint
+	// under the writer's exclusive lock. A verifier that reads the two files
+	// separately can see the old trail with the new checkpoint.
+	stop := make(chan struct{})
+	writerDone := make(chan error, 1)
+	go func() {
+		for i := 0; i < 4000; i++ {
+			select {
+			case <-stop:
+				writerDone <- nil
+				return
+			default:
+			}
+			if err := a.Record(audit.Event{Agent: "demo", Tool: "read", Decision: "allow"}); err != nil {
+				writerDone <- err
+				return
+			}
+		}
+		writerDone <- nil
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for i := 0; i < 300 && time.Now().Before(deadline); i++ {
+		code, stdout, stderr := runCommandForTest(t, "verify", "--key-env", "TEST_RUN_AUDIT_KEY", "--audit", path, "--completeness", "--json")
+		if code != 0 {
+			close(stop)
+			<-writerDone
+			t.Fatalf("verify %d of a healthy live trail: exit=%d stderr=%q stdout=%s", i, code, stderr, stdout)
+		}
+	}
+	close(stop)
+	if err := <-writerDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Negative control: real tail truncation still fails integrity.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trimmed := bytes.TrimSuffix(data, []byte("\n"))
+	if err := os.WriteFile(path, trimmed[:bytes.LastIndexByte(trimmed, '\n')+1], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, _ := runCommandForTest(t, "verify", "--key-env", "TEST_RUN_AUDIT_KEY", "--audit", path, "--completeness", "--json")
+	var got verifyResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatal(err)
+	}
+	if code != 2 || got.Verdict != "TAMPERED" || len(got.Completeness) != 0 {
+		t.Fatalf("truncated trail: exit=%d result=%+v", code, got)
+	}
+}
+
 func TestVerifyCommandRequiresRowsAndCompleteCheckpoint(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
