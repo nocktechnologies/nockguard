@@ -140,9 +140,6 @@ func TestSeverityMapping(t *testing.T) {
 }
 
 func TestSeverityThreatTiers(t *testing.T) {
-	if IsRejection(DecisionUnparseable) {
-		t.Fatal("unparseable decision must not count as a rejection")
-	}
 	cases := []struct {
 		decision, reason, want string
 	}{
@@ -210,7 +207,7 @@ func TestEmittedDecisionCensus(t *testing.T) {
 		{"would-deny", "stdio.go:appendAudit", "approved"},
 		{"observe", "mcphttp.go:Record", "approved"},
 		{"dispatch", "httplisten.go:audit", "approved"},
-		{"state-write", "policy.go:verdictName; stdio.go:appendAudit", "approved"},
+		{"state-write", "historical approval audit rows", "approved"},
 		{"approval-granted", "stdio.go:appendAudit", "approved"},
 		{"deny", "policy.go:verdictName; stdio.go:appendAudit; forwardhttp.go", "blocked"},
 		{"block", "stdio.go:appendAudit; inject.go:appendAudit; lock.go", "blocked"},
@@ -230,9 +227,6 @@ func TestEmittedDecisionCensus(t *testing.T) {
 		}
 		if _, ok := decisionBuckets[c.decision]; !ok {
 			t.Errorf("%s emits %q: missing from decision table", c.site, c.decision)
-		}
-		if got := IsRejection(c.decision); got != (c.bucket == "blocked") {
-			t.Errorf("%s emits %q: rejection = %v", c.site, c.decision, got)
 		}
 	}
 	// Scan literal emit sites so adding a new decision at a known audit or

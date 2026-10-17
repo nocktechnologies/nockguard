@@ -132,14 +132,6 @@ func (a *Accumulator) ApplyOutcome(outcome Outcome) float64 {
 	return a.score
 }
 
-func (a *Accumulator) Tier() Tier {
-	return TierFor(a.Score())
-}
-
-func (a *Accumulator) Multiplier() float64 {
-	return MultiplierFor(a.Score())
-}
-
 func (a *Accumulator) RateLimitFor(baseMax int) int {
 	if !a.Enabled() {
 		return baseMax

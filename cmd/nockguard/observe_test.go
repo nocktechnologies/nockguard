@@ -660,8 +660,8 @@ func TestProxyDanglingPolicyFlagDoesNotObserve(t *testing.T) {
 	if strings.Contains(stderr, "OBSERVE MODE") {
 		t.Fatalf("dangling --policy must not enter observe mode, got:\n%s", stderr)
 	}
-	if !strings.Contains(stderr, "error loading policy") {
-		t.Fatalf("dangling --policy must load-or-error, got:\n%s", stderr)
+	if !strings.Contains(stderr, "flag needs an argument") {
+		t.Fatalf("dangling --policy must fail during flag parsing, got:\n%s", stderr)
 	}
 }
 

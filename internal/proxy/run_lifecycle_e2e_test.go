@@ -170,7 +170,7 @@ agents:
 		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{}}`,                           // deny unextractable-name
 		`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"` + oversized + `"}}`, // method-deny oversized
 		callLine("8", "read_ok", "b"),                                                          // allow + dispatch
-		callLine("9", "ask_grant", "c"),                                                        // block tap, approval-granted, state-write
+		callLine("9", "ask_grant", "c"),                                                        // block tap, approval-granted
 		callLine("10", "ask_deny", "d"),                                                        // block tap, approval-denied
 		callLine("8", "read_ok", "e"),                                                          // block duplicate-active-request-id
 		callLine("11", "read_more", "f"),                                                       // ratelimit spend-cap
@@ -207,7 +207,7 @@ agents:
 			}
 		}
 	}
-	for _, want := range []string{"method-allow", "method-deny", "hide", "deny", "block", "ratelimit", "allow", "dispatch", "approval-granted", "approval-denied", "state-write"} {
+	for _, want := range []string{"method-allow", "method-deny", "hide", "deny", "block", "ratelimit", "allow", "dispatch", "approval-granted", "approval-denied"} {
 		if !seen[want] {
 			t.Errorf("run did not exercise a %s row; decisions=%v", want, seen)
 		}

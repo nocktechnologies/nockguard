@@ -6,11 +6,6 @@ import (
 	"path/filepath"
 )
 
-// StarterPolicyYAML returns a commented, ready-to-edit default policy. It is
-// itself a valid policy (default-deny) so `nockguard init` never scaffolds a
-// file that fails to load — see TestStarterPolicyLoads.
-func StarterPolicyYAML() string { return starterPolicy }
-
 // WriteStarter writes the starter policy to path, creating parent directories as
 // needed. It refuses to overwrite an existing file unless force is true, so a
 // real policy is never clobbered by an accidental `init`. Returns true when a

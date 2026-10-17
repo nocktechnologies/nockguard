@@ -144,15 +144,15 @@ func TestLegacyRequireApprovalStillGatesWithoutHidingFromList(t *testing.T) {
 	}
 }
 
-func TestAskVerdictAppliesWithheldWritesOnlyOnApprove(t *testing.T) {
+func TestAskVerdictRecordsApprovalAndForwarding(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		approval      string
 		wantCallError bool
 		wantDecisions []string
 	}{
-		{"approved applies withheld write", "approve", false, []string{"approval-granted", "state-write", "allow", "dispatch"}},
-		{"denied drops withheld write", "deny", true, []string{"approval-denied"}},
+		{"approved forwards the call", "approve", false, []string{"approval-granted", "allow", "dispatch"}},
+		{"denied rejects the call", "deny", true, []string{"approval-denied"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -230,7 +230,7 @@ agents:
 	for _, row := range rows {
 		decisions = append(decisions, row["decision"])
 	}
-	want := []string{"approval-granted", "state-write", "dispatch"}
+	want := []string{"approval-granted", "dispatch"}
 	if strings.Join(decisions, ",") != strings.Join(want, ",") {
 		t.Fatalf("fail_mode ask audit decisions = %v, want %v; rows=%v", decisions, want, rows)
 	}
