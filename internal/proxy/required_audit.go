@@ -18,10 +18,16 @@ const auditAfterForwardError = "nockguard: audit failed after forwarding; tool m
 const unverifiedToolResponseError = "nockguard: upstream response could not be verified; tool may have executed; do not retry automatically"
 
 func (p *StdioProxy) recordAudit(ev audit.Event) error {
-	if p.actionPairing && p.runStopping.Load() && !p.runActive.Load() {
+	// Load runActive once. Close sets runStopping before clearing runActive, so
+	// an inactive snapshot during or after close always refuses the row; a
+	// second load could see the run end after the first check and let the row
+	// through as v1 inside the run's span. An active snapshot keeps the row v2;
+	// the writer refuses it if run/close has already been appended.
+	active := p.runActive.Load()
+	if p.actionPairing && !active && p.runStopping.Load() {
 		return fmt.Errorf("audit run is closed")
 	}
-	if p.runActive.Load() && ev.SchemaVersion == 0 {
+	if active && ev.SchemaVersion == 0 {
 		ev.SchemaVersion = 2
 		ev.RecordType = "decision"
 		ev.RunID = p.actionRunID

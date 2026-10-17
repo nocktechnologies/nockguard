@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -208,4 +209,85 @@ agents:
 	if len(got) != 1 || got[0].Verdict != "LIMITED" {
 		t.Fatalf("assessment = %+v, want one LIMITED run", got)
 	}
+}
+
+// Close clears runActive and appends run/close while other goroutines may
+// still be recording. No row may land as an unversioned v1 row in the run's
+// span: a v1 row makes every run in the shared trail UNASSESSABLE.
+func TestRunCloseConcurrentWithWritesLeavesNoLegacyRows(t *testing.T) {
+	auditor, path, pub := newEd25519Auditor(t)
+	// Start from a proxy whose run has already stopped, so writers never see
+	// the pre-open state, in which rows are legacy by design.
+	var current atomic.Pointer[StdioProxy]
+	stopped := newActionPairingGate(t, auditor, "")
+	stopped.runStopping.Store(true)
+	current.Store(stopped)
+	// Writers record a row the v2 writer rejects without I/O (empty decision)
+	// but a v1 append would accept. They loop fast enough to straddle each
+	// close transition and expose any row that escapes the run as v1.
+	var writers sync.WaitGroup
+	stop := make(chan struct{})
+	for w := 0; w < 8; w++ {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = current.Load().recordAudit(audit.Event{Agent: httpTestAgent, Tool: "initialize"})
+			}
+		}()
+	}
+	runs, passes := 0, 0
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); passes++ {
+		// Each pass is a fresh proxy run on the shared trail, as after a
+		// restart. The previous proxy stays closed for straggling writers.
+		// Writers' rows are refused as v2, so only every 20th pass needs a
+		// durable open and close; the rest exercise the transition cheaply.
+		gate := newActionPairingGate(t, auditor, "")
+		durable := passes%20 == 0
+		if durable {
+			if err := auditor.RecordRequired(audit.Event{Agent: httpTestAgent, SchemaVersion: 2, RecordType: "run", RunID: gate.actionRunID, RunEvent: "open"}); err != nil {
+				t.Fatal(err)
+			}
+			runs++
+		}
+		gate.runActive.Store(true)
+		current.Store(gate)
+		// Mirror Run: input stops first, then the deferred close clears
+		// runActive and appends run/close.
+		gate.runStopping.Store(true)
+		gate.runActive.Store(false)
+		if durable {
+			if err := auditor.RecordRequired(audit.Event{Agent: httpTestAgent, SchemaVersion: 2, RecordType: "run", RunID: gate.actionRunID, RunEvent: "close"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	close(stop)
+	writers.Wait()
+	if err := auditor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if rows, count, err := audit.VerifyEd25519WithCheckpoint(path, pub); err != nil || rows != count {
+		t.Fatalf("integrity rows=%d checkpoint=%d err=%v", rows, count, err)
+	}
+	for _, ev := range readAuditEvents(t, path) {
+		if ev.SchemaVersion != 2 {
+			t.Fatalf("v1 row written during a run close (%d transitions): %+v", passes, ev)
+		}
+	}
+	got := audit.AssessRuns(mustRead(t, path), true, time.Now())
+	if len(got) != runs {
+		t.Fatalf("assessed %d runs, want %d", len(got), runs)
+	}
+	for _, run := range got {
+		if run.Verdict != "LIMITED" {
+			t.Fatalf("run %+v, want LIMITED", run)
+		}
+	}
+	t.Logf("%d transitions, %d durable runs closed under concurrent writes", passes, runs)
 }
