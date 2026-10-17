@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -492,14 +493,16 @@ func TestAuditRowCacheMissDoesNotHoldAuditMutexForCatalog(t *testing.T) {
 		defer close(rowDone)
 		gate.appendAudit(seq, "read", "state-write", "cache-miss", nil)
 	}()
-	time.Sleep(200 * time.Millisecond) // let the row reach its catalog lookup
-	acquired := false
-	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if gate.auditMutex.TryLock() {
-			gate.auditMutex.Unlock()
-			acquired = true
-			break
-		}
+	// Prove the row reached the cache-miss path: its goroutine must be parked
+	// on catalog.mu inside toolCatalog.observe before auditMutex is checked.
+	if !waitParkedInCatalogObserve(5 * time.Second) {
+		gate.catalog.mu.Unlock()
+		t.Fatal("cache-miss row never parked in toolCatalog.observe on catalog.mu")
+	}
+	t.Log("cache-miss row parked in toolCatalog.observe on catalog.mu")
+	acquired := gate.auditMutex.TryLock()
+	if acquired {
+		gate.auditMutex.Unlock()
 	}
 	gate.catalog.mu.Unlock()
 	select {
@@ -508,7 +511,7 @@ func TestAuditRowCacheMissDoesNotHoldAuditMutexForCatalog(t *testing.T) {
 		t.Fatal("audit row did not complete after catalog.mu was released")
 	}
 	if !acquired {
-		t.Fatal("auditMutex was held while waiting for catalog.mu (auditMutex -> catalog.mu order)")
+		t.Fatal("auditMutex was held while parked on catalog.mu (auditMutex -> catalog.mu order)")
 	}
 	gate.resolveAudit(seq)
 	var found bool
@@ -523,4 +526,19 @@ func TestAuditRowCacheMissDoesNotHoldAuditMutexForCatalog(t *testing.T) {
 	if _, err := audit.VerifyEd25519(path, pub); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// waitParkedInCatalogObserve polls goroutine stacks until one is blocked
+// acquiring a mutex inside toolCatalog.observe. It needs no production hook.
+func waitParkedInCatalogObserve(bound time.Duration) bool {
+	buf := make([]byte, 1<<20)
+	for deadline := time.Now().Add(bound); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		n := runtime.Stack(buf, true)
+		for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+			if strings.Contains(g, "[sync.Mutex.Lock") && strings.Contains(g, "(*toolCatalog).observe(") {
+				return true
+			}
+		}
+	}
+	return false
 }
