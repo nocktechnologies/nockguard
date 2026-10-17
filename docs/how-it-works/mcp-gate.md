@@ -16,10 +16,14 @@ listener. Source: `internal/proxy/stdio.go`, `internal/proxy/httplisten.go`,
 [cmd/nockguard/main.go](../../cmd/nockguard/main.go).
 
 In opt-in stdio action-pairing mode, a complete client `tools/list` pagination
-chain builds the observed definition catalog used by signed v2 call rows.
-`notifications/tools/list_changed` invalidates it; clients must list again to
-restore observed hashes. The digest identifies an advertised definition, not
-the server's behavior. See [audit](audit.md) for the signed fields and limits.
+chain builds the observed definition catalog. Signed v2 call rows carry observed
+hashes only from a complete single-page listing. A completed paginated catalog
+is kept, but later calls stay `unobserved` with no hash, because raw upstream
+cursors can be reused across listings. A new first-page listing or
+`notifications/tools/list_changed` drops the catalog. After that, a fresh
+complete single-page listing restores observed hashes; a paginated one does
+not. The digest identifies an advertised definition, not the server's behavior.
+See [audit](audit.md) for the signed fields and limits.
 
 `mcp-http` bridges a stdio client to an HTTP MCP server in observe-only mode;
 it is not an enforcement listener ([cmd/nockguard/main.go](../../cmd/nockguard/main.go)). A managed

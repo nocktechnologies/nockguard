@@ -249,10 +249,21 @@ func TestSignedActionRowsCarryObservedDefinition(t *testing.T) {
 	if err := gate.upstreamToAgent(strings.NewReader(`{"jsonrpc":"2.0","id":2,"result":{}}`+"\n"), io.Discard, pending, nil); err != nil {
 		t.Fatal(err)
 	}
+	var checked, dispatch, observed int
 	for _, ev := range actionEvents(readAuditEvents(t, path)) {
+		checked++
 		if ev.ToolHashVersion != toolHashVersion || ev.ToolPinStatus != "unpinned" || ev.ToolDefinitionHash != gate.catalog.observe("read").hash {
 			t.Fatalf("row omitted signed observation: %+v", ev)
 		}
+		if ev.Decision == "dispatch" {
+			dispatch++
+		}
+		if ev.RecordType == "action_observation" && ev.Observation == "response_observed" {
+			observed++
+		}
+	}
+	if checked == 0 || dispatch != 1 || observed != 1 {
+		t.Fatalf("checked %d action rows with %d dispatch and %d response_observed; want 1 of each", checked, dispatch, observed)
 	}
 	if _, err := audit.VerifyEd25519(path, pub); err != nil {
 		t.Fatalf("observed trail did not verify: %v", err)
