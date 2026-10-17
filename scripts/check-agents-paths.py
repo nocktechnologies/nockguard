@@ -3,9 +3,10 @@
 
 Checks markdown link targets and path-like tokens in backtick spans and fenced
 code. A token is path-like when it is made only of word characters, dots,
-dashes and slashes, and contains "/" or ends in a file extension; URLs, globs,
-<placeholders>, flags and shell expressions never match. Every path must stay
-inside the repo root and match a tracked file or directory.
+dashes and slashes, and contains "/" or ends in a file extension, once any
+#anchor or :line suffix is cut; URLs, globs, <placeholders>, flags and shell
+expressions never match. Every path must stay inside the repo root and match
+a tracked file or directory.
 """
 import os
 import re
@@ -35,6 +36,7 @@ def candidates(text):
             if "..." in token:  # Go package pattern such as ./...
                 continue
             token = re.sub(r"[.,:;]$", "", token)
+            token = re.sub(r"(#.*|:\d+(?::\d+)?)$", "", token)  # anchor or :line
             if PATH.fullmatch(token) and ("/" in token or EXTENSION.search(token)):
                 yield lineno, token
 
