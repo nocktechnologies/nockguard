@@ -271,3 +271,42 @@ func TestConcurrentRequiredWritersKeepEd25519Chain(t *testing.T) {
 		t.Fatalf("VerifyEd25519() = (%d, %v), want (%d, nil)", n, err, writers*perWriter)
 	}
 }
+
+func TestRecordRequiredMalformedApprovalActorDoesNotLatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "required.audit.jsonl")
+	a, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	bad := Event{Agent: "worker", Tool: "t", Decision: "approval-granted", ApprovalActor: "root"}
+	if err := a.RecordRequired(bad); err == nil {
+		t.Fatal("malformed approval_actor was accepted")
+	}
+	if a.requiredErr != nil || FailureStatus(path) {
+		t.Fatalf("validation failure latched the writer: err=%v marker=%v", a.requiredErr, FailureStatus(path))
+	}
+	if err := a.RecordRequired(Event{Agent: "worker", Tool: "t", Decision: "allow"}); err != nil {
+		t.Fatalf("valid write after rejected input failed: %v", err)
+	}
+}
+
+// Negative control: a real write failure still latches.
+func TestRecordRequiredRealWriteFailureStillLatches(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "required.audit.jsonl")
+	a, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.f.Close() // forces the append to fail
+	if err := a.RecordRequired(Event{Agent: "worker", Tool: "t", Decision: "allow"}); err == nil {
+		t.Fatal("write on closed file succeeded")
+	}
+	if a.requiredErr == nil || !FailureStatus(path) {
+		t.Fatal("real write failure did not latch")
+	}
+	if err := a.RecordRequired(Event{Agent: "worker", Tool: "t", Decision: "allow"}); err == nil {
+		t.Fatal("required write succeeded after latch")
+	}
+}
