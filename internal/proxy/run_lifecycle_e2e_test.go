@@ -349,10 +349,11 @@ func startPairedProxy(t *testing.T, upstreamBody string) (*exec.Cmd, io.WriteClo
 }
 
 type pairedProxyOptions struct {
-	upstreamBody string   // script written as the upstream server
-	upstreamArg  string   // overrides --upstream when set
-	policyExtra  string   // extra lines under the demo agent
-	env          []string // extra proxy environment
+	upstreamBody string    // script written as the upstream server
+	upstreamArg  string    // overrides --upstream when set
+	policyExtra  string    // extra lines under the demo agent
+	env          []string  // extra proxy environment
+	stderr       io.Writer // proxy stderr when set
 }
 
 func startPairedProxyWith(t *testing.T, opts pairedProxyOptions) (*exec.Cmd, io.WriteCloser, string, ed25519.PublicKey) {
@@ -383,6 +384,7 @@ func startPairedProxyWith(t *testing.T, opts pairedProxyOptions) (*exec.Cmd, io.
 	}
 	cmd := exec.Command(binary, "proxy", "--upstream", server, "--agent", "demo", "--policy", policyPath)
 	cmd.Env = append(append(os.Environ(), "NOCKGUARD_AUDIT_ED25519_KEY="+seed), opts.env...)
+	cmd.Stderr = opts.stderr
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -584,5 +586,56 @@ func TestPairedSignalWaitsForLineInApprovalBeforeSweep(t *testing.T) {
 	got := audit.AssessRuns(data, true, time.Now())
 	if len(got) != 1 || got[0].Verdict != "LIMITED" {
 		t.Fatalf("closed run must have every dispatch terminated: %+v\n%s", got, data)
+	}
+}
+
+// When the upstream exits while an accepted line is still held (here, in
+// approval) past auditDrainBound, nothing is swept and the run stays unclosed.
+// That input-idle timeout must be reported as a shutdown timeout.
+func TestPairedUpstreamExitReportsInputIdleTimeout(t *testing.T) {
+	home, err := os.MkdirTemp("/tmp", "ngh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	env := []string{"HOME=" + home, "NOCKGUARD_APPROVER=local"}
+	stderr := &lockedBuffer{}
+	cmd, in, path, pub := startPairedProxyWith(t, pairedProxyOptions{
+		upstreamBody: "#!/bin/sh\nsleep 2\nexit 0\n",
+		policyExtra:  "    ask: [\"held_tool\"]\n",
+		env:          env,
+		stderr:       stderr,
+	})
+	waitForTrail(t, path, pub, `"run_event":"open"`)
+	if _, err := io.WriteString(in, callLine("1", "held_tool", "x")+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	approvalDir := filepath.Join(home, ".nockguard", "approvals")
+	held := false
+	for i := 0; i < 75 && !held; i++ {
+		if pending, err := approval.ListPending(approvalDir); err == nil && len(pending) > 0 {
+			held = true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !held {
+		t.Fatal("call was not held in approval before the upstream exited")
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("proxy did not exit after the upstream exited")
+	}
+	logs := stderr.String()
+	for _, want := range []string{"AUDIT-RUN input drain timed out", "upstream exited: audit drain deadline reached"} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("stderr lacks %q:\n%s", want, logs)
+		}
+	}
+	data := mustRead(t, path)
+	if strings.Contains(string(data), `"run_event":"close"`) {
+		t.Fatalf("run closed while an accepted line was still held:\n%s", data)
 	}
 }

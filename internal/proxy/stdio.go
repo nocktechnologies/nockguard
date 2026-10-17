@@ -1033,8 +1033,9 @@ func (p *StdioProxy) Run() error {
 // write or upstream write) can still register a dispatch. Only then record
 // outcome_unknown for still-tracked dispatches and drain queued audits. A
 // client that keeps stdin open is not waited on. It reports whether run/close
-// may be written, and whether the audit drain itself ran out of time. If the
-// input does not go idle in time, nothing is swept and the run stays unclosed.
+// may be written, and whether the bounded drain ran out of time, in either the
+// input-idle or the audit phase. If the input does not go idle in time,
+// nothing is swept and the run stays unclosed.
 func (p *StdioProxy) drainRunForClose(inputDone <-chan struct{}, pending *sync.Map, cause string) (closeAllowed, drainTimedOut bool) {
 	deadline := time.NewTimer(auditDrainBound)
 	defer deadline.Stop()
@@ -1049,7 +1050,7 @@ func (p *StdioProxy) drainRunForClose(inputDone <-chan struct{}, pending *sync.M
 	case <-idle:
 	case <-deadline.C:
 		p.logger.Printf("AUDIT-RUN input drain timed out run_id=%s", p.actionRunID)
-		return false, false
+		return false, true
 	}
 	audited := make(chan struct{})
 	go func() {
