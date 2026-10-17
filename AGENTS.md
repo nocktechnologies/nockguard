@@ -72,9 +72,9 @@ A new commit needs fresh checks and review.
 ## Rules that bite
 
 - Fail closed. Unknown agents, malformed tool patterns and unknown validation
-  categories must be denied; keep `internal/policy/glob_failopen_test.go` and
-  `internal/policy/validate_category_failopen_test.go` green. A `verify` that
-  cannot prove a trail exits non-zero; a selftest that proves nothing fails.
+  categories must be denied; keep every `*failopen_test.go` in
+  `internal/policy/` green. A `verify` that cannot prove a trail exits
+  non-zero; a selftest that proves nothing fails.
 - Audit records and the Wall expose decisions and limited references, never
   raw tool arguments, response payloads or secret values. See
   `docs/how-it-works/audit.md`.
