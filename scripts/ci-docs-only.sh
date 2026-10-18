@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Print docs_only=true or docs_only=false for the CI change-detect step.
-# Docs are any *.md file and anything under docs/. Pushes, an empty file list
-# and a failed API call all print false, so the full suite runs.
+# Docs are any *.md file and anything under docs/. A rename or copy counts as
+# docs only when both its old and new paths are docs. Pushes, an empty file
+# list and a failed API call all print false, so the full suite runs.
 # Usage: scripts/ci-docs-only.sh <pr-number>; needs GH_TOKEN and GITHUB_REPOSITORY.
 set -uo pipefail
 
@@ -11,7 +12,7 @@ if [ -z "$pr" ]; then
   exit 0
 fi
 
-if ! files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$pr/files" --jq '.[].filename'); then
+if ! files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$pr/files" --jq '.[] | .filename, (.previous_filename // empty)'); then
   echo "::warning::could not list PR files; running the full suite" >&2
   echo "docs_only=false"
   exit 0

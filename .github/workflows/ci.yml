@@ -21,6 +21,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: scripts/ci-docs-only.sh "${{ github.event.pull_request.number }}" | tee -a "$GITHUB_OUTPUT"
 
+      - name: docs-only detector tests
+        run: scripts/ci-docs-only-test.sh
+
       - name: AGENTS.md paths
         run: python3 scripts/check-agents-paths.py
 

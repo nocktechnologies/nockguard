@@ -9,7 +9,8 @@ All notable changes to NockGuard are documented here.
 - CI skips the test suite on PRs that change only Markdown or `docs/`; it
   still runs the tests that read repo Markdown, and `build-test` and
   `macos-test` still report. Contributor docs now ask for focused tests plus
-  lint before pushing, with the full suite run once in CI.
+  lint before pushing, with the full suite run once in CI. A rename or copy
+  skips the suite only when both its old and new paths are docs.
 
 ## [0.10.1] - 2026-10-17
 

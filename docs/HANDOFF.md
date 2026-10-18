@@ -30,6 +30,8 @@ and what is still open, and remove anything no longer true. Keep it short.
   PR that once touched code keeps running the full suite. If you add a test
   that reads a Markdown file, add it to the `doc-pinned tests` step in
   `.github/workflows/ci.yml`.
+  A rename or copy counts as docs only when both paths are docs;
+  `scripts/ci-docs-only-test.sh` pins that and runs on every PR.
 
 ## Still open
 
