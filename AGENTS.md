@@ -48,20 +48,10 @@ your agent:
 go run ./cmd/nockguard selftest --policy <your-policy.yaml>
 ```
 
-Closeout: maintainers gate the automated two-model review and the
-`CodeRabbit`, `build-test`, `macos-test`, `claude-review`
-(`.github/workflows/claude-code-review.yml`), and `scan`
-(`.github/workflows/gitleaks.yml`, every branch) checks on the exact PR head.
-A new commit needs fresh checks and review.
-
 ## Branches and releases
 
-- Product PRs branch from and target `next`, one issue or tracking card per
-  PR. `main` receives squash-promoted releases and is back-synced into
-  `next` after each tag. Never merge to `main` yourself.
-- Do not touch the release flow without a maintainer. It is in
-  `docs/runbooks/release.md`: one cleanup PR, freeze `next`, promote by squash
-  PR, tag from `main`, back-sync `main` into `next`.
+- Product PRs target `next`. Release details live in
+  `docs/runbooks/release.md`.
 - The release version is hardcoded in `cmd/nockguard/main.go` and must move
   with `docs/ROADMAP.md` and the `CHANGELOG.md` heading;
   `scripts/check-release-version.sh` rejects a mismatch.
@@ -128,3 +118,6 @@ A new commit needs fresh checks and review.
   `scripts/check-agents-paths.py` fails CI when one is not git-tracked; write
   example file names as a `<placeholder>`.
 - Move stale docs and dated handoffs to `docs/archive/` instead of deleting them.
+- This is a public repository. AGENTS.md and docs/HANDOFF.md stay
+  product-only: no agent or person names, no card numbers, no internal
+  coordination systems or hosts, no review/merge-gate procedure.
