@@ -275,6 +275,7 @@
       <div class="pill unreadable"><span class="n" id="c-unreadable">—</span><span class="l">unreadable</span></div>
       <div class="pill caught"><span class="n" id="c-caught">—</span><span class="l">rejected share of records</span></div>
       <button class="toggle snd" id="t-sound" title="beep when something is blocked">🔊 SOUND</button>
+      <button class="toggle snd" id="t-notify" title="desktop notification when something is blocked while this tab is hidden, or when the audit chain breaks">🔔 NOTIFY</button>
     </div>
     <div class="filters">
       <input id="f-text" class="finput" type="search" placeholder="filter by agent or tool…" autocomplete="off" spellcheck="false" />
@@ -355,6 +356,7 @@
   let empty = document.getElementById('empty');
   let MAX_ROWS = 500;
   let demoMode = false;
+  let contextLive = false; // true only once /context loaded and said demo:false
   let recentSession = '';
   // open on wide screens, collapsed on narrow; follows resizes across the breakpoint
   const wideMQ = typeof window.matchMedia === 'function' ? window.matchMedia('(min-width:601px)') : null;
@@ -370,6 +372,7 @@
     MAX_ROWS = Number.isSafeInteger(c.window) && c.window > 0 ? Math.min(c.window, 500) : 500;
     document.getElementById('window-size').textContent = MAX_ROWS;
     demoMode = !!c.demo;
+    contextLive = c.demo === false;
     document.getElementById('source-guard').textContent = demoMode ? 'synthetic (no Guard evidence)' : c.guardTrail;
     document.getElementById('source-lock').textContent = demoMode ? 'synthetic (no Lock evidence)' : (c.lockDB || 'not configured');
     document.getElementById('context-agent').textContent = demoMode ? 'sample agents' : c.agent;
@@ -387,6 +390,7 @@
     }
   }).catch(() => {
     document.getElementById('verification-status').textContent = 'context unavailable';
+    setNotify(false, false); // shows the real state (off) but keeps the saved choice
   });
 
   // --- toggles ---
@@ -399,6 +403,57 @@
     if (soundOn && !audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
     if (soundOn && audioCtx) audioCtx.resume(); // unlock on the click gesture
   });
+
+  // Desktop notifications are opt-in and remembered in localStorage. Text is the
+  // agent, tool and decision only, never arguments.
+  const tNotify = document.getElementById('t-notify');
+  const hasNotify = typeof Notification !== 'undefined';
+  let notifyOn = false;
+  try { notifyOn = hasNotify && Notification.permission === 'granted' && localStorage.getItem('nockguard.notify') === '1'; } catch (e) {}
+  tNotify.hidden = !hasNotify;
+  function setNotify(on, save = true) {
+    notifyOn = on;
+    tNotify.classList.toggle('on', on);
+    if (save) try { localStorage.setItem('nockguard.notify', on ? '1' : '0'); } catch (e) {}
+  }
+  setNotify(notifyOn);
+  tNotify.addEventListener('click', () => {
+    if (!notifyOn && !contextLive) return; // cannot turn on until /context says live
+    setNotify(!notifyOn);
+    if (!notifyOn) return;
+    const check = () => { if (Notification.permission !== 'granted') setNotify(false); };
+    const asked = Notification.requestPermission(check); // older browsers take only the callback
+    if (asked) asked.then(check, () => setNotify(false));
+  });
+  const tabHidden = () => document.visibilityState !== 'visible';
+  function desktopNotify(title, body) {
+    if (!notifyOn || !contextLive) return;
+    if (Notification.permission !== 'granted') { setNotify(false); return; } // revoked since
+    try { new Notification(title, { body }); } catch (e) {}
+  }
+  // Every connection replays history first; only rows after the server's
+  // "replayed" marker on the current connection are new.
+  let streamLive = false;
+  // At most one per 10 s while the tab is hidden; the rest collapse into "+N more".
+  let notifyCooling = false, notifyMissed = 0;
+  function notifyAndCool(title, body) {
+    desktopNotify(title, body);
+    notifyCooling = true;
+    setTimeout(() => {
+      notifyCooling = false;
+      if (notifyMissed && tabHidden()) notifyAndCool('NockGuard blocked +' + notifyMissed + ' more', 'Open the Live Wall for details.');
+      notifyMissed = 0;
+    }, 10000);
+  }
+  function notifyBlocked(ev) {
+    if (!notifyOn || !contextLive || !tabHidden()) return;
+    // The tool name only: a label like "Bash: <command>" must not put command
+    // text into the OS notification history.
+    const tool = String(ev.tool || '').split(/[:\s]/)[0].slice(0, 64) || '?';
+    if (notifyCooling) notifyMissed++;
+    else notifyAndCool('NockGuard blocked ' + tool, [ev.agent || '—', tool, ev.decision || '?'].join(' · '));
+  }
+  let seenBreak = null;
 
   // --- filters: substring match on agent/tool + exact decision + time range ---
   const fText = document.getElementById('f-text');
@@ -644,13 +699,14 @@
     else renderPulse();                     // (applyFilters already refreshes the pulse)
     // The alarm fires on the loudest signals: any block, and any critical catch
     // (e.g. a secret-exfil deny) — a routine allowlist deny stays quiet.
-    if (dec === 'block' || sev === 'critical') { hitFlash(); beep(); }
+    if (dec === 'block' || sev === 'critical') { hitFlash(); beep(); if (streamLive) notifyBlocked(ev); }
   }
 
   function connect() {
     const es = new EventSource('/events');
     const conn = document.getElementById('conn');
-    es.onopen = () => { conn.textContent = 'live'; };
+    es.onopen = () => { conn.textContent = 'live'; streamLive = false; };
+    es.addEventListener('replayed', () => { streamLive = true; });
     es.onmessage = (m) => { try { render(JSON.parse(m.data)); } catch(e){} };
     es.onerror = () => { conn.textContent = 'reconnecting…'; };
   }
@@ -680,6 +736,7 @@
         ? 'NO EVIDENCE — empty trail' : (v.status || 'unavailable');
       document.getElementById('verification-time').textContent = v.last_verified_at || '—';
       auditfail.hidden = !v.audit_failing;
+      if (v.chain_intact === true) seenBreak = null; // a repaired chain re-arms the break notification
       // ONLY an explicit chain_intact:false is a tamper. status "unavailable"
       // (a read/scan error, chain_intact null) surfaces as the quiet chainnote,
       // never the red banner — a benign read glitch must not cry wolf (N9870).
@@ -688,6 +745,14 @@
         tamperDetail.textContent =
           (v.break_at != null ? 'break at entry ' + v.break_at + ' · ' : '') + (v.detail || '');
         chainnote.hidden = true;
+        // break_at is the line the server marks verifyState "broken"; a rollback has
+        // none. Notify once per break, and not when the banner is already on screen.
+        const breakKey = v.break_at ?? 'no entry';
+        if (contextLive && breakKey !== seenBreak) {
+          seenBreak = breakKey;
+          if (tabHidden()) desktopNotify('NockGuard audit trail broken', 'Audit trail broken' +
+            (v.break_at != null ? ' at entry ' + v.break_at : '') + ': the record may have been altered.');
+        }
       } else if (v.status === 'unavailable' || v.status === 'unconfigured' ||
                  v.status === 'unanchored' || v.status === 'no_rows') {
         tamper.hidden = true;

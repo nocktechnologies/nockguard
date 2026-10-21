@@ -4,6 +4,43 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-21
+
+v0.11.0 is a security release. NockGuard now requires Go 1.27.3 or later to
+build: GO-2026-6809 in `crypto/x509` was reachable through the Wall server in
+the published v0.10.1 binaries, which were built with an affected Go release.
+Upgrade by downloading the v0.11.0 release archive or running
+`brew upgrade nockguard`. This release also adds opt-in desktop notifications
+to the Live Wall and skips the CI test suite on docs-only PRs.
+
+### Security
+
+- Requires Go 1.27.3 or later to build. GO-2026-6809 in `crypto/x509`,
+  reached through the Wall server's `http.Server.Serve`, affects Go before
+  1.26.10 and Go 1.27.0 to 1.27.2. go.mod now requires Go 1.27.3, so any
+  older toolchain, including the patched 1.26.10, either downloads Go 1.27.3
+  automatically or refuses to build.
+
+### Added
+
+- The Live Wall has an opt-in NOTIFY toggle for desktop notifications. While
+  the tab is hidden, a new `block` or critical row raises one notification with
+  the agent, tool name (cut at the first `:` or space, at most 64 characters)
+  and decision, at most one per 10 seconds with the rest collapsed into
+  "+N more"; an audit-chain break notifies once, and again if it returns after
+  an intact check. Replayed
+  history (the `/events` stream now marks the end of its replay with a
+  `replayed` event) and demo rows do not notify. The choice is remembered in
+  the browser.
+
+### Changed
+
+- CI skips the test suite on PRs that change only Markdown or `docs/`; it
+  still runs the tests that read repo Markdown, and `build-test` and
+  `macos-test` still report. Contributor docs now ask for focused tests plus
+  lint before pushing, with the full suite run once in CI. A rename or copy
+  skips the suite only when both its old and new paths are docs.
+
 ## [0.10.1] - 2026-10-17
 
 v0.10.1 rejects malformed CLI arguments before setup and removes redundant

@@ -22,24 +22,24 @@ no phone-home or license gate. Follows Engineering Standards v4.
 ## Build and test
 
 Go is pinned in `go.mod`; the Wall browser tests need Node 22. Go tests live
-beside each package as `*_test.go`. Run focused tests while working, then
-every CI step before you open a PR:
+beside each package as `*_test.go`. Before you push, run only the tests for
+the packages you touched, plus lint. Do not run the full suite locally; CI runs
+it once as the gate:
 
 ```bash
-python3 scripts/check-agents-paths.py          # every path named in AGENTS.md is git-tracked
-node --test cmd/nockguard-wall/index.test.js   # Wall browser tests
-test -z "$(gofmt -l internal/ cmd/)"           # gofmt
-go vet ./...
-go build ./...
-go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
-"$(go env GOPATH)/bin/govulncheck" ./...
-go test -race ./...
-python3 scripts/quickstart-acceptance.py       # README quickstart end to end; Linux only
+go test -race ./internal/<package>/ ./cmd/<command>/   # only the packages you touched
+test -z "$(gofmt -l internal/ cmd/)" && go vet ./...   # lint
+python3 scripts/check-agents-paths.py                  # if you edited AGENTS.md
+node --test cmd/nockguard-wall/index.test.js           # if you touched the Wall
 ```
 
-These are the `build-test` job steps in `.github/workflows/ci.yml`; the same
-workflow runs `go test -race ./...` on macOS as `macos-test`. The test suite
-needs no external services and there are no generated files.
+The `build-test` job in `.github/workflows/ci.yml` runs the full gate: the
+path check, Wall tests, gofmt, vet, build, govulncheck, `go test -race ./...`
+and `scripts/quickstart-acceptance.py`; `macos-test` runs `go test -race ./...`
+on macOS. `scripts/ci-docs-only.sh` marks a PR whose files are all `*.md` or
+under `docs/` as docs-only: both jobs then skip the suite, still report, and
+`build-test` runs only the path check and the tests that read repo Markdown.
+The test suite needs no external services and there are no generated files.
 
 Before opening a PR, run the firewall's own proof against a policy that names
 your agent:
@@ -48,20 +48,10 @@ your agent:
 go run ./cmd/nockguard selftest --policy <your-policy.yaml>
 ```
 
-Closeout: maintainers gate the automated two-model review and the
-`CodeRabbit`, `build-test`, `macos-test`, `claude-review`
-(`.github/workflows/claude-code-review.yml`), and `scan`
-(`.github/workflows/gitleaks.yml`, every branch) checks on the exact PR head.
-A new commit needs fresh checks and review.
-
 ## Branches and releases
 
-- Product PRs branch from and target `next`, one issue or tracking card per
-  PR. `main` receives squash-promoted releases and is back-synced into
-  `next` after each tag. Never merge to `main` yourself.
-- Do not touch the release flow without a maintainer. It is in
-  `docs/runbooks/release.md`: one cleanup PR, freeze `next`, promote by squash
-  PR, tag from `main`, back-sync `main` into `next`.
+- Product PRs target `next`. Release details live in
+  `docs/runbooks/release.md`.
 - The release version is hardcoded in `cmd/nockguard/main.go` and must move
   with `docs/ROADMAP.md` and the `CHANGELOG.md` heading;
   `scripts/check-release-version.sh` rejects a mismatch.
@@ -128,3 +118,6 @@ A new commit needs fresh checks and review.
   `scripts/check-agents-paths.py` fails CI when one is not git-tracked; write
   example file names as a `<placeholder>`.
 - Move stale docs and dated handoffs to `docs/archive/` instead of deleting them.
+- This is a public repository. AGENTS.md and docs/HANDOFF.md stay
+  product-only: no agent or person names, no card numbers, no internal
+  coordination systems or hosts, no review/merge-gate procedure.
