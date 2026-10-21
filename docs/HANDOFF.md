@@ -5,7 +5,7 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## What changed
 
-- Release metadata was updated for v0.10.1.
+- Release metadata was updated for v0.11.0 (Go 1.27.3 floor for GO-2026-6809).
 - `AGENTS.md` indexes project documentation and CI checks its linked paths.
 
 - 2026-10-17, Nock 11968: `ci.yml` skips the suite on docs-only PRs

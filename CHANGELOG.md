@@ -4,6 +4,15 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-21
+
+v0.11.0 is a security release. NockGuard now requires Go 1.27.3 or later to
+build: GO-2026-6809 in `crypto/x509` was reachable through the Wall server in
+the published v0.10.1 binaries, which were built with an affected Go release.
+Upgrade by downloading the v0.11.0 release archive or running
+`brew upgrade nockguard`. This release also adds opt-in desktop notifications
+to the Live Wall and skips the CI test suite on docs-only PRs.
+
 ### Security
 
 - Requires Go 1.27.3 or later to build. GO-2026-6809 in `crypto/x509`,
