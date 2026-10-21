@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const { test } = require('node:test');
 
-function wall(contextPayload, mediaQuery) {
+function wall(contextPayload, mediaQuery, globals = {}) {
   const elements = new Map();
   function element() {
     const classes = new Set();
@@ -16,7 +16,8 @@ function wall(contextPayload, mediaQuery) {
         remove(name) { classes.delete(name); },
         toggle(name, on) { if (on) classes.add(name); else classes.delete(name); },
       },
-      addEventListener() {},
+      addEventListener(type, listener) { (this.listeners ??= {})[type] = listener; },
+      click() { this.listeners?.click(); },
       add(option) { this.options.push(option); },
       remove(index) { this.options.splice(index, 1); },
       prepend(child) { this.children.unshift(child); child.parent = this; },
@@ -26,7 +27,7 @@ function wall(contextPayload, mediaQuery) {
     };
   }
   const document = {
-    body: { dataset: {} },
+    body: { dataset: {} }, visibilityState: globals.visibilityState,
     getElementById(id) {
       if (!elements.has(id)) {
         const el = element();
@@ -65,9 +66,10 @@ function wall(contextPayload, mediaQuery) {
   const context = vm.createContext({
     document, window: mediaQuery ? { matchMedia: () => mediaQuery } : {}, Date, URLSearchParams,
     Option: function(label, value) { this.label = label; this.value = value; },
-    EventSource: class {}, fetch: () => contextPayload === undefined
+    EventSource: class { addEventListener() {} }, fetch: () => contextPayload === undefined
       ? new Promise(() => {})
       : Promise.resolve({ json: () => Promise.resolve(contextPayload) }), setInterval() {},
+    ...globals,
   });
   vm.runInContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], context);
   return { context, elements, decisions };
@@ -238,4 +240,282 @@ test('method rows retain labels without inflating tool allow counts', () => {
  const w = wall();
  vm.runInContext("render({decision:'allow', bucket:'approved', severity:'none'}); render({decision:'method-allow', bucket:'other', severity:'none'}); render({decision:'method-deny', bucket:'other', severity:'high'})", w.context);
  assert.equal(w.elements.get('c-allow').textContent, 1);
+});
+
+// A fake browser for the notify toggle: permission prompt, storage, a manual
+// clock for setTimeout, an EventSource whose reconnect the test drives, and a
+// record of every Notification shown.
+function notifyEnv({ permission = 'granted', stored = null, visibilityState = 'hidden', storageThrows = false } = {}) {
+  const shown = [], timers = [], sources = [], store = new Map(stored === null ? [] : [['nockguard.notify', stored]]);
+  let requests = 0, now = 0;
+  function Notification(title, opts) { shown.push({ title, body: opts.body }); }
+  Notification.permission = stored === null ? 'default' : permission;
+  Notification.requestPermission = () => { requests++; Notification.permission = permission; return Promise.resolve(permission); };
+  const localStorage = {
+    getItem(k) { if (storageThrows) throw new Error('blocked'); return store.get(k) ?? null; },
+    setItem(k, v) { if (storageThrows) throw new Error('blocked'); store.set(k, v); },
+  };
+  const setTimeout = (fn, ms) => timers.push({ at: now + ms, fn });
+  function advance(ms) {
+    now += ms;
+    for (let t; (t = timers.find(t => t.at <= now));) { timers.splice(timers.indexOf(t), 1); t.fn(); }
+  }
+  const EventSource = class {
+    constructor() { this.named = {}; sources.push(this); }
+    addEventListener(type, fn) { this.named[type] = fn; }
+  };
+  return { globals: { Notification, localStorage, setTimeout, visibilityState, EventSource },
+    shown, store, advance, requests: () => requests, Notification,
+    reconnect: () => sources.at(-1).onopen(), replayed: () => sources.at(-1).named.replayed() };
+}
+const tick = () => new Promise(resolve => setImmediate(resolve));
+const fresh = (extra) => `render({decision:'block', bucket:'blocked', severity:'high', agent:'coder', tool:'write_file',
+  ts:'2026-01-01T00:00:00Z', ${extra || ''}})`;
+// A wall whose /context said demo:false and whose stream finished its replay.
+async function liveWall(env) {
+  const w = wall({ demo: false }, undefined, env.globals);
+  await tick();
+  env.reconnect();
+  env.replayed();
+  return w;
+}
+
+test('notify toggle asks permission once clicked and remembers the choice', async () => {
+  const page = fs.readFileSync(new URL('./index.html', `file://${__filename}`), 'utf8');
+  assert.match(page, /<button class="toggle snd" id="t-notify"[^>]*>/);
+  const env = notifyEnv();
+  const w = await liveWall(env);
+  const button = w.elements.get('t-notify');
+  assert.equal(button.hidden, false);
+  assert.equal(env.requests(), 0); // no prompt before the click
+  vm.runInContext(fresh(), w.context);
+  assert.equal(env.shown.length, 0); // negative control: off by default
+  button.click();
+  await tick();
+  assert.equal(env.requests(), 1);
+  assert.equal(env.store.get('nockguard.notify'), '1');
+  assert.ok(button.classList.contains('on'));
+  button.click();
+  assert.equal(env.store.get('nockguard.notify'), '0');
+  assert.ok(!button.classList.contains('on'));
+  // A remembered choice survives a reload, unless the permission was revoked.
+  const again = notifyEnv({ stored: '1' });
+  assert.ok(wall(undefined, undefined, again.globals).elements.get('t-notify').classList.contains('on'));
+  const revoked = notifyEnv({ stored: '1', permission: 'denied' });
+  assert.ok(!wall(undefined, undefined, revoked.globals).elements.get('t-notify').classList.contains('on'));
+});
+
+test('notify turns itself off when permission is refused and survives blocked storage', async () => {
+  const env = notifyEnv({ permission: 'denied' });
+  const w = wall(undefined, undefined, env.globals);
+  w.elements.get('t-notify').click();
+  await tick();
+  assert.equal(env.store.get('nockguard.notify'), '0');
+  assert.ok(!w.elements.get('t-notify').classList.contains('on'));
+  const locked = notifyEnv({ storageThrows: true });
+  const w2 = await liveWall(locked);
+  w2.elements.get('t-notify').click();
+  await tick();
+  vm.runInContext(fresh(), w2.context);
+  assert.equal(locked.shown.length, 1);
+  // Without the Notification API the toggle is hidden and the page still runs.
+  const w3 = wall();
+  assert.equal(w3.elements.get('t-notify').hidden, true);
+  vm.runInContext(fresh(), w3.context);
+});
+
+test('blocks notify only while hidden, at most once per 10 s, the rest as +N more', async () => {
+  const env = notifyEnv({ stored: '1' });
+  const w = await liveWall(env);
+  vm.runInContext(fresh("decision:'deny', severity:'low', tool:'routine'"), w.context);
+  assert.equal(env.shown.length, 0); // routine denies stay quiet
+  vm.runInContext(fresh("args:'SECRET'"), w.context);
+  assert.deepEqual(env.shown, [{ title: 'NockGuard blocked write_file', body: 'coder · write_file · block' }]);
+  assert.doesNotMatch(JSON.stringify(env.shown), /SECRET/);
+  vm.runInContext(fresh("tool:'a'"), w.context);
+  vm.runInContext(fresh("tool:'a'"), w.context); // a repeat still counts toward +N
+  vm.runInContext(fresh("decision:'deny', severity:'critical', tool:'c'"), w.context);
+  assert.equal(env.shown.length, 1);
+  env.advance(9999);
+  assert.equal(env.shown.length, 1);
+  env.advance(1);
+  assert.equal(env.shown.length, 2);
+  assert.equal(env.shown[1].title, 'NockGuard blocked +3 more');
+  env.advance(10000); // nothing pending: the window closes quietly
+  assert.equal(env.shown.length, 2);
+  vm.runInContext(fresh("tool:'d'"), w.context);
+  assert.equal(env.shown[2].title, 'NockGuard blocked d');
+  vm.runInContext(fresh("tool:'e'"), w.context);
+  w.context.document.visibilityState = 'visible';
+  env.advance(10000); // the tab came back: the pending +1 is dropped
+  assert.equal(env.shown.length, 3);
+});
+
+test('replayed history never notifies, even with the server clock an hour ahead', async () => {
+  const env = notifyEnv({ stored: '1' });
+  const w = wall({ demo: false }, undefined, env.globals);
+  await tick();
+  const ahead = new Date(Date.now() + 3600e3).toISOString();
+  const replay = () => {
+    for (let i = 0; i < 500; i++) vm.runInContext(fresh(`tool:'old${i}', ts:'${ahead}'`), w.context);
+  };
+  env.reconnect();
+  replay();
+  assert.equal(env.shown.length, 0);
+  env.replayed();
+  vm.runInContext(fresh(`tool:'live', ts:'${ahead}'`), w.context);
+  assert.deepEqual(env.shown.map(n => n.title), ['NockGuard blocked live']);
+  // A reconnect replays history again; it stays quiet until the new marker.
+  env.advance(10000);
+  env.reconnect();
+  replay();
+  assert.equal(env.shown.length, 1);
+  env.replayed();
+  vm.runInContext(fresh("tool:'after'"), w.context);
+  assert.equal(env.shown[1].title, 'NockGuard blocked after');
+});
+
+test('a pending or failed /context keeps notifications off', async () => {
+  const env = notifyEnv({ stored: '1' });
+  let reject;
+  const pending = url => new Promise((resolve, fail) => { if (url === '/context') reject = fail; });
+  const w = wall(undefined, undefined, Object.assign({}, env.globals, { fetch: pending }));
+  env.reconnect();
+  env.replayed();
+  vm.runInContext(fresh(), w.context);
+  assert.equal(env.shown.length, 0); // /context still pending
+  reject(new Error('offline'));
+  await tick();
+  vm.runInContext(fresh(), w.context);
+  assert.equal(env.shown.length, 0); // /context failed
+  assert.equal(w.elements.get('verification-status').textContent, 'context unavailable');
+  assert.ok(!w.elements.get('t-notify').classList.contains('on')); // the button shows the real state
+  assert.equal(env.store.get('nockguard.notify'), '1'); // the saved choice survives an outage
+  assert.equal(vm.runInContext('demoMode', w.context), false); // chain checks still run
+  const control = notifyEnv({ stored: '1' });
+  vm.runInContext(fresh(), (await liveWall(control)).context);
+  assert.equal(control.shown.length, 1);
+  // A block while /context is pending does not start the 10 s window.
+  const slow = notifyEnv({ stored: '1' });
+  let resolve;
+  const late = url => new Promise(ok => { if (url === '/context') resolve = ok; });
+  const w2 = wall(undefined, undefined, Object.assign({}, slow.globals, { fetch: late }));
+  slow.reconnect();
+  slow.replayed();
+  vm.runInContext(fresh("tool:'early'"), w2.context);
+  resolve({ json: () => Promise.resolve({ demo: false }) });
+  await tick();
+  vm.runInContext(fresh("tool:'next'"), w2.context);
+  assert.deepEqual(slow.shown.map(n => n.title), ['NockGuard blocked next']);
+});
+
+test('notify cannot be turned on until /context loads live', async () => {
+  // /context failed: the click leaves the toggle off and saves nothing.
+  const failed = notifyEnv();
+  const offline = url => url === '/context' ? Promise.reject(new Error('offline')) : new Promise(() => {});
+  const w = wall(undefined, undefined, Object.assign({}, failed.globals, { fetch: offline }));
+  await tick();
+  assert.equal(w.elements.get('verification-status').textContent, 'context unavailable');
+  w.elements.get('t-notify').click();
+  await tick();
+  assert.ok(!w.elements.get('t-notify').classList.contains('on'));
+  assert.notEqual(failed.store.get('nockguard.notify'), '1');
+  assert.equal(failed.requests(), 0);
+  // /context pending: a click does nothing; after it loads live a click turns notify on.
+  const env = notifyEnv();
+  let resolve;
+  const late = url => new Promise(ok => { if (url === '/context') resolve = ok; });
+  const w2 = wall(undefined, undefined, Object.assign({}, env.globals, { fetch: late }));
+  const button = w2.elements.get('t-notify');
+  button.click();
+  await tick();
+  assert.ok(!button.classList.contains('on'));
+  assert.notEqual(env.store.get('nockguard.notify'), '1');
+  resolve({ json: () => Promise.resolve({ demo: false }) });
+  await tick();
+  button.click();
+  await tick();
+  assert.ok(button.classList.contains('on'));
+  assert.equal(env.store.get('nockguard.notify'), '1');
+  assert.equal(env.requests(), 1);
+});
+
+test('a permission revoked after opt-in turns the toggle off at notify time', async () => {
+  const env = notifyEnv({ stored: '1' });
+  const w = await liveWall(env);
+  assert.ok(w.elements.get('t-notify').classList.contains('on'));
+  env.Notification.permission = 'denied';
+  vm.runInContext(fresh(), w.context);
+  assert.equal(env.shown.length, 0);
+  assert.ok(!w.elements.get('t-notify').classList.contains('on'));
+  assert.equal(env.store.get('nockguard.notify'), '0');
+});
+
+test('demo rows never raise desktop notifications', async () => {
+  const env = notifyEnv({ stored: '1' });
+  const w = wall({ demo: true }, undefined, env.globals);
+  await tick();
+  vm.runInContext(fresh(), w.context);
+  assert.equal(env.shown.length, 0);
+});
+
+test('a broken audit chain notifies once per break while hidden', async () => {
+  let report = { chain_intact: true, status: 'verified', entries_verified: 3 };
+  const env = notifyEnv({ stored: '1' });
+  const w = wall({ demo: false }, undefined, env.globals);
+  await tick();
+  w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(report) });
+  await vm.runInContext('checkChain()', w.context);
+  assert.equal(env.shown.length, 0); // intact chain stays quiet
+  report = { chain_intact: false, status: 'tampered', break_at: 4 };
+  await vm.runInContext('checkChain()', w.context);
+  await vm.runInContext('checkChain()', w.context);
+  assert.deepEqual(env.shown, [{ title: 'NockGuard audit trail broken',
+    body: 'Audit trail broken at entry 4: the record may have been altered.' }]);
+  report = { chain_intact: false, status: 'tampered', break_at: null }; // rollback: no single entry
+  await vm.runInContext('checkChain()', w.context);
+  assert.equal(env.shown[1].body, 'Audit trail broken: the record may have been altered.');
+  // A break first seen with the banner on screen does not notify later.
+  w.context.document.visibilityState = 'visible';
+  report = { chain_intact: false, status: 'tampered', break_at: 2 };
+  await vm.runInContext('checkChain()', w.context);
+  w.context.document.visibilityState = 'hidden';
+  await vm.runInContext('checkChain()', w.context);
+  assert.equal(env.shown.length, 2);
+});
+
+test('a notification carries only the tool name, never command text', async () => {
+  const env = notifyEnv({ stored: '1' });
+  const w = await liveWall(env);
+  vm.runInContext(fresh("tool:'Bash: rm -rf /'"), w.context);
+  assert.deepEqual(env.shown, [{ title: 'NockGuard blocked Bash', body: 'coder · Bash · block' }]);
+  env.advance(10000);
+  vm.runInContext(fresh("tool:'run_shell\\tcat /etc/shadow'"), w.context);
+  env.advance(10000);
+  vm.runInContext(fresh("tool:'" + 'x'.repeat(200) + "'"), w.context);
+  env.advance(10000);
+  vm.runInContext(fresh("tool:': leading'"), w.context);
+  assert.deepEqual(env.shown.slice(1).map(n => n.title),
+    ['NockGuard blocked run_shell', 'NockGuard blocked ' + 'x'.repeat(64), 'NockGuard blocked ?']);
+  assert.doesNotMatch(JSON.stringify(env.shown), /rm -rf|shadow|leading/);
+});
+
+test('a chain that turns intact again re-arms the break notification', async () => {
+  let report = { chain_intact: false, status: 'tampered', break_at: 4 };
+  const env = notifyEnv({ stored: '1' });
+  const w = wall({ demo: false }, undefined, env.globals);
+  await tick();
+  w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(report) });
+  await vm.runInContext('checkChain()', w.context);
+  report = { chain_intact: null, status: 'unavailable' }; // unknown is not intact: no re-arm
+  await vm.runInContext('checkChain()', w.context);
+  report = { chain_intact: false, status: 'tampered', break_at: 4 };
+  await vm.runInContext('checkChain()', w.context);
+  assert.equal(env.shown.length, 1);
+  report = { chain_intact: true, status: 'verified', entries_verified: 5 };
+  await vm.runInContext('checkChain()', w.context);
+  report = { chain_intact: false, status: 'tampered', break_at: 4 };
+  await vm.runInContext('checkChain()', w.context);
+  assert.equal(env.shown.length, 2);
+  assert.equal(env.shown[1].body, 'Audit trail broken at entry 4: the record may have been altered.');
 });

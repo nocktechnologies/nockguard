@@ -28,3 +28,8 @@ large/unreadable Lock log cannot prove protection. For a combined offline
 check, use `nockguard verify --session` with both logs and public keys.
 Source: `cmd/nockguard-wall/sessions.go`,
 `internal/sessionverify/sessionverify.go`.
+
+The opt-in NOTIFY toggle shows a desktop notification, while the tab is hidden, for
+rows that would beep (any `block` or critical catch), at most one per 10 seconds
+with the rest collapsed into "+N more", and once per audit-chain break. Replayed
+history and demo rows do not notify. Source: `cmd/nockguard-wall/index.html`.
