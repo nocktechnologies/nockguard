@@ -16,7 +16,7 @@ function wall(contextPayload, mediaQuery, globals = {}) {
         remove(name) { classes.delete(name); },
         toggle(name, on) { if (on) classes.add(name); else classes.delete(name); },
       },
-      addEventListener(type, listener) { this.listeners = { ...this.listeners, [type]: listener }; },
+      addEventListener(type, listener) { (this.listeners ??= {})[type] = listener; },
       click() { this.listeners?.click(); },
       add(option) { this.options.push(option); },
       remove(index) { this.options.splice(index, 1); },
@@ -320,7 +320,7 @@ test('blocks notify only while hidden, at most once per 10 s, the rest as +N mor
   assert.doesNotMatch(JSON.stringify(env.shown), /SECRET/);
   vm.runInContext(fresh("tool:'a'"), w.context);
   vm.runInContext(fresh("tool:'b'"), w.context);
-  vm.runInContext(`render({decision:'deny', bucket:'blocked', severity:'critical', agent:'coder', tool:'c', ts:new Date(Date.now() + 2000).toISOString()})`, w.context);
+  vm.runInContext(fresh("decision:'deny', severity:'critical', tool:'c'"), w.context);
   assert.equal(env.shown.length, 1);
   env.advance(9999);
   assert.equal(env.shown.length, 1);

@@ -428,22 +428,23 @@
   const notifyFrom = Date.now();
   const notified = new Set();
   let notifyCooling = false, notifyMissed = 0;
-  function endNotifyCooldown() {
-    if (!notifyMissed) { notifyCooling = false; return; }
-    desktopNotify('NockGuard blocked +' + notifyMissed + ' more', '+' + notifyMissed + ' more');
-    notifyMissed = 0;
-    setTimeout(endNotifyCooldown, 10000);
+  function notifyAndCool(title, body) {
+    desktopNotify(title, body);
+    notifyCooling = true;
+    setTimeout(() => {
+      notifyCooling = false;
+      if (notifyMissed) notifyAndCool('NockGuard blocked +' + notifyMissed + ' more', 'Open the Live Wall for details.');
+      notifyMissed = 0;
+    }, 10000);
   }
   function notifyBlocked(ev) {
-    if (!notifyOn || document.visibilityState === 'visible') return;
+    if (!notifyOn || document.visibilityState === 'visible' || !(Date.parse(ev.ts) >= notifyFrom)) return;
     const key = [ev.ts, ev.source, ev.agent, ev.tool, ev.decision].join('|');
-    if (!(Date.parse(ev.ts) >= notifyFrom) || notified.has(key)) return;
+    if (notified.has(key)) return;
     notified.add(key);
     if (notified.size > MAX_ROWS) notified.delete(notified.values().next().value);
-    if (notifyCooling) { notifyMissed++; return; }
-    desktopNotify('NockGuard blocked ' + (ev.tool || '?'), (ev.agent || '—') + ' · ' + (ev.tool || '?'));
-    notifyCooling = true;
-    setTimeout(endNotifyCooldown, 10000);
+    if (notifyCooling) notifyMissed++;
+    else notifyAndCool('NockGuard blocked ' + (ev.tool || '?'), (ev.agent || '—') + ' · ' + (ev.tool || '?'));
   }
   let notifiedBreak = null;
 
