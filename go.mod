@@ -1,6 +1,6 @@
 module github.com/nocktechnologies/nockguard
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/nocktechnologies/nocklock v0.4.1-0.20260925141124-771c18b25e7f
