@@ -418,6 +418,7 @@
   }
   setNotify(notifyOn);
   tNotify.addEventListener('click', () => {
+    if (!notifyOn && !contextLive) return; // cannot turn on until /context says live
     setNotify(!notifyOn);
     if (!notifyOn) return;
     const check = () => { if (Notification.permission !== 'granted') setNotify(false); };

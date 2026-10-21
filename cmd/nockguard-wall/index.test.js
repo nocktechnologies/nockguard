@@ -409,6 +409,37 @@ test('a pending or failed /context keeps notifications off', async () => {
   assert.deepEqual(slow.shown.map(n => n.title), ['NockGuard blocked next']);
 });
 
+test('notify cannot be turned on until /context loads live', async () => {
+  // /context failed: the click leaves the toggle off and saves nothing.
+  const failed = notifyEnv();
+  const offline = url => url === '/context' ? Promise.reject(new Error('offline')) : new Promise(() => {});
+  const w = wall(undefined, undefined, Object.assign({}, failed.globals, { fetch: offline }));
+  await tick();
+  assert.equal(w.elements.get('verification-status').textContent, 'context unavailable');
+  w.elements.get('t-notify').click();
+  await tick();
+  assert.ok(!w.elements.get('t-notify').classList.contains('on'));
+  assert.notEqual(failed.store.get('nockguard.notify'), '1');
+  assert.equal(failed.requests(), 0);
+  // /context pending: a click does nothing; after it loads live a click turns notify on.
+  const env = notifyEnv();
+  let resolve;
+  const late = url => new Promise(ok => { if (url === '/context') resolve = ok; });
+  const w2 = wall(undefined, undefined, Object.assign({}, env.globals, { fetch: late }));
+  const button = w2.elements.get('t-notify');
+  button.click();
+  await tick();
+  assert.ok(!button.classList.contains('on'));
+  assert.notEqual(env.store.get('nockguard.notify'), '1');
+  resolve({ json: () => Promise.resolve({ demo: false }) });
+  await tick();
+  button.click();
+  await tick();
+  assert.ok(button.classList.contains('on'));
+  assert.equal(env.store.get('nockguard.notify'), '1');
+  assert.equal(env.requests(), 1);
+});
+
 test('a permission revoked after opt-in turns the toggle off at notify time', async () => {
   const env = notifyEnv({ stored: '1' });
   const w = await liveWall(env);
