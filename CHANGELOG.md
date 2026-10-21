@@ -8,9 +8,9 @@ All notable changes to NockGuard are documented here.
 
 - The Live Wall has an opt-in NOTIFY toggle for desktop notifications. While
   the tab is hidden, a new `block` or critical row raises one notification with
-  the agent and tool, at most one per 10 seconds with the rest collapsed into
-  "+N more"; an audit-chain break notifies once with its entry number. The
-  choice is remembered in the browser.
+  the agent, tool and decision, at most one per 10 seconds with the rest
+  collapsed into "+N more"; an audit-chain break notifies once. Replayed
+  history and demo rows do not notify. The choice is remembered in the browser.
 
 ### Changed
 

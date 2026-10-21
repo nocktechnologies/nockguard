@@ -406,7 +406,7 @@
   const tNotify = document.getElementById('t-notify');
   const hasNotify = typeof Notification !== 'undefined';
   let notifyOn = false;
-  try { notifyOn = hasNotify && localStorage.getItem('nockguard.notify') === '1'; } catch (e) {}
+  try { notifyOn = hasNotify && Notification.permission === 'granted' && localStorage.getItem('nockguard.notify') === '1'; } catch (e) {}
   tNotify.hidden = !hasNotify;
   function setNotify(on) {
     notifyOn = on;
@@ -416,37 +416,51 @@
   setNotify(notifyOn);
   tNotify.addEventListener('click', () => {
     setNotify(!notifyOn);
-    if (notifyOn) Promise.resolve(Notification.requestPermission())
-      .then(() => { if (Notification.permission !== 'granted') setNotify(false); }, () => setNotify(false));
+    if (!notifyOn) return;
+    const check = () => { if (Notification.permission !== 'granted') setNotify(false); };
+    const asked = Notification.requestPermission(check); // older browsers take only the callback
+    if (asked) asked.then(check, () => setNotify(false));
   });
+  const tabHidden = () => document.visibilityState !== 'visible';
   function desktopNotify(title, body) {
     if (!notifyOn || Notification.permission !== 'granted') return;
     try { new Notification(title, { body }); } catch (e) {}
   }
-  // Only rows newer than page load notify; history replayed on connect and on
-  // every reconnect does not. At most one per 10 s; the rest collapse into "+N more".
-  const notifyFrom = Date.now();
-  const notified = new Set();
+  // A row is new when it is no older than page load (to the second, the audit
+  // timestamp precision) and was not already sent before a reconnect. Every
+  // connection replays history, so count each key per connection and treat only
+  // occurrences beyond the most seen on any connection as new.
+  const notifyFrom = Math.floor(Date.now() / 1000) * 1000;
+  const seenCount = new Map();
+  let connCount = new Map();
+  function isNewRow(ev) {
+    if (!(Date.parse(ev.ts) >= notifyFrom)) return false;
+    const key = [ev.ts, ev.source, ev.agent, ev.tool, ev.decision].join('|');
+    const n = (connCount.get(key) || 0) + 1;
+    connCount.set(key, n);
+    if (n <= (seenCount.get(key) || 0)) return false;
+    seenCount.set(key, n);
+    for (const m of [seenCount, connCount]) if (m.size > MAX_ROWS) m.delete(m.keys().next().value);
+    return true;
+  }
+  // At most one per 10 s while the tab is hidden; the rest collapse into "+N more".
   let notifyCooling = false, notifyMissed = 0;
   function notifyAndCool(title, body) {
     desktopNotify(title, body);
     notifyCooling = true;
     setTimeout(() => {
       notifyCooling = false;
-      if (notifyMissed) notifyAndCool('NockGuard blocked +' + notifyMissed + ' more', 'Open the Live Wall for details.');
+      if (notifyMissed && tabHidden()) notifyAndCool('NockGuard blocked +' + notifyMissed + ' more', 'Open the Live Wall for details.');
       notifyMissed = 0;
     }, 10000);
   }
   function notifyBlocked(ev) {
-    if (!notifyOn || document.visibilityState === 'visible' || !(Date.parse(ev.ts) >= notifyFrom)) return;
-    const key = [ev.ts, ev.source, ev.agent, ev.tool, ev.decision].join('|');
-    if (notified.has(key)) return;
-    notified.add(key);
-    if (notified.size > MAX_ROWS) notified.delete(notified.values().next().value);
+    if (!notifyOn || !tabHidden()) return;
     if (notifyCooling) notifyMissed++;
-    else notifyAndCool('NockGuard blocked ' + (ev.tool || '?'), (ev.agent || '—') + ' · ' + (ev.tool || '?'));
+    else notifyAndCool('NockGuard blocked ' + (ev.tool || '?'),
+      [ev.agent || '—', ev.tool || '?', ev.decision || '?'].join(' · '));
   }
-  let notifiedBreak = null;
+  let seenBreak = null;
 
   // --- filters: substring match on agent/tool + exact decision + time range ---
   const fText = document.getElementById('f-text');
@@ -692,13 +706,13 @@
     else renderPulse();                     // (applyFilters already refreshes the pulse)
     // The alarm fires on the loudest signals: any block, and any critical catch
     // (e.g. a secret-exfil deny) — a routine allowlist deny stays quiet.
-    if (dec === 'block' || sev === 'critical') { hitFlash(); beep(); notifyBlocked(ev); }
+    if (dec === 'block' || sev === 'critical') { hitFlash(); beep(); if (!demoMode && isNewRow(ev)) notifyBlocked(ev); }
   }
 
   function connect() {
     const es = new EventSource('/events');
     const conn = document.getElementById('conn');
-    es.onopen = () => { conn.textContent = 'live'; };
+    es.onopen = () => { conn.textContent = 'live'; connCount = new Map(); };
     es.onmessage = (m) => { try { render(JSON.parse(m.data)); } catch(e){} };
     es.onerror = () => { conn.textContent = 'reconnecting…'; };
   }
@@ -736,11 +750,13 @@
         tamperDetail.textContent =
           (v.break_at != null ? 'break at entry ' + v.break_at + ' · ' : '') + (v.detail || '');
         chainnote.hidden = true;
-        // break_at is the line the server marks verifyState "broken"; notify once per break.
-        if (notifyOn && v.break_at != null && v.break_at !== notifiedBreak) {
-          notifiedBreak = v.break_at;
-          desktopNotify('NockGuard audit trail broken',
-            'Audit trail broken at entry ' + v.break_at + ': the record may have been altered.');
+        // break_at is the line the server marks verifyState "broken"; a rollback has
+        // none. Notify once per break, and not when the banner is already on screen.
+        const breakKey = v.break_at ?? 'no entry';
+        if (breakKey !== seenBreak) {
+          seenBreak = breakKey;
+          if (tabHidden()) desktopNotify('NockGuard audit trail broken', 'Audit trail broken' +
+            (v.break_at != null ? ' at entry ' + v.break_at : '') + ': the record may have been altered.');
         }
       } else if (v.status === 'unavailable' || v.status === 'unconfigured' ||
                  v.status === 'unanchored' || v.status === 'no_rows') {

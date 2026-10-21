@@ -243,14 +243,14 @@ test('method rows retain labels without inflating tool allow counts', () => {
 });
 
 // A fake browser for the notify toggle: permission prompt, storage, a manual
-// clock for setTimeout, and a record of every Notification shown.
+// clock for setTimeout, an EventSource whose reconnect the test drives, and a
+// record of every Notification shown.
 function notifyEnv({ permission = 'granted', stored = null, visibilityState = 'hidden', storageThrows = false } = {}) {
-  const shown = [], timers = [], store = new Map(stored === null ? [] : [['nockguard.notify', stored]]);
+  const shown = [], timers = [], sources = [], store = new Map(stored === null ? [] : [['nockguard.notify', stored]]);
   let requests = 0, now = 0;
   function Notification(title, opts) { shown.push({ title, body: opts.body }); }
-  Notification.permission = 'default';
+  Notification.permission = stored === null ? 'default' : permission;
   Notification.requestPermission = () => { requests++; Notification.permission = permission; return Promise.resolve(permission); };
-  if (stored !== null) Notification.permission = permission;
   const localStorage = {
     getItem(k) { if (storageThrows) throw new Error('blocked'); return store.get(k) ?? null; },
     setItem(k, v) { if (storageThrows) throw new Error('blocked'); store.set(k, v); },
@@ -260,7 +260,9 @@ function notifyEnv({ permission = 'granted', stored = null, visibilityState = 'h
     now += ms;
     for (let t; (t = timers.find(t => t.at <= now));) { timers.splice(timers.indexOf(t), 1); t.fn(); }
   }
-  return { globals: { Notification, localStorage, setTimeout, visibilityState }, shown, store, advance, requests: () => requests };
+  const EventSource = class { constructor() { sources.push(this); } };
+  return { globals: { Notification, localStorage, setTimeout, visibilityState, EventSource },
+    shown, store, advance, requests: () => requests, reconnect: () => sources.at(-1).onopen() };
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const fresh = (extra) => `render({decision:'block', bucket:'blocked', severity:'high', agent:'coder', tool:'write_file',
@@ -284,10 +286,11 @@ test('notify toggle asks permission once clicked and remembers the choice', asyn
   button.click();
   assert.equal(env.store.get('nockguard.notify'), '0');
   assert.ok(!button.classList.contains('on'));
-  // A remembered choice survives a reload.
+  // A remembered choice survives a reload, unless the permission was revoked.
   const again = notifyEnv({ stored: '1' });
-  const w2 = wall(undefined, undefined, again.globals);
-  assert.ok(w2.elements.get('t-notify').classList.contains('on'));
+  assert.ok(wall(undefined, undefined, again.globals).elements.get('t-notify').classList.contains('on'));
+  const revoked = notifyEnv({ stored: '1', permission: 'denied' });
+  assert.ok(!wall(undefined, undefined, revoked.globals).elements.get('t-notify').classList.contains('on'));
 });
 
 test('notify turns itself off when permission is refused and survives blocked storage', async () => {
@@ -313,13 +316,13 @@ test('blocks notify only while hidden, at most once per 10 s, the rest as +N mor
   const env = notifyEnv({ stored: '1' });
   const w = wall(undefined, undefined, env.globals);
   vm.runInContext(`render({decision:'block', bucket:'blocked', severity:'high', agent:'coder', tool:'old', ts:'2020-01-01T00:00:00Z'})`, w.context);
-  vm.runInContext(`render({decision:'deny', bucket:'blocked', severity:'low', agent:'coder', tool:'routine', ts:new Date(Date.now() + 1000).toISOString()})`, w.context);
+  vm.runInContext(fresh("decision:'deny', severity:'low', tool:'routine'"), w.context);
   assert.equal(env.shown.length, 0); // replayed history and routine denies stay quiet
   vm.runInContext(fresh("args:'SECRET'"), w.context);
-  assert.deepEqual(env.shown, [{ title: 'NockGuard blocked write_file', body: 'coder · write_file' }]);
+  assert.deepEqual(env.shown, [{ title: 'NockGuard blocked write_file', body: 'coder · write_file · block' }]);
   assert.doesNotMatch(JSON.stringify(env.shown), /SECRET/);
   vm.runInContext(fresh("tool:'a'"), w.context);
-  vm.runInContext(fresh("tool:'b'"), w.context);
+  vm.runInContext(fresh("tool:'a'"), w.context); // same second, same key: still counted
   vm.runInContext(fresh("decision:'deny', severity:'critical', tool:'c'"), w.context);
   assert.equal(env.shown.length, 1);
   env.advance(9999);
@@ -331,21 +334,38 @@ test('blocks notify only while hidden, at most once per 10 s, the rest as +N mor
   assert.equal(env.shown.length, 2);
   vm.runInContext(fresh("tool:'d'"), w.context);
   assert.equal(env.shown[2].title, 'NockGuard blocked d');
-  // The same row replayed on reconnect does not notify twice.
-  env.advance(10000);
-  const before = env.shown.length;
-  vm.runInContext(fresh("tool:'e', ts:'2099-01-01T00:00:00Z'"), w.context);
-  vm.runInContext(fresh("tool:'e', ts:'2099-01-01T00:00:00Z'"), w.context);
-  env.advance(10000);
-  assert.equal(env.shown.length, before + 1);
-  // A visible tab does not notify.
-  const seen = notifyEnv({ stored: '1', visibilityState: 'visible' });
-  const w2 = wall(undefined, undefined, seen.globals);
-  vm.runInContext(fresh(), w2.context);
-  assert.equal(seen.shown.length, 0);
+  vm.runInContext(fresh("tool:'e'"), w.context);
+  w.context.document.visibilityState = 'visible';
+  env.advance(10000); // the tab came back: the pending +1 is dropped
+  assert.equal(env.shown.length, 3);
 });
 
-test('a broken audit chain notifies once per break', async () => {
+test('history replayed on reconnect does not notify again, even rows first seen while visible', () => {
+  const env = notifyEnv({ stored: '1', visibilityState: 'visible' });
+  const w = wall(undefined, undefined, env.globals);
+  const row = fresh("ts:'2099-01-01T00:00:00Z'");
+  env.reconnect();
+  vm.runInContext(row, w.context);
+  vm.runInContext(row, w.context);
+  assert.equal(env.shown.length, 0); // a visible tab does not notify
+  w.context.document.visibilityState = 'hidden';
+  env.reconnect();
+  vm.runInContext(row, w.context);
+  vm.runInContext(row, w.context);
+  assert.equal(env.shown.length, 0);
+  vm.runInContext(row, w.context); // a third occurrence on this connection is new
+  assert.equal(env.shown.length, 1);
+});
+
+test('demo rows never raise desktop notifications', async () => {
+  const env = notifyEnv({ stored: '1' });
+  const w = wall({ demo: true }, undefined, env.globals);
+  await tick();
+  vm.runInContext(fresh(), w.context);
+  assert.equal(env.shown.length, 0);
+});
+
+test('a broken audit chain notifies once per break while hidden', async () => {
   let report = { chain_intact: true, status: 'verified', entries_verified: 3 };
   const env = notifyEnv({ stored: '1' });
   const w = wall(undefined, undefined, env.globals);
@@ -357,7 +377,14 @@ test('a broken audit chain notifies once per break', async () => {
   await vm.runInContext('checkChain()', w.context);
   assert.deepEqual(env.shown, [{ title: 'NockGuard audit trail broken',
     body: 'Audit trail broken at entry 4: the record may have been altered.' }]);
+  report = { chain_intact: false, status: 'tampered', break_at: null }; // rollback: no single entry
+  await vm.runInContext('checkChain()', w.context);
+  assert.equal(env.shown[1].body, 'Audit trail broken: the record may have been altered.');
+  // A break first seen with the banner on screen does not notify later.
+  w.context.document.visibilityState = 'visible';
   report = { chain_intact: false, status: 'tampered', break_at: 2 };
+  await vm.runInContext('checkChain()', w.context);
+  w.context.document.visibilityState = 'hidden';
   await vm.runInContext('checkChain()', w.context);
   assert.equal(env.shown.length, 2);
 });
