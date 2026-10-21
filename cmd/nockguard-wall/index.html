@@ -390,6 +390,7 @@
     }
   }).catch(() => {
     document.getElementById('verification-status').textContent = 'context unavailable';
+    setNotify(false, false); // shows the real state (off) but keeps the saved choice
   });
 
   // --- toggles ---
@@ -410,10 +411,10 @@
   let notifyOn = false;
   try { notifyOn = hasNotify && Notification.permission === 'granted' && localStorage.getItem('nockguard.notify') === '1'; } catch (e) {}
   tNotify.hidden = !hasNotify;
-  function setNotify(on) {
+  function setNotify(on, save = true) {
     notifyOn = on;
     tNotify.classList.toggle('on', on);
-    try { localStorage.setItem('nockguard.notify', on ? '1' : '0'); } catch (e) {}
+    if (save) try { localStorage.setItem('nockguard.notify', on ? '1' : '0'); } catch (e) {}
   }
   setNotify(notifyOn);
   tNotify.addEventListener('click', () => {
@@ -445,9 +446,11 @@
   }
   function notifyBlocked(ev) {
     if (!notifyOn || !contextLive || !tabHidden()) return;
+    // The tool name only: a label like "Bash: <command>" must not put command
+    // text into the OS notification history.
+    const tool = String(ev.tool || '').split(/[:\s]/)[0].slice(0, 64) || '?';
     if (notifyCooling) notifyMissed++;
-    else notifyAndCool('NockGuard blocked ' + (ev.tool || '?'),
-      [ev.agent || '—', ev.tool || '?', ev.decision || '?'].join(' · '));
+    else notifyAndCool('NockGuard blocked ' + tool, [ev.agent || '—', tool, ev.decision || '?'].join(' · '));
   }
   let seenBreak = null;
 
@@ -732,6 +735,7 @@
         ? 'NO EVIDENCE — empty trail' : (v.status || 'unavailable');
       document.getElementById('verification-time').textContent = v.last_verified_at || '—';
       auditfail.hidden = !v.audit_failing;
+      if (v.chain_intact === true) seenBreak = null; // a repaired chain re-arms the break notification
       // ONLY an explicit chain_intact:false is a tamper. status "unavailable"
       // (a read/scan error, chain_intact null) surfaces as the quiet chainnote,
       // never the red banner — a benign read glitch must not cry wolf (N9870).

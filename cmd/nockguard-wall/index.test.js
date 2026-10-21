@@ -389,6 +389,8 @@ test('a pending or failed /context keeps notifications off', async () => {
   vm.runInContext(fresh(), w.context);
   assert.equal(env.shown.length, 0); // /context failed
   assert.equal(w.elements.get('verification-status').textContent, 'context unavailable');
+  assert.ok(!w.elements.get('t-notify').classList.contains('on')); // the button shows the real state
+  assert.equal(env.store.get('nockguard.notify'), '1'); // the saved choice survives an outage
   assert.equal(vm.runInContext('demoMode', w.context), false); // chain checks still run
   const control = notifyEnv({ stored: '1' });
   vm.runInContext(fresh(), (await liveWall(control)).context);
@@ -449,4 +451,40 @@ test('a broken audit chain notifies once per break while hidden', async () => {
   w.context.document.visibilityState = 'hidden';
   await vm.runInContext('checkChain()', w.context);
   assert.equal(env.shown.length, 2);
+});
+
+test('a notification carries only the tool name, never command text', async () => {
+  const env = notifyEnv({ stored: '1' });
+  const w = await liveWall(env);
+  vm.runInContext(fresh("tool:'Bash: rm -rf /'"), w.context);
+  assert.deepEqual(env.shown, [{ title: 'NockGuard blocked Bash', body: 'coder · Bash · block' }]);
+  env.advance(10000);
+  vm.runInContext(fresh("tool:'run_shell\\tcat /etc/shadow'"), w.context);
+  env.advance(10000);
+  vm.runInContext(fresh("tool:'" + 'x'.repeat(200) + "'"), w.context);
+  env.advance(10000);
+  vm.runInContext(fresh("tool:': leading'"), w.context);
+  assert.deepEqual(env.shown.slice(1).map(n => n.title),
+    ['NockGuard blocked run_shell', 'NockGuard blocked ' + 'x'.repeat(64), 'NockGuard blocked ?']);
+  assert.doesNotMatch(JSON.stringify(env.shown), /rm -rf|shadow|leading/);
+});
+
+test('a chain that turns intact again re-arms the break notification', async () => {
+  let report = { chain_intact: false, status: 'tampered', break_at: 4 };
+  const env = notifyEnv({ stored: '1' });
+  const w = wall({ demo: false }, undefined, env.globals);
+  await tick();
+  w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(report) });
+  await vm.runInContext('checkChain()', w.context);
+  report = { chain_intact: null, status: 'unavailable' }; // unknown is not intact: no re-arm
+  await vm.runInContext('checkChain()', w.context);
+  report = { chain_intact: false, status: 'tampered', break_at: 4 };
+  await vm.runInContext('checkChain()', w.context);
+  assert.equal(env.shown.length, 1);
+  report = { chain_intact: true, status: 'verified', entries_verified: 5 };
+  await vm.runInContext('checkChain()', w.context);
+  report = { chain_intact: false, status: 'tampered', break_at: 4 };
+  await vm.runInContext('checkChain()', w.context);
+  assert.equal(env.shown.length, 2);
+  assert.equal(env.shown[1].body, 'Audit trail broken at entry 4: the record may have been altered.');
 });
