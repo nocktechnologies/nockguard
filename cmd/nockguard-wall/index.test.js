@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const { test } = require('node:test');
 
-function wall(contextPayload, mediaQuery) {
+function wall(contextPayload, mediaQuery, globals = {}) {
   const elements = new Map();
   function element() {
     const classes = new Set();
@@ -16,7 +16,8 @@ function wall(contextPayload, mediaQuery) {
         remove(name) { classes.delete(name); },
         toggle(name, on) { if (on) classes.add(name); else classes.delete(name); },
       },
-      addEventListener() {},
+      addEventListener(type, listener) { this.listeners = { ...this.listeners, [type]: listener }; },
+      click() { this.listeners?.click(); },
       add(option) { this.options.push(option); },
       remove(index) { this.options.splice(index, 1); },
       prepend(child) { this.children.unshift(child); child.parent = this; },
@@ -26,7 +27,7 @@ function wall(contextPayload, mediaQuery) {
     };
   }
   const document = {
-    body: { dataset: {} },
+    body: { dataset: {} }, visibilityState: globals.visibilityState,
     getElementById(id) {
       if (!elements.has(id)) {
         const el = element();
@@ -68,6 +69,7 @@ function wall(contextPayload, mediaQuery) {
     EventSource: class {}, fetch: () => contextPayload === undefined
       ? new Promise(() => {})
       : Promise.resolve({ json: () => Promise.resolve(contextPayload) }), setInterval() {},
+    ...globals,
   });
   vm.runInContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], context);
   return { context, elements, decisions };
@@ -238,4 +240,124 @@ test('method rows retain labels without inflating tool allow counts', () => {
  const w = wall();
  vm.runInContext("render({decision:'allow', bucket:'approved', severity:'none'}); render({decision:'method-allow', bucket:'other', severity:'none'}); render({decision:'method-deny', bucket:'other', severity:'high'})", w.context);
  assert.equal(w.elements.get('c-allow').textContent, 1);
+});
+
+// A fake browser for the notify toggle: permission prompt, storage, a manual
+// clock for setTimeout, and a record of every Notification shown.
+function notifyEnv({ permission = 'granted', stored = null, visibilityState = 'hidden', storageThrows = false } = {}) {
+  const shown = [], timers = [], store = new Map(stored === null ? [] : [['nockguard.notify', stored]]);
+  let requests = 0, now = 0;
+  function Notification(title, opts) { shown.push({ title, body: opts.body }); }
+  Notification.permission = 'default';
+  Notification.requestPermission = () => { requests++; Notification.permission = permission; return Promise.resolve(permission); };
+  if (stored !== null) Notification.permission = permission;
+  const localStorage = {
+    getItem(k) { if (storageThrows) throw new Error('blocked'); return store.get(k) ?? null; },
+    setItem(k, v) { if (storageThrows) throw new Error('blocked'); store.set(k, v); },
+  };
+  const setTimeout = (fn, ms) => timers.push({ at: now + ms, fn });
+  function advance(ms) {
+    now += ms;
+    for (let t; (t = timers.find(t => t.at <= now));) { timers.splice(timers.indexOf(t), 1); t.fn(); }
+  }
+  return { globals: { Notification, localStorage, setTimeout, visibilityState }, shown, store, advance, requests: () => requests };
+}
+const tick = () => new Promise(resolve => setImmediate(resolve));
+const fresh = (extra) => `render({decision:'block', bucket:'blocked', severity:'high', agent:'coder', tool:'write_file',
+  ts:new Date(Date.now() + 1000).toISOString(), ${extra || ''}})`;
+
+test('notify toggle asks permission once clicked and remembers the choice', async () => {
+  const page = fs.readFileSync(new URL('./index.html', `file://${__filename}`), 'utf8');
+  assert.match(page, /<button class="toggle snd" id="t-notify"[^>]*>/);
+  const env = notifyEnv();
+  const w = wall(undefined, undefined, env.globals);
+  const button = w.elements.get('t-notify');
+  assert.equal(button.hidden, false);
+  assert.equal(env.requests(), 0); // no prompt before the click
+  vm.runInContext(fresh(), w.context);
+  assert.equal(env.shown.length, 0); // negative control: off by default
+  button.click();
+  await tick();
+  assert.equal(env.requests(), 1);
+  assert.equal(env.store.get('nockguard.notify'), '1');
+  assert.ok(button.classList.contains('on'));
+  button.click();
+  assert.equal(env.store.get('nockguard.notify'), '0');
+  assert.ok(!button.classList.contains('on'));
+  // A remembered choice survives a reload.
+  const again = notifyEnv({ stored: '1' });
+  const w2 = wall(undefined, undefined, again.globals);
+  assert.ok(w2.elements.get('t-notify').classList.contains('on'));
+});
+
+test('notify turns itself off when permission is refused and survives blocked storage', async () => {
+  const env = notifyEnv({ permission: 'denied' });
+  const w = wall(undefined, undefined, env.globals);
+  w.elements.get('t-notify').click();
+  await tick();
+  assert.equal(env.store.get('nockguard.notify'), '0');
+  assert.ok(!w.elements.get('t-notify').classList.contains('on'));
+  const locked = notifyEnv({ storageThrows: true });
+  const w2 = wall(undefined, undefined, locked.globals);
+  w2.elements.get('t-notify').click();
+  await tick();
+  vm.runInContext(fresh(), w2.context);
+  assert.equal(locked.shown.length, 1);
+  // Without the Notification API the toggle is hidden and the page still runs.
+  const w3 = wall();
+  assert.equal(w3.elements.get('t-notify').hidden, true);
+  vm.runInContext(fresh(), w3.context);
+});
+
+test('blocks notify only while hidden, at most once per 10 s, the rest as +N more', () => {
+  const env = notifyEnv({ stored: '1' });
+  const w = wall(undefined, undefined, env.globals);
+  vm.runInContext(`render({decision:'block', bucket:'blocked', severity:'high', agent:'coder', tool:'old', ts:'2020-01-01T00:00:00Z'})`, w.context);
+  vm.runInContext(`render({decision:'deny', bucket:'blocked', severity:'low', agent:'coder', tool:'routine', ts:new Date(Date.now() + 1000).toISOString()})`, w.context);
+  assert.equal(env.shown.length, 0); // replayed history and routine denies stay quiet
+  vm.runInContext(fresh("args:'SECRET'"), w.context);
+  assert.deepEqual(env.shown, [{ title: 'NockGuard blocked write_file', body: 'coder · write_file' }]);
+  assert.doesNotMatch(JSON.stringify(env.shown), /SECRET/);
+  vm.runInContext(fresh("tool:'a'"), w.context);
+  vm.runInContext(fresh("tool:'b'"), w.context);
+  vm.runInContext(`render({decision:'deny', bucket:'blocked', severity:'critical', agent:'coder', tool:'c', ts:new Date(Date.now() + 2000).toISOString()})`, w.context);
+  assert.equal(env.shown.length, 1);
+  env.advance(9999);
+  assert.equal(env.shown.length, 1);
+  env.advance(1);
+  assert.equal(env.shown.length, 2);
+  assert.equal(env.shown[1].title, 'NockGuard blocked +3 more');
+  env.advance(10000); // nothing pending: the window closes quietly
+  assert.equal(env.shown.length, 2);
+  vm.runInContext(fresh("tool:'d'"), w.context);
+  assert.equal(env.shown[2].title, 'NockGuard blocked d');
+  // The same row replayed on reconnect does not notify twice.
+  env.advance(10000);
+  const before = env.shown.length;
+  vm.runInContext(fresh("tool:'e', ts:'2099-01-01T00:00:00Z'"), w.context);
+  vm.runInContext(fresh("tool:'e', ts:'2099-01-01T00:00:00Z'"), w.context);
+  env.advance(10000);
+  assert.equal(env.shown.length, before + 1);
+  // A visible tab does not notify.
+  const seen = notifyEnv({ stored: '1', visibilityState: 'visible' });
+  const w2 = wall(undefined, undefined, seen.globals);
+  vm.runInContext(fresh(), w2.context);
+  assert.equal(seen.shown.length, 0);
+});
+
+test('a broken audit chain notifies once per break', async () => {
+  let report = { chain_intact: true, status: 'verified', entries_verified: 3 };
+  const env = notifyEnv({ stored: '1' });
+  const w = wall(undefined, undefined, env.globals);
+  w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(report) });
+  await vm.runInContext('checkChain()', w.context);
+  assert.equal(env.shown.length, 0); // intact chain stays quiet
+  report = { chain_intact: false, status: 'tampered', break_at: 4 };
+  await vm.runInContext('checkChain()', w.context);
+  await vm.runInContext('checkChain()', w.context);
+  assert.deepEqual(env.shown, [{ title: 'NockGuard audit trail broken',
+    body: 'Audit trail broken at entry 4: the record may have been altered.' }]);
+  report = { chain_intact: false, status: 'tampered', break_at: 2 };
+  await vm.runInContext('checkChain()', w.context);
+  assert.equal(env.shown.length, 2);
 });

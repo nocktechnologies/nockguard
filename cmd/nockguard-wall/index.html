@@ -275,6 +275,7 @@
       <div class="pill unreadable"><span class="n" id="c-unreadable">—</span><span class="l">unreadable</span></div>
       <div class="pill caught"><span class="n" id="c-caught">—</span><span class="l">rejected share of records</span></div>
       <button class="toggle snd" id="t-sound" title="beep when something is blocked">🔊 SOUND</button>
+      <button class="toggle snd" id="t-notify" title="desktop notification when something is blocked while this tab is hidden, or when the audit chain breaks">🔔 NOTIFY</button>
     </div>
     <div class="filters">
       <input id="f-text" class="finput" type="search" placeholder="filter by agent or tool…" autocomplete="off" spellcheck="false" />
@@ -399,6 +400,52 @@
     if (soundOn && !audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
     if (soundOn && audioCtx) audioCtx.resume(); // unlock on the click gesture
   });
+
+  // Desktop notifications are opt-in and remembered in localStorage. Text is the
+  // agent, tool and decision only, never arguments.
+  const tNotify = document.getElementById('t-notify');
+  const hasNotify = typeof Notification !== 'undefined';
+  let notifyOn = false;
+  try { notifyOn = hasNotify && localStorage.getItem('nockguard.notify') === '1'; } catch (e) {}
+  tNotify.hidden = !hasNotify;
+  function setNotify(on) {
+    notifyOn = on;
+    tNotify.classList.toggle('on', on);
+    try { localStorage.setItem('nockguard.notify', on ? '1' : '0'); } catch (e) {}
+  }
+  setNotify(notifyOn);
+  tNotify.addEventListener('click', () => {
+    setNotify(!notifyOn);
+    if (notifyOn) Promise.resolve(Notification.requestPermission())
+      .then(() => { if (Notification.permission !== 'granted') setNotify(false); }, () => setNotify(false));
+  });
+  function desktopNotify(title, body) {
+    if (!notifyOn || Notification.permission !== 'granted') return;
+    try { new Notification(title, { body }); } catch (e) {}
+  }
+  // Only rows newer than page load notify; history replayed on connect and on
+  // every reconnect does not. At most one per 10 s; the rest collapse into "+N more".
+  const notifyFrom = Date.now();
+  const notified = new Set();
+  let notifyCooling = false, notifyMissed = 0;
+  function endNotifyCooldown() {
+    if (!notifyMissed) { notifyCooling = false; return; }
+    desktopNotify('NockGuard blocked +' + notifyMissed + ' more', '+' + notifyMissed + ' more');
+    notifyMissed = 0;
+    setTimeout(endNotifyCooldown, 10000);
+  }
+  function notifyBlocked(ev) {
+    if (!notifyOn || document.visibilityState === 'visible') return;
+    const key = [ev.ts, ev.source, ev.agent, ev.tool, ev.decision].join('|');
+    if (!(Date.parse(ev.ts) >= notifyFrom) || notified.has(key)) return;
+    notified.add(key);
+    if (notified.size > MAX_ROWS) notified.delete(notified.values().next().value);
+    if (notifyCooling) { notifyMissed++; return; }
+    desktopNotify('NockGuard blocked ' + (ev.tool || '?'), (ev.agent || '—') + ' · ' + (ev.tool || '?'));
+    notifyCooling = true;
+    setTimeout(endNotifyCooldown, 10000);
+  }
+  let notifiedBreak = null;
 
   // --- filters: substring match on agent/tool + exact decision + time range ---
   const fText = document.getElementById('f-text');
@@ -644,7 +691,7 @@
     else renderPulse();                     // (applyFilters already refreshes the pulse)
     // The alarm fires on the loudest signals: any block, and any critical catch
     // (e.g. a secret-exfil deny) — a routine allowlist deny stays quiet.
-    if (dec === 'block' || sev === 'critical') { hitFlash(); beep(); }
+    if (dec === 'block' || sev === 'critical') { hitFlash(); beep(); notifyBlocked(ev); }
   }
 
   function connect() {
@@ -688,6 +735,12 @@
         tamperDetail.textContent =
           (v.break_at != null ? 'break at entry ' + v.break_at + ' · ' : '') + (v.detail || '');
         chainnote.hidden = true;
+        // break_at is the line the server marks verifyState "broken"; notify once per break.
+        if (notifyOn && v.break_at != null && v.break_at !== notifiedBreak) {
+          notifiedBreak = v.break_at;
+          desktopNotify('NockGuard audit trail broken',
+            'Audit trail broken at entry ' + v.break_at + ': the record may have been altered.');
+        }
       } else if (v.status === 'unavailable' || v.status === 'unconfigured' ||
                  v.status === 'unanchored' || v.status === 'no_rows') {
         tamper.hidden = true;

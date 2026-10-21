@@ -4,6 +4,14 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- The Live Wall has an opt-in NOTIFY toggle for desktop notifications. While
+  the tab is hidden, a new `block` or critical row raises one notification with
+  the agent and tool, at most one per 10 seconds with the rest collapsed into
+  "+N more"; an audit-chain break notifies once with its entry number. The
+  choice is remembered in the browser.
+
 ### Changed
 
 - CI skips the test suite on PRs that change only Markdown or `docs/`; it
