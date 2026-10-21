@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/csv"
 	"encoding/hex"
@@ -254,6 +255,25 @@ func TestDemoReplayAndPulseUseSameWindow(t *testing.T) {
 	b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export", nil))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("demo evidence export status = %d, want conflict", rec.Code)
+	}
+}
+
+// The stream marks where its history replay ends, so the page notifies only
+// for rows after it.
+func TestSSEMarksEndOfReplay(t *testing.T) {
+	b := newBroker()
+	b.demo = true
+	b.verifier = &verifier{mode: modeNone}
+	b.emit(event{Agent: "demo", Tool: "history", Decision: "block"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // return right after the replay
+	rec := httptest.NewRecorder()
+	b.handleSSE(rec, httptest.NewRequest(http.MethodGet, "/events", nil).WithContext(ctx))
+	body := rec.Body.String()
+	history := strings.Index(body, `"tool":"history"`)
+	marker := strings.Index(body, "event: replayed\ndata: {}\n\n")
+	if history < 0 || marker < history {
+		t.Fatalf("SSE body = %q; want the history row, then the replayed marker", body)
 	}
 }
 

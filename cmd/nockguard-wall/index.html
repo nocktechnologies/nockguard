@@ -356,6 +356,7 @@
   let empty = document.getElementById('empty');
   let MAX_ROWS = 500;
   let demoMode = false;
+  let contextLive = false; // true only once /context loaded and said demo:false
   let recentSession = '';
   // open on wide screens, collapsed on narrow; follows resizes across the breakpoint
   const wideMQ = typeof window.matchMedia === 'function' ? window.matchMedia('(min-width:601px)') : null;
@@ -371,6 +372,7 @@
     MAX_ROWS = Number.isSafeInteger(c.window) && c.window > 0 ? Math.min(c.window, 500) : 500;
     document.getElementById('window-size').textContent = MAX_ROWS;
     demoMode = !!c.demo;
+    contextLive = c.demo === false;
     document.getElementById('source-guard').textContent = demoMode ? 'synthetic (no Guard evidence)' : c.guardTrail;
     document.getElementById('source-lock').textContent = demoMode ? 'synthetic (no Lock evidence)' : (c.lockDB || 'not configured');
     document.getElementById('context-agent').textContent = demoMode ? 'sample agents' : c.agent;
@@ -423,26 +425,13 @@
   });
   const tabHidden = () => document.visibilityState !== 'visible';
   function desktopNotify(title, body) {
-    if (!notifyOn || Notification.permission !== 'granted') return;
+    if (!notifyOn || !contextLive) return;
+    if (Notification.permission !== 'granted') { setNotify(false); return; } // revoked since
     try { new Notification(title, { body }); } catch (e) {}
   }
-  // A row is new when it is no older than page load (to the second, the audit
-  // timestamp precision) and was not already sent before a reconnect. Every
-  // connection replays history, so count each key per connection and treat only
-  // occurrences beyond the most seen on any connection as new.
-  const notifyFrom = Math.floor(Date.now() / 1000) * 1000;
-  const seenCount = new Map();
-  let connCount = new Map();
-  function isNewRow(ev) {
-    if (!(Date.parse(ev.ts) >= notifyFrom)) return false;
-    const key = [ev.ts, ev.source, ev.agent, ev.tool, ev.decision].join('|');
-    const n = (connCount.get(key) || 0) + 1;
-    connCount.set(key, n);
-    if (n <= (seenCount.get(key) || 0)) return false;
-    seenCount.set(key, n);
-    for (const m of [seenCount, connCount]) if (m.size > MAX_ROWS) m.delete(m.keys().next().value);
-    return true;
-  }
+  // Every connection replays history first; only rows after the server's
+  // "replayed" marker on the current connection are new.
+  let streamLive = false;
   // At most one per 10 s while the tab is hidden; the rest collapse into "+N more".
   let notifyCooling = false, notifyMissed = 0;
   function notifyAndCool(title, body) {
@@ -455,7 +444,7 @@
     }, 10000);
   }
   function notifyBlocked(ev) {
-    if (!notifyOn || !tabHidden()) return;
+    if (!notifyOn || !contextLive || !tabHidden()) return;
     if (notifyCooling) notifyMissed++;
     else notifyAndCool('NockGuard blocked ' + (ev.tool || '?'),
       [ev.agent || '—', ev.tool || '?', ev.decision || '?'].join(' · '));
@@ -706,13 +695,14 @@
     else renderPulse();                     // (applyFilters already refreshes the pulse)
     // The alarm fires on the loudest signals: any block, and any critical catch
     // (e.g. a secret-exfil deny) — a routine allowlist deny stays quiet.
-    if (dec === 'block' || sev === 'critical') { hitFlash(); beep(); if (!demoMode && isNewRow(ev)) notifyBlocked(ev); }
+    if (dec === 'block' || sev === 'critical') { hitFlash(); beep(); if (streamLive) notifyBlocked(ev); }
   }
 
   function connect() {
     const es = new EventSource('/events');
     const conn = document.getElementById('conn');
-    es.onopen = () => { conn.textContent = 'live'; connCount = new Map(); };
+    es.onopen = () => { conn.textContent = 'live'; streamLive = false; };
+    es.addEventListener('replayed', () => { streamLive = true; });
     es.onmessage = (m) => { try { render(JSON.parse(m.data)); } catch(e){} };
     es.onerror = () => { conn.textContent = 'reconnecting…'; };
   }
@@ -753,7 +743,7 @@
         // break_at is the line the server marks verifyState "broken"; a rollback has
         // none. Notify once per break, and not when the banner is already on screen.
         const breakKey = v.break_at ?? 'no entry';
-        if (breakKey !== seenBreak) {
+        if (contextLive && breakKey !== seenBreak) {
           seenBreak = breakKey;
           if (tabHidden()) desktopNotify('NockGuard audit trail broken', 'Audit trail broken' +
             (v.break_at != null ? ' at entry ' + v.break_at : '') + ': the record may have been altered.');

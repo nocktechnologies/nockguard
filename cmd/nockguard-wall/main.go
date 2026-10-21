@@ -219,6 +219,9 @@ func (b *broker) handleSSE(w http.ResponseWriter, r *http.Request) {
 	// Replay existing audit history to this client first, so opening the wall
 	// shows the full record rather than only decisions that arrive afterward.
 	b.replayHistory(w)
+	// A named event marks the end of the replay, so the page can tell history
+	// from live rows. EventSource onmessage ignores named events.
+	fmt.Fprint(w, "event: replayed\ndata: {}\n\n")
 	fl.Flush()
 
 	c := make(chan event, 64)

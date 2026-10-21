@@ -10,7 +10,9 @@ All notable changes to NockGuard are documented here.
   the tab is hidden, a new `block` or critical row raises one notification with
   the agent, tool and decision, at most one per 10 seconds with the rest
   collapsed into "+N more"; an audit-chain break notifies once. Replayed
-  history and demo rows do not notify. The choice is remembered in the browser.
+  history (the `/events` stream now marks the end of its replay with a
+  `replayed` event) and demo rows do not notify. The choice is remembered in
+  the browser.
 
 ### Changed
 
