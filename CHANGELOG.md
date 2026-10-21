@@ -4,6 +4,13 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Security
+
+- Requires Go 1.27.3 or later to build. GO-2026-6809 in `crypto/x509`,
+  reached through the Wall server's `http.Server.Serve`, is fixed in Go
+  1.26.10 and 1.27.3; go.mod now sets `go 1.27.3`, so an older toolchain
+  either downloads Go 1.27.3 automatically or refuses to build.
+
 ### Added
 
 - The Live Wall has an opt-in NOTIFY toggle for desktop notifications. While
