@@ -1,6 +1,6 @@
 # NockGuard™
 
-**The MCP firewall.** Put NockGuard in front of an MCP server and the tool calls routed through it are policy-checked. With auditing and Ed25519 signing enabled, decisions can be recorded in a verifiable trail. A private-key holder can sign new records, and detecting rollback of both the trail and its signed checkpoint requires an external anchor.
+**The MCP firewall.** Configure NockGuard's stdio proxy or HTTP enforcement listener to block unapproved MCP tool calls routed through it. With auditing and Ed25519 signing enabled, decisions can be recorded in a verifiable trail. A private-key holder can sign new records, and detecting rollback of both the trail and its signed checkpoint requires an external anchor.
 
 Every agent connector is untrusted until proven otherwise. NockGuard is how you prove it.
 
@@ -115,7 +115,7 @@ agents:
       - "write_*"
 
   default:
-    mode: allow
+    mode: deny
     deny:
       - "deploy_*"
       - "*_delete_*"
@@ -133,21 +133,21 @@ nockguard proxy \
 ## Policy rules
 
 - **allow**: Tool patterns the agent can use.
-- **deny**: Tool patterns blocked regardless of allow rules. Deny takes precedence.
+- **deny**: Patterns for unapproved MCP tool calls, blocked regardless of allow rules. Deny takes precedence.
 - **shadow**: Dry-run allowlist for observe-to-enforce staging. A tool outside
   `shadow` records `would-deny` in the audit trail but is not blocked.
 - **ask**: Tool patterns that return the `Ask` verdict. Ask tools remain visible in `tools/list`; NockGuard holds each call for a human approval decision before forwarding it. Denial or timeout drops the call.
 - **fail_mode**: `deny` (default) rejects malformed or ambiguous `tools/call` messages that NockGuard cannot safely interpret; `ask` parks those failures behind approval instead.
 - **mode**: Explicit `allow` permits unlisted tools when there is no allow list;
-  `deny` blocks them. With no allow list or explicit mode, the policy denies
+  `deny` blocks these unapproved MCP tool calls. With no allow list or explicit mode, the policy denies
   by default. With an allow list, unmatched tools are denied.
 - **default**: Fallback policy for agents not listed by name.
 - Tool patterns in `allow`, `deny`, `ask`, `shadow`, `require_approval`, and `inject` support `*`, `?`, and character classes such as `[ab]`. Wildcards do not match `/`.
 - **tool_pins**: operator-approved MCP Tool definition hashes, keyed by stable upstream ID and exact tool name. Run the stdio proxy with `--upstream-id <id>`. Each pin uses `hash_version: jcs-rfc8785-v1` and a lowercase 64-character `sha256`. A configured pin blocks a changed, unobserved, or unhashable definition even when `strict_tool_pins` is false. Set `strict_tool_pins: true` to require pins for every allowed tool. Both settings require signed `audit.action_pairing: true`; ordinary call approval and `tools/list` never update policy pins. After a list-change notification, re-list from page one or reconnect. Paginated catalogs do not authorize pinned calls. These controls currently run in the stdio `proxy`; `mcp-http`, `mcp-listen` and `mcp-gateway` reject pin policies until their HTTP catalogs can be bound to sessions.
 - **validate_input** (Phase 2): built-in input-validation categories applied to tool-call arguments — `sqli`, `path_traversal`, `secrets`. Opt-in per agent.
-- **block_params** (Phase 2): custom regex patterns; a tool call is blocked if any argument matches.
+- **block_params** (Phase 2): custom regex patterns; matching arguments make a call unapproved. These unapproved MCP tool calls are blocked.
 - **rate_limit** (Phase 3): at most `max_calls` tool calls within a sliding `window` (a positive Go duration — `30s`, `1m`, `1h`). Missing, invalid, zero, and negative windows are rejected when loading the policy. The allowance refills as the window slides — this bounds bursts and runaway tool-call loops without blocking normal traffic.
-- **spend_cap** (Phase 3): a hard cumulative ceiling of `max_calls` tool calls for the whole proxy session. It never refills — once hit, every further call is blocked. This is the kill-before-runaway stop that bounds total cost for an agent left running unattended.
+- **spend_cap** (Phase 3): a hard cumulative ceiling of `max_calls` tool calls for the whole proxy session. It never refills — once hit, further calls are unapproved MCP tool calls and are blocked. This bounds the number of tool calls for an agent left running unattended, not upstream API token spend.
 - **trust**: opt-in behavioral trust scoring. When `enabled: true`, NockGuard persists a per-agent score at `~/.nockguard/trust/<agent>.json` and scales the configured rate-limit cap from `0.1x` to `2.0x` based on recent allow/warn/deny outcomes. See `docs/TRUST.md`.
 - **inject** (Phase 6): credential injection at the proxy seam, so a secret a tool needs never enters the agent's context. Rules name tool globs, secret references (`env:NAME`, `file:/abs/path`, or `nockcc:NAME`), and the JSON argument path where the credential is injected (under params.arguments, overwriting whatever the agent sent). A `nockcc:` reference reads the NockCC credential vault at forward time using the proxy's own `NOCKCC_BASE_URL` and `NOCKGUARD_VAULT_AGENT_TOKEN` (sent as `X-Agent-Token`); both are stripped from the upstream child environment. The vault key name is operator-only and appears in policy and operator-side logs/audit, never in agent-facing errors. Optional template wraps the resolved value (e.g. Bearer {secret}). Resolution happens at forward time (not load), so credential rotation works without restart. Injection is `tools/call` only and happens only on allowed calls after input validation, before the upstream forward. Fail-closed: unresolvable refs (env unset, file missing/unreadable, vault unavailable, unknown scheme, value < 8 bytes) or unsettable arg paths (params.arguments not an object or intermediate path not an object) reject the call. File-scheme secrets are read from regular files with mode no more permissive than 0600, owned by the proxy uid or 0, and opened with O_NOFOLLOW (symlinks rejected outright). Any injected value is scrubbed (plaintext, JSON-escaped, URL-escaped, base64 std/URL variants, padded/unpadded) from agent-facing output using the fixed marker `[nockguard:redacted]`, preventing leakage in error responses. Two rules that write the same argument must name their tools literally, or one literal plus a glob that does not match it. Two globs writing the same argument are rejected at load, even when they look disjoint; split them into literal tool names. One warning is issued at load time per tool glob appearing in multiple inject rules. Limitation: injection protects the credential from the agent, not the tool; the tool receives the plaintext. Keep globs narrow (one tool per rule recommended) and pair with deny rules on sibling tools that could exfiltrate. This is a v1 boundary.
 
@@ -210,7 +210,7 @@ nockguard verify --session <id> \
 
 ## Prove the firewall BLOCKS — `selftest`
 
-`verify` proves the audit **trail** is intact. But a firewall can keep a flawless trail while silently forwarding every call — an intact record of an open door. `selftest` closes that gap: it proves the live **enforcement** path actually blocks.
+`verify` proves the audit **trail** is intact. But a firewall can keep a flawless trail while silently forwarding every call — an intact record of an open door. `selftest` closes that gap: it proves the live **enforcement** path actually blocks unapproved MCP tool calls.
 
 ```bash
 nockguard selftest --policy policy.yaml    # exit 0 = enforcement PROVEN, 2 = a GAP, 1 = inconclusive
@@ -505,7 +505,7 @@ auditing and a per-agent Ed25519 signing key. See the
 [configuration template](docs/gateway.example.yaml). The issuer and ingress must
 be supplied separately; this command does not deploy or switch a live connector.
 
-NockGuard gates MCP messages through its stdio proxy or HTTP enforcement listeners.
+NockGuard blocks unapproved MCP tool calls routed through its stdio proxy or HTTP enforcement listeners.
 Its separate `egress-proxy` covers HTTP/HTTPS clients that use the forward proxy.
 
 If a stdio upstream exits, the proxy delivers output already in its pipe while
@@ -522,9 +522,9 @@ leader one second to exit, then kills its process group and reaps it.
 
 **What NockGuard does not cover:**
 - HTTP/HTTPS traffic that does not use `nockguard egress-proxy`.
-- Calls routed to MCP servers that are not wired through NockGuard (an agent can have multiple MCP servers; only the ones using `nockguard proxy` as their command are gated).
+- Calls routed to MCP servers that bypass NockGuard's enforcing transports (an agent can have multiple MCP servers; each needs its own enforcement route).
 
-MCP policy enforcement applies to calls routed through NockGuard; direct HTTP calls require separate egress-proxy routing to be seen or enforced.
+In enforcing mode, `proxy`, `mcp-listen` and `mcp-gateway` block unapproved MCP tool calls routed through them. Shadow-only checks and the `mcp-http` bridge do not enforce policy verdicts. Direct HTTP calls require separate egress-proxy routing to be seen or enforced.
 
 For HTTP/HTTPS clients configured to use it, `nockguard egress-proxy` checks destination hosts, records decisions when auditing is enabled, and can block denied hosts with `--enforce`; without that flag it is observe-only. Clients that bypass the proxy need a network-layer control such as an egress firewall or NockLock network fence.
 
