@@ -6,7 +6,8 @@ and what is still open, and remove anything no longer true. Keep it short.
 ## What changed
 
 - 2026-10-22: The README default policy now uses `mode: deny`. Blocking claims
-  name unapproved MCP tool calls and retain the separate egress-proxy scope.
+  name unapproved MCP tool calls, distinguish enforcement from observe/shadow
+  checks and retain the separate egress-proxy scope.
 
 - Release metadata was updated for v0.11.0.
 - `AGENTS.md` indexes project documentation and CI checks its linked paths.

@@ -1,6 +1,6 @@
 # NockGuard™
 
-**The MCP firewall.** Put NockGuard in front of an MCP server to block unapproved MCP tool calls routed through it. With auditing and Ed25519 signing enabled, decisions can be recorded in a verifiable trail. A private-key holder can sign new records, and detecting rollback of both the trail and its signed checkpoint requires an external anchor.
+**The MCP firewall.** Configure NockGuard's stdio proxy or HTTP enforcement listener to block unapproved MCP tool calls routed through it. With auditing and Ed25519 signing enabled, decisions can be recorded in a verifiable trail. A private-key holder can sign new records, and detecting rollback of both the trail and its signed checkpoint requires an external anchor.
 
 Every agent connector is untrusted until proven otherwise. NockGuard is how you prove it.
 
@@ -524,7 +524,7 @@ leader one second to exit, then kills its process group and reaps it.
 - HTTP/HTTPS traffic that does not use `nockguard egress-proxy`.
 - Calls routed to MCP servers that are not wired through NockGuard (an agent can have multiple MCP servers; only the ones using `nockguard proxy` as their command are gated).
 
-MCP policy enforcement blocks unapproved MCP tool calls routed through NockGuard; direct HTTP calls require separate egress-proxy routing to be seen or enforced.
+In enforcing mode, `proxy`, `mcp-listen` and `mcp-gateway` block unapproved MCP tool calls routed through them. Observe mode, shadow-only checks and the `mcp-http` bridge only record their decisions. Direct HTTP calls require separate egress-proxy routing to be seen or enforced.
 
 For HTTP/HTTPS clients configured to use it, `nockguard egress-proxy` checks destination hosts, records decisions when auditing is enabled, and can block denied hosts with `--enforce`; without that flag it is observe-only. Clients that bypass the proxy need a network-layer control such as an egress firewall or NockLock network fence.
 
