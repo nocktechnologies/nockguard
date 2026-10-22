@@ -522,9 +522,9 @@ leader one second to exit, then kills its process group and reaps it.
 
 **What NockGuard does not cover:**
 - HTTP/HTTPS traffic that does not use `nockguard egress-proxy`.
-- Calls routed to MCP servers that are not wired through NockGuard (an agent can have multiple MCP servers; only the ones using `nockguard proxy` as their command are gated).
+- Calls routed to MCP servers that bypass NockGuard's enforcing transports (an agent can have multiple MCP servers; each needs its own enforcement route).
 
-In enforcing mode, `proxy`, `mcp-listen` and `mcp-gateway` block unapproved MCP tool calls routed through them. Observe mode, shadow-only checks and the `mcp-http` bridge only record their decisions. Direct HTTP calls require separate egress-proxy routing to be seen or enforced.
+In enforcing mode, `proxy`, `mcp-listen` and `mcp-gateway` block unapproved MCP tool calls routed through them. Shadow-only checks and the `mcp-http` bridge do not enforce policy verdicts. Direct HTTP calls require separate egress-proxy routing to be seen or enforced.
 
 For HTTP/HTTPS clients configured to use it, `nockguard egress-proxy` checks destination hosts, records decisions when auditing is enabled, and can block denied hosts with `--enforce`; without that flag it is observe-only. Clients that bypass the proxy need a network-layer control such as an egress firewall or NockLock network fence.
 
