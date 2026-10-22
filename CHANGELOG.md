@@ -4,6 +4,11 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Documentation
+
+- Make the README's default policy example deny unlisted tools, and clarify
+  that MCP enforcement blocks unapproved MCP tool calls routed through NockGuard.
+
 ## [0.11.0] - 2026-10-21
 
 v0.11.0 is a security release. NockGuard now requires Go 1.27.3 or later to
