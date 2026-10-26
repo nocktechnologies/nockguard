@@ -535,11 +535,11 @@ For HTTP/HTTPS clients configured to use it, `nockguard egress-proxy` checks des
 
 Same brand, same tap, independent products. Use one or both.
 
-## What is free, and what is a service
+## Free, and yours
 
 Everything in this repository is MIT-licensed. `nockguard-pool` is a scaffold: `validate` works, but `serve` refuses to start because routing is not implemented. There is no license key, no feature flag that phones home, and nothing in the binary that stops working after a date. The on-ramp — `proxy`, `verify` / `audit verify`, `policy propose` / `shadow-report`, `init`, `keygen`, `selftest`, and the Live Wall you run yourself with `nockguard wall` — is the product, and it is yours.
 
-What Nock Technologies sells is the part that only makes sense as a **service or at fleet scale**: a hosted Live Wall across many agents and machines, hosted generation and retention of compliance evidence packs (`nockguard evidence` runs locally today), fleet-wide trust services, and support. Local Ed25519-signed trails can be checked with the public key alone, subject to the key-holder and rollback limits above.
+NockGuard is free and stays free. Nock Technologies does not host it, and nothing in it reports back to us.
 
 ## Roadmap
 
