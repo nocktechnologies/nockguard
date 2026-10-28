@@ -392,7 +392,7 @@ func parseTimeFilter(s string) *time.Time {
 }
 
 // computePulse aggregates events into a pulse, honouring the same filters the
-// wall exposes: a case-insensitive substring over "agent tool", an exact
+// wall exposes: a case-insensitive substring over "agent tool reason", an exact
 // decision match, and a threat-severity match. It is O(events-in-window) — a
 // single pass, no re-scan.
 func computePulse(evs []event, q, decision, severity string, since, until *time.Time) pulse {
@@ -599,8 +599,10 @@ func csvSafe(s string) string {
 
 // handleExport serves the current (filtered) audit window as a downloadable
 // file so a decision snapshot can land in a compliance report or incident
-// write-up. It honours the SAME ?q=/?decision=/?severity= filters as /pulse and
-// the browser, defaults to CSV, and serves JSON on ?format=json. It exposes only
+// write-up. CSV and JSON honour the SAME ?q=/?decision=/?severity= filters as
+// /pulse and the browser; it defaults to CSV and serves JSON on ?format=json.
+// The signed ?format=proof selection uses audit.ExportFilters, whose text
+// filter matches agent and tool only because the offline verifier re-applies it. It exposes only
 // what /events and /pulse already serve over the same loopback bind — the
 // audit trail never records raw tool-call arguments — so it widens nothing.
 func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {

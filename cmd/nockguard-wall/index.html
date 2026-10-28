@@ -314,7 +314,7 @@
       </select>
       <button class="toggle" id="f-clear" title="clear filters">✕ CLEAR</button>
       <a class="toggle" id="f-export" title="download the current audit window as CSV" href="/export" download>⬇ CSV</a>
-      <a class="toggle" id="f-proof" hidden title="download a signed offline proof of the NockGuard rows in this window (NockLock rows are verified by the session badges, not by this file)" href="/export?format=proof" download>⬇ PROOF</a>
+      <a class="toggle" id="f-proof" hidden title="download a signed offline proof of the NockGuard rows in this window (NockLock rows are verified by the session badges, not by this file; its text filter matches agent and tool only, not the reason)" href="/export?format=proof" download>⬇ PROOF</a>
       <span class="fcount" id="f-count"></span>
     </div>
   </header>
@@ -455,7 +455,7 @@
   }
   let seenBreak = null;
 
-  // --- filters: substring match on agent/tool + exact decision + time range ---
+  // --- filters: substring match on agent/tool/reason + exact decision + time range ---
   const fText = document.getElementById('f-text');
   const fDecision = document.getElementById('f-decision');
   const fixedDecisions = new Set([...fDecision.options].map(option => option.value));
@@ -484,7 +484,8 @@
   }
   // Build the /export URL from the SAME inputs that drive the row filter, so the
   // downloaded file matches the filter the operator is looking at. The server
-  // re-applies the identical matches() predicate over the persisted window.
+  // re-applies the identical matches() predicate over the persisted window for
+  // CSV/JSON; PROOF's signed text filter matches agent and tool only.
   function syncExport() {
     const p = new URLSearchParams();
     const q = fText.value.trim();

@@ -476,6 +476,15 @@ func TestPulseAndExportMatchReason(t *testing.T) {
 		if len(recs)-1 != want || (want == 1 && recs[1][0] != "t2") {
 			t.Fatalf("/export?q=%s rows = %v, want %d (t2)", q, recs, want)
 		}
+		rec = httptest.NewRecorder()
+		b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?format=json&q="+q, nil).WithContext(t.Context()))
+		var out []event
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("export is not valid JSON: %v", err)
+		}
+		if len(out) != want || (want == 1 && out[0].Ts != "t2") {
+			t.Fatalf("/export?format=json&q=%s rows = %+v, want %d (t2)", q, out, want)
+		}
 	}
 }
 
