@@ -402,13 +402,14 @@ func TestFilterEventsMatchesPulse(t *testing.T) {
 		{"", "", ""},
 		{"", "allow", ""},
 		{"ash", "", ""},
-		{"KIT", "", ""},      // case-insensitive
-		{"webfetch", "", ""}, // matches tool, not agent
-		{"ash", "allow", ""}, // combined
-		{"nomatch", "", ""},  // empty result
-		{"", "nonsense", ""}, // unknown decision → empty
-		{"", "", "threat"},   // any live catch (crit+high+low)
-		{"", "", "critical"}, // exact tier
+		{"KIT", "", ""},         // case-insensitive
+		{"webfetch", "", ""},    // matches tool, not agent
+		{"DESTRUCTIVE", "", ""}, // matches reason only, case-insensitive
+		{"ash", "allow", ""},    // combined
+		{"nomatch", "", ""},     // empty result
+		{"", "nonsense", ""},    // unknown decision → empty
+		{"", "", "threat"},      // any live catch (crit+high+low)
+		{"", "", "critical"},    // exact tier
 		{"", "", "high"},
 		{"", "", "low"},
 		{"", "", "none"},        // allows only — distinct from no filter
@@ -422,6 +423,58 @@ func TestFilterEventsMatchesPulse(t *testing.T) {
 		want := computePulse(exportEvents, c.q, c.decision, c.severity, nil, nil).Total
 		if got != want {
 			t.Fatalf("filterEvents/pulse drift for q=%q decision=%q severity=%q: rows=%d total=%d", c.q, c.decision, c.severity, got, want)
+		}
+	}
+	// Parity alone passes when neither side searches the reason, so pin the
+	// reason-only match absolutely: "destructive" is only in t2's reason.
+	if got := filterEvents(exportEvents, normalizeQuery("DESTRUCTIVE"), "", "", nil, nil); len(got) != 1 || got[0].Ts != "t2" {
+		t.Fatalf("reason-only q: got %+v, want only t2", got)
+	}
+	if got := filterEvents(exportEvents, "nomatch", "", "", nil, nil); len(got) != 0 {
+		t.Fatalf("miss control: got %+v, want none", got)
+	}
+}
+
+// TestPulseAndExportMatchReason drives /pulse?q= and /export?q= over a real
+// audit file: a query found only in a row's reason counts and exports it.
+func TestPulseAndExportMatchReason(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "audit-*.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range []event{
+		{Ts: "t1", Agent: "kit", Tool: "Read", Decision: "allow"},
+		{Ts: "t2", Agent: "ash", Tool: "Bash", Decision: "block", Reason: "rule no-rm fired"},
+	} {
+		b, _ := json.Marshal(ev)
+		if _, err := f.Write(append(b, '\n')); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b := newBroker()
+	b.auditPath = f.Name()
+
+	for q, want := range map[string]int{"NO-RM": 1, "no-such-rule": 0} {
+		rec := httptest.NewRecorder()
+		b.handlePulse(rec, httptest.NewRequest(http.MethodGet, "/pulse?q="+q, nil))
+		var p pulse
+		if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.Total != want || p.Blocked != want {
+			t.Fatalf("/pulse?q=%s = %+v, want total and blocked %d", q, p, want)
+		}
+		rec = httptest.NewRecorder()
+		b.handleExport(rec, httptest.NewRequest(http.MethodGet, "/export?q="+q, nil).WithContext(t.Context()))
+		recs, err := csv.NewReader(strings.NewReader(rec.Body.String())).ReadAll()
+		if err != nil {
+			t.Fatalf("export is not valid CSV: %v", err)
+		}
+		if len(recs)-1 != want || (want == 1 && recs[1][0] != "t2") {
+			t.Fatalf("/export?q=%s rows = %v, want %d (t2)", q, recs, want)
 		}
 	}
 }

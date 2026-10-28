@@ -57,6 +57,10 @@ display-oriented `verification` labels; use **PROOF** when handing evidence to
 someone who has only the export and public key. HMAC and unsigned trails cannot
 produce a public-key offline proof.
 
+The PROOF text filter matches the agent and tool only. The Wall view and the
+CSV and JSON exports also match the decision reason, so a query found only in
+a reason selects those rows on screen but not in the PROOF file.
+
 The auditor timestamps signed rows after taking the exclusive append lock, so
 concurrent writers stamp rows in append order. It uses the host clock. If a clock regression makes
 the matching rows noncontiguous in the chain, the Wall refuses a complete

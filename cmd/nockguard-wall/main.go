@@ -317,7 +317,7 @@ type agentCount struct {
 
 // matches reports whether an event survives the wall's three filters: an exact
 // decision match, a threat-severity match, and a case-insensitive substring over
-// "agent tool". q must already be lower-cased and trimmed (normalizeQuery). This
+// "agent tool reason". q must already be lower-cased and trimmed (normalizeQuery). This
 // is the SINGLE predicate shared by the pulse aggregate (/pulse) and the raw
 // export (/export) so their filter semantics can never drift — a mismatch
 // between what the wall counts and what it exports would be a lie in an audit
@@ -343,7 +343,7 @@ func matches(ev event, q, decision, severity string, since, until *time.Time) bo
 			return false
 		}
 	}
-	if q != "" && !strings.Contains(strings.ToLower(ev.Agent+" "+ev.Tool), q) {
+	if q != "" && !strings.Contains(strings.ToLower(ev.Agent+" "+ev.Tool+" "+ev.Reason), q) {
 		return false
 	}
 	// Time filtering: parse ev.Ts as RFC3339 and check bounds.

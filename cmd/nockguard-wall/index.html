@@ -278,7 +278,7 @@
       <button class="toggle snd" id="t-notify" title="desktop notification when something is blocked while this tab is hidden, or when the audit chain breaks">🔔 NOTIFY</button>
     </div>
     <div class="filters">
-      <input id="f-text" class="finput" type="search" placeholder="filter by agent or tool…" autocomplete="off" spellcheck="false" />
+      <input id="f-text" class="finput" type="search" placeholder="filter by agent, tool or reason…" autocomplete="off" spellcheck="false" />
       <select id="f-decision" class="finput" title="filter by decision">
         <option value="">all decisions</option>
         <option value="allow">allow</option>
@@ -510,7 +510,7 @@
   function rowMatches(row) {
     if (fdec && (row.dataset.decision || '') !== fdec) return false;
     if (!sevMatches(row.dataset.severity || 'none')) return false;
-    if (fq && ((row.dataset.agent || '') + ' ' + (row.dataset.tool || '')).indexOf(fq) === -1) return false;
+    if (fq && ((row.dataset.agent || '') + ' ' + (row.dataset.tool || '') + ' ' + (row.dataset.reason || '')).indexOf(fq) === -1) return false;
     // Time-range filtering: parse row timestamp and compare numerically.
     if (Number.isFinite(ftimeSinceMs)) {
       const rowTs = Date.parse(row.dataset.ts || '');
@@ -659,6 +659,7 @@
     row.dataset.agent = (ev.agent || '').toLowerCase();
     row.dataset.agentName = ev.agent || '';
     row.dataset.tool = (ev.tool || '').toLowerCase();
+    row.dataset.reason = (ev.reason || '').toLowerCase();
     row.dataset.decision = ev.decision || '';
     row.dataset.bucket = ev.bucket || 'other';
     row.dataset.severity = sev;

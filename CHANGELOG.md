@@ -4,6 +4,13 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- The Live Wall text filter matches the decision reason as well as the agent
+  and tool, so a rule name, spend cap or NockLock event type finds every row
+  where it fired. `/pulse?q=` and `/export?q=` (CSV and JSON) use the same
+  match. The PROOF export's text filter still matches agent and tool only.
+
 ### Documentation
 
 - Make the README's default policy example deny unlisted tools, and clarify
