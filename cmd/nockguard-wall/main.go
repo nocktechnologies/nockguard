@@ -317,7 +317,7 @@ type agentCount struct {
 
 // matches reports whether an event survives the wall's three filters: an exact
 // decision match, a threat-severity match, and a case-insensitive substring over
-// "agent tool". q must already be lower-cased and trimmed (normalizeQuery). This
+// "agent tool reason". q must already be lower-cased and trimmed (normalizeQuery). This
 // is the SINGLE predicate shared by the pulse aggregate (/pulse) and the raw
 // export (/export) so their filter semantics can never drift — a mismatch
 // between what the wall counts and what it exports would be a lie in an audit
@@ -343,7 +343,7 @@ func matches(ev event, q, decision, severity string, since, until *time.Time) bo
 			return false
 		}
 	}
-	if q != "" && !strings.Contains(strings.ToLower(ev.Agent+" "+ev.Tool), q) {
+	if q != "" && !strings.Contains(strings.ToLower(ev.Agent+" "+ev.Tool+" "+ev.Reason), q) {
 		return false
 	}
 	// Time filtering: parse ev.Ts as RFC3339 and check bounds.
@@ -392,7 +392,7 @@ func parseTimeFilter(s string) *time.Time {
 }
 
 // computePulse aggregates events into a pulse, honouring the same filters the
-// wall exposes: a case-insensitive substring over "agent tool", an exact
+// wall exposes: a case-insensitive substring over "agent tool reason", an exact
 // decision match, and a threat-severity match. It is O(events-in-window) — a
 // single pass, no re-scan.
 func computePulse(evs []event, q, decision, severity string, since, until *time.Time) pulse {
@@ -599,8 +599,10 @@ func csvSafe(s string) string {
 
 // handleExport serves the current (filtered) audit window as a downloadable
 // file so a decision snapshot can land in a compliance report or incident
-// write-up. It honours the SAME ?q=/?decision=/?severity= filters as /pulse and
-// the browser, defaults to CSV, and serves JSON on ?format=json. It exposes only
+// write-up. CSV and JSON honour the SAME ?q=/?decision=/?severity= filters as
+// /pulse and the browser; it defaults to CSV and serves JSON on ?format=json.
+// The signed ?format=proof selection uses audit.ExportFilters, whose text
+// filter matches agent and tool only because the offline verifier re-applies it. It exposes only
 // what /events and /pulse already serve over the same loopback bind — the
 // audit trail never records raw tool-call arguments — so it widens nothing.
 func (b *broker) handleExport(w http.ResponseWriter, r *http.Request) {

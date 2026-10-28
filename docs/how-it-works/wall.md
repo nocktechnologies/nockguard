@@ -22,6 +22,11 @@ log to the display. The PROOF export covers Guard rows only. Source:
 [README Wall guide](../../README.md#live-wall),
 [offline proof limits](../verifying-the-trail.md).
 
+The text filter is a case-insensitive substring match over the agent, tool and
+decision reason. The pulse tiles, `/pulse?q=` and the CSV and JSON exports
+apply the same match. Source: `rowMatches` in `cmd/nockguard-wall/index.html`
+and `matches` in `cmd/nockguard-wall/main.go`.
+
 Session badges are local snapshots with refresh, row-count, key and external
 anchor limits. `UNVERIFIABLE` is never a green verdict. A missing key or
 large/unreadable Lock log cannot prove protection. For a combined offline

@@ -253,3 +253,16 @@ func TestExportProofTimeRegression(t *testing.T) {
 		})
 	}
 }
+
+// TestExportFilterQueryIgnoresReason pins the signed PROOF text filter to agent
+// and tool: the offline verifier re-applies it, so widening it to the reason
+// would make older verifiers reject new proofs.
+func TestExportFilterQueryIgnoresReason(t *testing.T) {
+	ev := Event{Time: "2026-10-07T12:00:00Z", Agent: "ash", Tool: "Bash", Decision: "block", Reason: "rule no-rm fired"}
+	for q, want := range map[string]bool{"ASH": true, "bash": true, "no-rm": false} {
+		got, err := ExportFilters{Query: q}.match(ev)
+		if err != nil || got != want {
+			t.Fatalf("match(q=%q) = %v, %v; want %v", q, got, err, want)
+		}
+	}
+}

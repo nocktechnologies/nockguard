@@ -434,6 +434,8 @@ The audit trail is a file; the **Live Wall** makes it something you watch. `nock
 
 The Wall leads with its configured Guard trail and optional Lock DB, agent and recent session, verification status and last check time, and export scope. Its badges and browser pulse count the same filtered view of the newest 500 decisions; `/pulse` uses that same 500-row window. `allow`, `would-deny`, `observe`, `dispatch`, `state-write`, `approval-granted`, and the empty decision are routine: they count as approved and have no threat tier. Only `deny`, `block`, `ratelimit`, and `approval-denied` count as rejected; `ratelimit` also counts under `rateLimited`. `hide` (a `tools/list` filter) counts under `hidden` and has no threat tier. Any other decision counts under `other`, retains its raw name in the stream and decision filter, and receives a high threat tier without entering the rejected-share numerator or denominator. An empty or unreadable source is not presented as proof of zero violations; the empty view shows commands for generating sample or real audited traffic.
 
+The text filter is a case-insensitive substring match over the agent, tool and decision reason, so a rule name, spend cap or NockLock event type finds every row where it fired. The pulse, `/pulse?q=` and the CSV and JSON exports (`/export?q=`) count and return the same rows.
+
 ```bash
 nockguard wall                              # serves http://127.0.0.1:8787 (loopback = private)
 nockguard wall --agent coder                # watch this agent's signed audit trail

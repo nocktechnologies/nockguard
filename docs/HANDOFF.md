@@ -5,6 +5,11 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## What changed
 
+- 2026-10-28: The Wall text filter (browser `rowMatches`, server `matches`)
+  also matches the decision reason. The PROOF export keeps its own
+  agent-and-tool text filter in `internal/audit/export.go`, which the offline
+  verifier re-applies to every row.
+
 - 2026-10-22: The README default policy now uses `mode: deny`. Blocking claims
   name unapproved MCP tool calls, distinguish enforcement from observe/shadow
   checks and retain the separate egress-proxy scope.
@@ -39,3 +44,6 @@ and what is still open, and remove anything no longer true. Keep it short.
 - v0.11.0 release: `next` stays frozen from the release-prep merge until
   the post-release back-sync of `main`. Only maintainer-approved release-fix
   PRs merge during the freeze.
+- PROOF text filter: a query found only in a reason shows rows on the Wall
+  and in CSV/JSON but not in PROOF. Matching the reason there needs a new
+  export schema version so older verifiers fail closed on it.
