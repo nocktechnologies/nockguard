@@ -195,6 +195,27 @@ test('filter lists every emitted decision and filters to exactly its rows', () =
   }
 });
 
+test('text filter matches the reason, case-insensitive, and the pulse follows it', () => {
+  const w = wall();
+  vm.runInContext(`render({decision:'allow', bucket:'approved', agent:'kit', tool:'Read'});
+    render({decision:'block', bucket:'blocked', severity:'high', agent:'ash', tool:'Bash', reason:'Rule No-RM fired'})`, w.context);
+  const feed = w.elements.get('feed');
+  const shown = () => feed.children.filter(r => r.classList.contains('row') && !r.classList.contains('fout')).map(r => r.dataset.agent);
+  const text = w.elements.get('f-text');
+  text.value = 'NO-rm';
+  vm.runInContext('applyFilters()', w.context);
+  assert.deepEqual(shown(), ['ash']); // reason-only match
+  assert.equal(w.elements.get('p-blocked').textContent, 1);
+  assert.equal(w.elements.get('p-approved').textContent, 0);
+  text.value = 'no-such-rule';
+  vm.runInContext('applyFilters()', w.context);
+  assert.deepEqual(shown(), []); // reason miss
+  assert.equal(w.elements.get('p-blocked').textContent, 0);
+  text.value = 'read';
+  vm.runInContext('applyFilters()', w.context);
+  assert.deepEqual(shown(), ['kit']); // tool match unchanged
+});
+
 test('approval-granted, dispatch and would-deny get their own tiles', () => {
   const w = wall();
   vm.runInContext(`render({decision:'approval-granted', bucket:'approved'});
