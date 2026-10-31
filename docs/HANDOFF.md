@@ -41,6 +41,10 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## Still open
 
+- A proposed shell-command body check could not start: this repository has no
+  `interpreter_bodies` parser or command-checking CLI. Its MCP policy checks
+  tool names, while opt-in input validation scans argument text. The request
+  needs a repository or scope correction before a RED reproduction is possible.
 - v0.11.0 release: `next` stays frozen from the release-prep merge until
   the post-release back-sync of `main`. Only maintainer-approved release-fix
   PRs merge during the freeze.
