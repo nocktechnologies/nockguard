@@ -25,7 +25,7 @@ closes the same hole on the MCP side; the shell needs its own control.
 | Tool | Why |
 |---|---|
 | `create_repository` | The agent cannot make a public repo to park files in. |
-| `fork_repository` | A fork of a public repo is public, so it is another way to get a new public repo. |
+| `fork_repository` | A fork of a public repo is public. |
 | `delete_repository` | The agent cannot delete a repo. |
 
 Visibility is the `private` argument of `create_repository`, and NockGuard
@@ -79,14 +79,14 @@ and a GitHub personal access token in `GITHUB_PERSONAL_ACCESS_TOKEN`.
    and the trail gets a row with `"tool":"create_repository","decision":"deny"`.
 
 6. Restart Claude Code and run `/mcp`: the `github` server should be connected.
-   Ask the agent to list your open pull requests. `create_repository`,
-   `fork_repository` and `delete_repository` are not in its tool list.
+   Ask the agent to list your open pull requests. The three denied tools are
+   not in its tool list.
 
 ## Check the trail
 
 ```bash
 nockguard verify --agent claude-code   # exit 0 and PROTECTED for a non-empty, fully checkpointed trail
-grep '"decision":"deny"' ~/.nockguard/logs/claude-code.audit.jsonl   # the smoke-check deny from step 5
+grep '"tool":"create_repository"' ~/.nockguard/logs/claude-code.audit.jsonl   # the deny from step 5
 nockguard wall --agent claude-code     # browse the decisions in the Live Wall
 ```
 
