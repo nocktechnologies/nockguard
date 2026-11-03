@@ -21,6 +21,7 @@ func TestPolicyVerdicts(t *testing.T) {
 		// Denied by tool name, whatever the arguments, so a create with
 		// private=false is denied too.
 		{"create_repository", policy.Deny},
+		{"fork_repository", policy.Deny},
 		{"delete_repository", policy.Deny},
 		// Negative controls: ordinary GitHub work stays allowed.
 		{"create_pull_request", policy.Allow},
@@ -46,7 +47,7 @@ func TestMCPConfigWrapsGitHubServer(t *testing.T) {
 		t.Fatalf(".mcp.json is not valid JSON: %v", err)
 	}
 	args := strings.Join(cfg.MCPServers["github"].Args, " ")
-	for _, want := range []string{"proxy --upstream", "ghcr.io/github/github-mcp-server", "--agent claude-code", "--policy"} {
+	for _, want := range []string{"proxy --upstream", "ghcr.io/github/github-mcp-server:v2.0.3", "--agent claude-code", "--policy"} {
 		if !strings.Contains(args, want) {
 			t.Errorf(".mcp.json github args %q missing %q", args, want)
 		}

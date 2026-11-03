@@ -67,8 +67,9 @@ hidden, denied, rate-limited, and input-blocked calls without external services.
 Examples you can copy:
 
 - [`examples/github-mcp-claude-code/`](examples/github-mcp-claude-code/): wraps
-  the GitHub MCP server for Claude Code so the agent cannot create or delete a
-  repository, with a signed trail you check with `nockguard verify`.
+  the GitHub MCP server for Claude Code so the agent cannot create, fork or
+  delete a repository through it, with a signed trail you check with
+  `nockguard verify`.
 - [`examples/exfil-demo/`](examples/exfil-demo/): a poisoned MCP server tries
   to steal a key, and the starter policy blocks it.
 

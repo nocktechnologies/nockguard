@@ -2,7 +2,7 @@
   "mcpServers": {
     "github": {
       "command": "<NOCKGUARD_PATH>",
-      "args": ["proxy", "--upstream", "<DOCKER_PATH> run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server", "--agent", "claude-code", "--policy", "<POLICY_PATH>"],
+      "args": ["proxy", "--upstream", "<DOCKER_PATH> run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server:v2.0.3", "--agent", "claude-code", "--policy", "<POLICY_PATH>"],
       "env": {"PATH": "<SHELL_PATH>", "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}"}
     }
   }

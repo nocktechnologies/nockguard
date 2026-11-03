@@ -1,7 +1,7 @@
 # Policy for the GitHub MCP server under Claude Code.
 #
 # Copy it next to your project or to ~/.nockguard/, and point --policy in
-# .mcp.json at it. Allows every GitHub tool except the two below.
+# .mcp.json at it. Allows every GitHub tool except the three below.
 audit:
   # Writes ~/.nockguard/logs/claude-code.audit.jsonl, signed with the key from
   # `nockguard keygen --agent claude-code`.
@@ -14,4 +14,6 @@ agents:
       # Policy matches tool names, not the `private` argument, so all repo
       # creation is denied. See README.md.
       - "create_repository"
+      # A fork of a public repo is public.
+      - "fork_repository"
       - "delete_repository"
