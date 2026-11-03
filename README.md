@@ -64,6 +64,15 @@ For a longer local policy demo, run `nockguard keygen --agent demo` and then
 `python3 livedemo/live_client.py`. Its bundled MCP server demonstrates allowed,
 hidden, denied, rate-limited, and input-blocked calls without external services.
 
+Examples you can copy:
+
+- [`examples/github-mcp-claude-code/`](examples/github-mcp-claude-code/): wraps
+  the GitHub MCP server for Claude Code so the agent cannot create, fork or
+  delete a repository through it, with a signed trail you check with
+  `nockguard verify`.
+- [`examples/exfil-demo/`](examples/exfil-demo/): a poisoned MCP server tries
+  to steal a key, and the starter policy blocks it.
+
 ![NockGuard Live Wall showing allowed reads, a denied write_file, a hidden write_file and a verified signed trail](docs/screenshots/wall-signed-trail.png)
 
 ### Observe first, then enforce
