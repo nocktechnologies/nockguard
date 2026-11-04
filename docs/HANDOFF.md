@@ -27,7 +27,7 @@ and what is still open, and remove anything no longer true. Keep it short.
   name unapproved MCP tool calls, distinguish enforcement from observe/shadow
   checks and retain the separate egress-proxy scope.
 
-- Release metadata was updated for v0.11.1.
+- Release metadata was updated for v0.12.0.
 - `AGENTS.md` indexes project documentation and CI checks its linked paths.
 
 - 2026-10-17: `ci.yml` skips the suite on docs-only PRs
@@ -54,7 +54,7 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## Still open
 
-- v0.11.0 release: `next` stays frozen from the release-prep merge until
+- v0.12.0 release: `next` stays frozen from the release-prep merge until
   the post-release back-sync of `main`. Only maintainer-approved release-fix
   PRs merge during the freeze.
 - PROOF text filter: a query found only in a reason shows rows on the Wall
