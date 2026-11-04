@@ -5,6 +5,24 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## What changed
 
+- 2026-11-04: A missing Guard trail is no longer shown as an empty feed.
+  `trailMissing` in `cmd/nockguard-wall/main.go` drives a startup warning and
+  the `/context` `trailExists` field; the page swaps its empty-view heading.
+  Open: the page reads `/context` once, so after the file appears the
+  heading stays until the first row renders.
+
+- 2026-11-04: The Wall's empty view shows installed commands, names the
+  watched Guard trail and fills in the `--agent` name, read from the
+  `/context` agent label before " (". Without `--agent` the Wall watches the
+  shared trail, so the view pairs the proxy command with
+  `nockguard wall --agent <name>` (`#empty-wall`). An `--agent` Wall shows it
+  too: with `--audit` it may watch another trail. Open: that pairing holds
+  for zero-config `proxy`; with `--policy` and no per-agent key the proxy
+  writes the policy-wide trail (`AuditorForAgent` in `internal/policy/`). A filter that hides every
+  row shows a no-match line, toggled in `applyFilters`. `render` removes
+  `#empty` on the first row, which can beat `/context`; the `/context`
+  handler skips the empty-state block once `empty` is null.
+
 - 2026-10-28: The Wall text filter (browser `rowMatches`, server `matches`)
   also matches the decision reason. The PROOF export keeps its own
   agent-and-tool text filter in `internal/audit/export.go`, which the offline
@@ -14,7 +32,7 @@ and what is still open, and remove anything no longer true. Keep it short.
   name unapproved MCP tool calls, distinguish enforcement from observe/shadow
   checks and retain the separate egress-proxy scope.
 
-- Release metadata was updated for v0.11.1.
+- Release metadata was updated for v0.12.0.
 - `AGENTS.md` indexes project documentation and CI checks its linked paths.
 
 - 2026-10-17: `ci.yml` skips the suite on docs-only PRs
@@ -41,7 +59,7 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## Still open
 
-- v0.11.0 release: `next` stays frozen from the release-prep merge until
+- v0.12.0 release: `next` stays frozen from the release-prep merge until
   the post-release back-sync of `main`. Only maintainer-approved release-fix
   PRs merge during the freeze.
 - PROOF text filter: a query found only in a reason shows rows on the Wall

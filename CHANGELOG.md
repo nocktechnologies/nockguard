@@ -2,6 +2,35 @@
 
 All notable changes to NockGuard are documented here.
 
+## [0.12.0] - 2026-11-04
+
+### Changed
+
+- The Live Wall's empty view shows installed commands (`nockguard wall --demo`
+  and `nockguard proxy --upstream <command> --agent <name>`) instead of a
+  source-checkout `go run`, names the watched trail, and fills in the
+  `--agent` the Wall was started with. The proxy command is always paired
+  with `nockguard wall --agent <name>`, because a zero-config proxy writes the
+  agent's own trail rather than the shared one. A filter that hides every row
+  now shows "No rows match these filters" until a row matches or the filters
+  clear.
+- When its Guard trail file does not exist yet, the Live Wall prints a startup
+  warning naming the path, `/context` reports `trailExists: false`, and the
+  empty view reads "No trail file at <path> yet" instead of looking like a
+  healthy feed with no decisions.
+
+### Fixed
+
+- A decision that reaches the Live Wall before `/context` loads no longer
+  stops the page from filling in its export scope and other context fields.
+
+### Documentation
+
+- Add `examples/github-mcp-claude-code/`: a copyable Claude Code setup that
+  runs the GitHub MCP server under NockGuard and denies `create_repository`,
+  `fork_repository` and `delete_repository`, with a policy test and a signed
+  trail checked by `nockguard verify`.
+
 ## [0.11.1] - 2026-10-30
 
 ### Changed

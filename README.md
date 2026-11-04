@@ -64,6 +64,15 @@ For a longer local policy demo, run `nockguard keygen --agent demo` and then
 `python3 livedemo/live_client.py`. Its bundled MCP server demonstrates allowed,
 hidden, denied, rate-limited, and input-blocked calls without external services.
 
+Examples you can copy:
+
+- [`examples/github-mcp-claude-code/`](examples/github-mcp-claude-code/): wraps
+  the GitHub MCP server for Claude Code so the agent cannot create, fork or
+  delete a repository through it, with a signed trail you check with
+  `nockguard verify`.
+- [`examples/exfil-demo/`](examples/exfil-demo/): a poisoned MCP server tries
+  to steal a key, and the starter policy blocks it.
+
 ![NockGuard Live Wall showing allowed reads, a denied write_file, a hidden write_file and a verified signed trail](docs/screenshots/wall-signed-trail.png)
 
 ### Observe first, then enforce
@@ -432,7 +441,7 @@ Extraction is conservative: only known tools and typed parameter patterns are re
 
 The audit trail is a file; the **Live Wall** makes it something you watch. `nockguard-wall` tails the audit JSONL and streams recorded policy decisions to a local browser dashboard in real time, color-coded by outcome. Auditing must be enabled for decisions to appear.
 
-The Wall leads with its configured Guard trail and optional Lock DB, agent and recent session, verification status and last check time, and export scope. Its badges and browser pulse count the same filtered view of the newest 500 decisions; `/pulse` uses that same 500-row window. `allow`, `would-deny`, `observe`, `dispatch`, `state-write`, `approval-granted`, and the empty decision are routine: they count as approved and have no threat tier. Only `deny`, `block`, `ratelimit`, and `approval-denied` count as rejected; `ratelimit` also counts under `rateLimited`. `hide` (a `tools/list` filter) counts under `hidden` and has no threat tier. Any other decision counts under `other`, retains its raw name in the stream and decision filter, and receives a high threat tier without entering the rejected-share numerator or denominator. An empty or unreadable source is not presented as proof of zero violations; the empty view shows commands for generating sample or real audited traffic.
+The Wall leads with its configured Guard trail and optional Lock DB, agent and recent session, verification status and last check time, and export scope. Its badges and browser pulse count the same filtered view of the newest 500 decisions; `/pulse` uses that same 500-row window. `allow`, `would-deny`, `observe`, `dispatch`, `state-write`, `approval-granted`, and the empty decision are routine: they count as approved and have no threat tier. Only `deny`, `block`, `ratelimit`, and `approval-denied` count as rejected; `ratelimit` also counts under `rateLimited`. `hide` (a `tools/list` filter) counts under `hidden` and has no threat tier. Any other decision counts under `other`, retains its raw name in the stream and decision filter, and receives a high threat tier without entering the rejected-share numerator or denominator. An empty or unreadable source is not presented as proof of zero violations; before any traffic the empty view names the watched trail and shows `nockguard wall --demo` for sample traffic and `nockguard proxy --upstream <command> --agent <name>` (with your `--agent` filled in) for real audited traffic, paired with `nockguard wall --agent <name>`, since a zero-config proxy writes the agent's own trail.
 
 The text filter is a case-insensitive substring match over the agent, tool and decision reason, so a rule name, spend cap or NockLock event type finds every row where it fired. The pulse, `/pulse?q=` and the CSV and JSON exports (`/export?q=`) count and return the same rows.
 
