@@ -108,6 +108,51 @@ test('context window stays a bounded positive integer', async () => {
   }
 });
 
+test('first-run empty state shows installed commands and the watched trail', async () => {
+  const page = fs.readFileSync(new URL('./index.html', `file://${__filename}`), 'utf8');
+  assert.ok(!page.includes('go run ./cmd/nockguard-wall'));
+  const emptyHTML = page.match(/<div class="empty" id="empty">[\s\S]*?<\/div>/)[0];
+  assert.ok(emptyHTML.includes('nockguard wall --demo'));
+  const w = wall({ demo: false, agent: 'coder (configured trail selection)', guardTrail: '/x/coder.audit.jsonl' });
+  await tick();
+  assert.equal(w.elements.get('empty-trail').hidden, false);
+  assert.equal(w.elements.get('empty-trail-path').textContent, '/x/coder.audit.jsonl');
+  assert.equal(w.elements.get('empty-proxy').textContent, 'nockguard proxy --upstream <command> --agent coder');
+  // --agent with an explicit --audit trail gets a different label; the name still fills in.
+  const k = wall({ demo: false, agent: 'coder (key selection; explicit trail may contain other agents)', guardTrail: '/p/x.jsonl' });
+  await tick();
+  assert.equal(k.elements.get('empty-proxy').textContent, 'nockguard proxy --upstream <command> --agent coder');
+  // Without --agent the server sends a description, not a name: keep the placeholder.
+  const u = wall({ demo: false, agent: 'from selected trail (unfiltered)', guardTrail: '/x/audit.jsonl' });
+  await tick();
+  assert.equal(u.elements.get('empty-trail-path').textContent, '/x/audit.jsonl');
+  assert.ok(!u.elements.has('empty-proxy')); // never rewritten
+  // Demo mode keeps the generic text and names no trail.
+  const d = wall({ demo: true, agent: 'coder (configured trail selection)', guardTrail: '/x/coder.audit.jsonl' });
+  await tick();
+  for (const id of ['empty-trail', 'empty-trail-path', 'empty-proxy']) assert.ok(!d.elements.has(id), id);
+});
+
+test('a filter that hides every row says so until a row matches or filters clear', () => {
+  const w = wall();
+  const noMatch = w.elements.get('nomatch');
+  const feed = w.elements.get('feed');
+  vm.runInContext("render({decision:'allow', bucket:'approved', agent:'a'})", w.context);
+  vm.runInContext('applyFilters()', w.context);
+  assert.equal(noMatch.hidden, true);
+  w.decisions.value = 'block';
+  vm.runInContext('applyFilters()', w.context);
+  assert.equal(noMatch.hidden, false);
+  vm.runInContext("render({decision:'block', bucket:'blocked', severity:'high', agent:'a'})", w.context);
+  assert.equal(noMatch.hidden, true); // a matching row arrived
+  w.decisions.value = 'deny';
+  vm.runInContext('applyFilters()', w.context);
+  assert.equal(noMatch.hidden, false);
+  w.elements.get('f-clear').click();
+  assert.equal(noMatch.hidden, true);
+  assert.equal(feed.children.filter(r => r.classList.contains('row') && !r.classList.contains('fout')).length, 2);
+});
+
 test('one unreadable row leaves the readable block count visible', () => {
   const w = wall();
   vm.runInContext("render({decision:'block', bucket:'blocked', severity:'high', agent:'a'})", w.context);

@@ -2,6 +2,16 @@
 
 All notable changes to NockGuard are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- The Live Wall's empty view shows installed commands (`nockguard wall --demo`
+  and `nockguard proxy --upstream <command> --agent <name>`) instead of a
+  source-checkout `go run`, names the watched trail, and fills in the
+  `--agent` the Wall was started with. A filter that hides every row now shows
+  "No rows match these filters" until a row matches or the filters clear.
+
 ## [0.11.1] - 2026-10-30
 
 ### Changed

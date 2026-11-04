@@ -166,6 +166,7 @@
   @keyframes flashred { 0%{box-shadow:0 0 0 0 rgba(255,77,77,.55)} 100%{box-shadow:0 0 22px 2px rgba(255,77,77,0)} }
   .empty { color:var(--dim); text-align:center; margin:auto; }
   .empty code { color:var(--accent); }
+  .nomatch { margin:0; padding:14px; }
 
   /* tamper banner (leg 3): the loud global signal when the signed audit chain
      fails verification. Live events keep streaming underneath (optimistic) — this
@@ -344,7 +345,8 @@
     </div>
   </div>
   <div id="sessions" hidden title="signed-proof verdict per session: both the NockLock and the NockGuard chain must verify"></div>
-  <div id="feed"><div class="empty" id="empty">No decisions in this view yet.<br>Run <code>go run ./cmd/nockguard-wall --demo</code> for sample traffic,<br>or run <code>nockguard proxy --upstream &lt;command&gt; --agent &lt;name&gt;</code> with auditing enabled.</div></div>
+  <div class="empty nomatch" id="nomatch" role="status" hidden>No rows match these filters. Press ✕ CLEAR to show every row.</div>
+  <div id="feed"><div class="empty" id="empty">No decisions in this view yet.<span id="empty-trail" hidden><br>Watching <code id="empty-trail-path"></code></span><br>Run <code>nockguard wall --demo</code> for sample traffic,<br>or run <code id="empty-proxy">nockguard proxy --upstream &lt;command&gt; --agent &lt;name&gt;</code> with auditing enabled.</div></div>
   <footer>
     <span id="conn">connecting…</span>
     <span>NockGuard — Align · Decide · Deploy</span>
@@ -377,6 +379,17 @@
     document.getElementById('source-lock').textContent = demoMode ? 'synthetic (no Lock evidence)' : (c.lockDB || 'not configured');
     document.getElementById('context-agent').textContent = demoMode ? 'sample agents' : c.agent;
     document.getElementById('demo-banner').hidden = !demoMode;
+    if (contextLive) {
+      document.getElementById('empty-trail-path').textContent = c.guardTrail;
+      document.getElementById('empty-trail').hidden = false;
+      // /context labels an --agent wall "<name> (...)"; without --agent it sends
+      // a description, which fails the agent-name charset (policy.ValidAgentName).
+      const agentName = String(c.agent || '').split(' (')[0];
+      if (/^[A-Za-z0-9.-]+$/.test(agentName)) {
+        document.getElementById('empty-proxy').textContent =
+          'nockguard proxy --upstream <command> --agent ' + agentName;
+      }
+    }
     if (demoMode) {
       document.getElementById('verification-status').textContent = 'DEMO — not verified';
       document.getElementById('verification-time').textContent = '—';
@@ -463,6 +476,7 @@
   const fSeverity = document.getElementById('f-severity');
   const fTimerange = document.getElementById('f-timerange');
   const fClear = document.getElementById('f-clear');
+  const noMatch = document.getElementById('nomatch');
   const fCount = document.getElementById('f-count');
   const fExport = document.getElementById('f-export');
   const fProof = document.getElementById('f-proof');
@@ -538,6 +552,7 @@
       if (!out) shown++;
     }
     fCount.textContent = active ? (shown + ' / ' + tot + ' shown') : '';
+    noMatch.hidden = shown > 0 || tot === 0;
     syncExport();
     renderPulse();
   }
