@@ -1,6 +1,6 @@
 # Road to 1.0
 
-Updated 2026-10-30. Current source version: `v0.11.1`.
+Updated 2026-11-04. Current source version: `v0.12.0`.
 
 ## Now
 

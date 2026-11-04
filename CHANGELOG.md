@@ -2,7 +2,7 @@
 
 All notable changes to NockGuard are documented here.
 
-## [Unreleased]
+## [0.12.0] - 2026-11-04
 
 ### Changed
 
@@ -15,6 +15,13 @@ All notable changes to NockGuard are documented here.
   warning naming the path, `/context` reports `trailExists: false`, and the
   empty view reads "No trail file at <path> yet" instead of looking like a
   healthy feed with no decisions.
+
+### Documentation
+
+- Add `examples/github-mcp-claude-code/`: a copyable Claude Code setup that
+  runs the GitHub MCP server under NockGuard and denies `create_repository`,
+  `fork_repository` and `delete_repository`, with a policy test and a signed
+  trail checked by `nockguard verify`.
 
 ## [0.11.1] - 2026-10-30
 
