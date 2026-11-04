@@ -309,6 +309,32 @@ func TestContextNamesSourcesAndDemoScope(t *testing.T) {
 	}
 }
 
+func TestContextReportsWhetherTrailExists(t *testing.T) {
+	b := newBroker()
+	b.auditPath = filepath.Join(t.TempDir(), "audit.jsonl")
+	trailExists := func() bool {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		b.handleContext(rec, httptest.NewRequest(http.MethodGet, "/context", nil))
+		var got struct {
+			TrailExists *bool `json:"trailExists"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got.TrailExists == nil {
+			t.Fatalf("context = %s, error %v; want a trailExists field", rec.Body.String(), err)
+		}
+		return *got.TrailExists
+	}
+	if trailExists() {
+		t.Fatal("trailExists = true before the trail file was created")
+	}
+	if err := os.WriteFile(b.auditPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !trailExists() {
+		t.Fatal("trailExists = false for an existing (empty) trail file")
+	}
+}
+
 // TestEmbeddedPageWiresSeverityFilter guards the embedded page against a
 // front-end regression the Go test suite would otherwise miss entirely: the
 // severity <select> must be present and the cosmetic CRIT/HIGH / THREATS ONLY

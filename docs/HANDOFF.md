@@ -5,6 +5,11 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## What changed
 
+- 2026-11-04: A missing Guard trail is no longer shown as an empty feed.
+  `trailMissing` in `cmd/nockguard-wall/main.go` drives a startup warning and
+  the `/context` `trailExists` field; the page swaps its empty-view heading.
+  The page reads `/context` once, so the text stays until the first row.
+
 - 2026-11-04: The Wall's empty view shows installed commands, names the
   watched Guard trail and fills in the `--agent` name, read from the
   `/context` agent label before " (". A filter that hides every row shows a

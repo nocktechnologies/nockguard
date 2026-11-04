@@ -11,6 +11,10 @@ All notable changes to NockGuard are documented here.
   source-checkout `go run`, names the watched trail, and fills in the
   `--agent` the Wall was started with. A filter that hides every row now shows
   "No rows match these filters" until a row matches or the filters clear.
+- When its Guard trail file does not exist yet, the Live Wall prints a startup
+  warning naming the path, `/context` reports `trailExists: false`, and the
+  empty view reads "No trail file at <path> yet" instead of looking like a
+  healthy feed with no decisions.
 
 ## [0.11.1] - 2026-10-30
 
