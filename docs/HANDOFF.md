@@ -15,7 +15,9 @@ and what is still open, and remove anything no longer true. Keep it short.
   watched Guard trail and fills in the `--agent` name, read from the
   `/context` agent label before " (". Without `--agent` the Wall watches the
   shared trail, so the view pairs the proxy command with
-  `nockguard wall --agent <name>` (`#empty-wall`). A filter that hides every
+  `nockguard wall --agent <name>` (`#empty-wall`). Open: that pairing holds
+  for zero-config `proxy`; with `--policy` and no per-agent key the proxy
+  writes the policy-wide trail (`AuditorForAgent` in `internal/policy/`). A filter that hides every
   row shows a no-match line, toggled in `applyFilters`. `render` removes
   `#empty` on the first row, which can beat `/context`; the `/context`
   handler skips the empty-state block once `empty` is null.

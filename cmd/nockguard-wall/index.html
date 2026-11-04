@@ -395,7 +395,7 @@
       if (/^[A-Za-z0-9.-]+$/.test(agentName)) {
         document.getElementById('empty-proxy').textContent =
           'nockguard proxy --upstream <command> --agent ' + agentName;
-        // This wall already watches that agent's trail.
+        // An --agent wall already names the trail it watches.
         document.getElementById('empty-wall').hidden = true;
       }
     }

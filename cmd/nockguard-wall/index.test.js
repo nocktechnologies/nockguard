@@ -3,7 +3,9 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const { test } = require('node:test');
 
-const EMPTY_CHILDREN = ['empty-head', 'empty-trail', 'empty-trail-path', 'empty-proxy', 'empty-wall'];
+const PAGE = fs.readFileSync(new URL('./index.html', `file://${__filename}`), 'utf8');
+const EMPTY_CHILDREN = [...PAGE.match(/<div class="empty" id="empty">[\s\S]*?<\/div>/)[0]
+  .matchAll(/id="(empty-[^"]+)"/g)].map(m => m[1]);
 
 function wall(contextPayload, mediaQuery, globals = {}) {
   const elements = new Map();
