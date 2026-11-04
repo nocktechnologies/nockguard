@@ -5,6 +5,13 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## What changed
 
+- 2026-11-04: The Wall's empty view shows installed commands, names the
+  watched Guard trail and fills in the `--agent` name, read from the
+  `/context` agent label before " (". A filter that hides every row shows a
+  no-match line, toggled in `applyFilters`. Open: a Wall started without
+  `--agent` watches the shared trail, while the suggested `proxy --agent`
+  command writes that agent's own trail.
+
 - 2026-10-28: The Wall text filter (browser `rowMatches`, server `matches`)
   also matches the decision reason. The PROOF export keeps its own
   agent-and-tool text filter in `internal/audit/export.go`, which the offline

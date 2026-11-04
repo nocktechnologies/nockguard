@@ -118,6 +118,10 @@ test('first-run empty state shows installed commands and the watched trail', asy
   assert.equal(w.elements.get('empty-trail').hidden, false);
   assert.equal(w.elements.get('empty-trail-path').textContent, '/x/coder.audit.jsonl');
   assert.equal(w.elements.get('empty-proxy').textContent, 'nockguard proxy --upstream <command> --agent coder');
+  // --agent with an explicit --audit trail gets a different label; the name still fills in.
+  const k = wall({ demo: false, agent: 'coder (key selection; explicit trail may contain other agents)', guardTrail: '/p/x.jsonl' });
+  await tick();
+  assert.equal(k.elements.get('empty-proxy').textContent, 'nockguard proxy --upstream <command> --agent coder');
   // Without --agent the server sends a description, not a name: keep the placeholder.
   const u = wall({ demo: false, agent: 'from selected trail (unfiltered)', guardTrail: '/x/audit.jsonl' });
   await tick();

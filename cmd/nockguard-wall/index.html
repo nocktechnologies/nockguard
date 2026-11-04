@@ -166,7 +166,7 @@
   @keyframes flashred { 0%{box-shadow:0 0 0 0 rgba(255,77,77,.55)} 100%{box-shadow:0 0 22px 2px rgba(255,77,77,0)} }
   .empty { color:var(--dim); text-align:center; margin:auto; }
   .empty code { color:var(--accent); }
-  .nomatch { padding:14px; }
+  .nomatch { margin:0; padding:14px; }
 
   /* tamper banner (leg 3): the loud global signal when the signed audit chain
      fails verification. Live events keep streaming underneath (optimistic) — this
@@ -382,10 +382,12 @@
     if (contextLive) {
       document.getElementById('empty-trail-path').textContent = c.guardTrail;
       document.getElementById('empty-trail').hidden = false;
-      const sel = ' (configured trail selection)';
-      if (typeof c.agent === 'string' && c.agent.endsWith(sel)) {
+      // /context labels an --agent wall "<name> (...)"; without --agent it sends
+      // a description, which fails the agent-name charset (policy.ValidAgentName).
+      const agentName = String(c.agent || '').split(' (')[0];
+      if (/^[A-Za-z0-9.-]+$/.test(agentName)) {
         document.getElementById('empty-proxy').textContent =
-          'nockguard proxy --upstream <command> --agent ' + c.agent.slice(0, -sel.length);
+          'nockguard proxy --upstream <command> --agent ' + agentName;
       }
     }
     if (demoMode) {
