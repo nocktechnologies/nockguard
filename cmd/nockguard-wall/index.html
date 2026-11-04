@@ -381,12 +381,11 @@
     document.getElementById('demo-banner').hidden = !demoMode;
     if (contextLive) {
       document.getElementById('empty-trail-path').textContent = c.guardTrail;
-      document.getElementById('empty-trail').hidden = false;
       // A missing trail is not an empty one: say nothing has been recorded.
+      document.getElementById('empty-trail').hidden = c.trailExists === false;
       if (c.trailExists === false) {
         document.getElementById('empty-head').textContent =
           'No trail file at ' + c.guardTrail + ' yet: nothing has been recorded, so this view cannot show whether anything was blocked.';
-        document.getElementById('empty-trail').hidden = true;
       }
       // /context labels an --agent wall "<name> (...)"; without --agent it sends
       // a description, which fails the agent-name charset (policy.ValidAgentName).

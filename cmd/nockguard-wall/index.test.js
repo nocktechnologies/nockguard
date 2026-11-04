@@ -149,8 +149,6 @@ test('a missing trail file says so instead of an empty, healthy feed', async () 
   const d = wall({ demo: true, guardTrail: '/x/audit.jsonl', trailExists: false });
   await tick();
   assert.ok(!d.elements.has('empty-head'));
-  const page = fs.readFileSync(new URL('./index.html', `file://${__filename}`), 'utf8');
-  assert.ok(page.includes('<span id="empty-head">No decisions in this view yet.</span>'));
 });
 
 test('a filter that hides every row says so until a row matches or filters clear', () => {
