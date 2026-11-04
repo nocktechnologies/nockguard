@@ -549,13 +549,21 @@ func (b *broker) handleContext(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(struct {
-		GuardTrail string `json:"guardTrail"`
-		LockDB     string `json:"lockDB"`
-		Agent      string `json:"agent"`
-		Demo       bool   `json:"demo"`
-		Proof      bool   `json:"proof"`
-		Window     int    `json:"window"`
-	}{b.auditPath, b.lockDB, agent, b.demo, len(b.proofSigner) != 0 && !b.demo, maxWindow})
+		GuardTrail  string `json:"guardTrail"`
+		LockDB      string `json:"lockDB"`
+		Agent       string `json:"agent"`
+		Demo        bool   `json:"demo"`
+		Proof       bool   `json:"proof"`
+		Window      int    `json:"window"`
+		TrailExists bool   `json:"trailExists"`
+	}{b.auditPath, b.lockDB, agent, b.demo, len(b.proofSigner) != 0 && !b.demo, maxWindow, !trailMissing(b.auditPath)})
+}
+
+// trailMissing reports whether the Guard trail file does not exist yet, so an
+// empty feed is not mistaken for a healthy machine with no decisions.
+func trailMissing(path string) bool {
+	_, err := os.Stat(path)
+	return os.IsNotExist(err)
 }
 
 // filterEvents returns the subset of the audit window that survives the wall's
@@ -1133,6 +1141,9 @@ func main() {
 	if *demoMode {
 		go demo(ctx, b)
 	} else {
+		if trailMissing(*auditPath) {
+			log.Printf("warning: audit trail %s does not exist yet; the wall shows no decisions until it does", *auditPath)
+		}
 		go tail(ctx, *auditPath, b)
 	}
 

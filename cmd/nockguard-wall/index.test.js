@@ -133,6 +133,24 @@ test('first-run empty state shows installed commands and the watched trail', asy
   for (const id of ['empty-trail', 'empty-trail-path', 'empty-proxy']) assert.ok(!d.elements.has(id), id);
 });
 
+test('a missing trail file says so instead of an empty, healthy feed', async () => {
+  const m = wall({ demo: false, agent: 'from selected trail (unfiltered)', guardTrail: '/x/audit.jsonl', trailExists: false });
+  await tick();
+  const head = m.elements.get('empty-head').textContent;
+  assert.ok(head.startsWith('No trail file at /x/audit.jsonl yet'), head);
+  assert.ok(!/no decisions|no violations/i.test(head), head);
+  assert.equal(m.elements.get('empty-trail').hidden, true);
+  // Negative control: an existing trail keeps the default text and the Watching line.
+  const e = wall({ demo: false, agent: 'from selected trail (unfiltered)', guardTrail: '/x/audit.jsonl', trailExists: true });
+  await tick();
+  assert.ok(!e.elements.has('empty-head'));
+  assert.equal(e.elements.get('empty-trail').hidden, false);
+  // Demo has no trail to miss.
+  const d = wall({ demo: true, guardTrail: '/x/audit.jsonl', trailExists: false });
+  await tick();
+  assert.ok(!d.elements.has('empty-head'));
+});
+
 test('a filter that hides every row says so until a row matches or filters clear', () => {
   const w = wall();
   const noMatch = w.elements.get('nomatch');
