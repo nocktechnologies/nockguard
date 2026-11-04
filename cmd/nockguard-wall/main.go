@@ -1142,7 +1142,7 @@ func main() {
 		go demo(ctx, b)
 	} else {
 		if trailMissing(*auditPath) {
-			log.Printf("warning: --audit %s does not exist yet (the wall will pick it up if it appears)", *auditPath)
+			log.Printf("warning: audit trail %s does not exist yet; the wall shows no decisions until it does", *auditPath)
 		}
 		go tail(ctx, *auditPath, b)
 	}
