@@ -125,6 +125,7 @@ test('first-run empty state shows installed commands and the watched trail', asy
   assert.equal(w.elements.get('empty-trail-path').textContent, '/x/coder.audit.jsonl');
   assert.equal(w.elements.get('empty-proxy').textContent, 'nockguard proxy --upstream <command> --agent coder');
   assert.ok(!w.elements.has('empty-wall')); // the wall hint is never hidden
+  assert.equal(w.elements.get('empty-wall-cmd').textContent, 'nockguard wall --agent coder');
   // --agent with an explicit --audit trail gets a different label; the name still fills in.
   const k = wall({ demo: false, agent: 'coder (key selection; explicit trail may contain other agents)', guardTrail: '/p/x.jsonl' });
   await tick();
