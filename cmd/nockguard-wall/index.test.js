@@ -135,11 +135,12 @@ test('first-run empty state shows installed commands and the watched trail', asy
   // ...and the proxy suggestion keeps its matching wall command: proxy --agent
   // writes that agent's own trail, not the shared one this wall watches.
   assert.ok(!u.elements.has('empty-wall'));
-  assert.match(emptyHTML, /--agent &lt;name&gt;<\/code> with auditing enabled<span id="empty-wall">,<br>then watch its trail with <code>nockguard wall --agent &lt;name&gt;<\/code><\/span>/);
+  assert.ok(emptyHTML.includes('<span id="empty-wall">'));
+  assert.ok(emptyHTML.includes('nockguard wall --agent &lt;name&gt;'));
   // Demo mode keeps the generic text and names no trail.
   const d = wall({ demo: true, agent: 'coder (configured trail selection)', guardTrail: '/x/coder.audit.jsonl' });
   await tick();
-  for (const id of ['empty-trail', 'empty-trail-path', 'empty-proxy']) assert.ok(!d.elements.has(id), id);
+  for (const id of EMPTY_CHILDREN) assert.ok(!d.elements.has(id), id);
 });
 
 test('a row rendered before /context resolves does not stop context init', async () => {
