@@ -346,7 +346,7 @@
   </div>
   <div id="sessions" hidden title="signed-proof verdict per session: both the NockLock and the NockGuard chain must verify"></div>
   <div class="empty nomatch" id="nomatch" role="status" hidden>No rows match these filters. Press ✕ CLEAR to show every row.</div>
-  <div id="feed"><div class="empty" id="empty"><span id="empty-head">No decisions in this view yet.</span><span id="empty-trail" hidden><br>Watching <code id="empty-trail-path"></code></span><br>Run <code>nockguard wall --demo</code> for sample traffic,<br>or run <code id="empty-proxy">nockguard proxy --upstream &lt;command&gt; --agent &lt;name&gt;</code> with auditing enabled<span id="empty-wall">,<br>then watch its trail with <code>nockguard wall --agent &lt;name&gt;</code></span>.</div></div>
+  <div id="feed"><div class="empty" id="empty"><span id="empty-head">No decisions in this view yet.</span><span id="empty-trail" hidden><br>Watching <code id="empty-trail-path"></code></span><br>Run <code>nockguard wall --demo</code> for sample traffic,<br>or run <code id="empty-proxy">nockguard proxy --upstream &lt;command&gt; --agent &lt;name&gt;</code> with auditing enabled<span id="empty-wall">,<br>then watch its trail with <code id="empty-wall-cmd">nockguard wall --agent &lt;name&gt;</code></span>.</div></div>
   <footer>
     <span id="conn">connecting…</span>
     <span>NockGuard — Align · Decide · Deploy</span>
@@ -395,6 +395,8 @@
       if (/^[A-Za-z0-9.-]+$/.test(agentName)) {
         document.getElementById('empty-proxy').textContent =
           'nockguard proxy --upstream <command> --agent ' + agentName;
+        document.getElementById('empty-wall-cmd').textContent =
+          'nockguard wall --agent ' + agentName;
       }
     }
     if (demoMode) {
