@@ -10,10 +10,10 @@ All notable changes to NockGuard are documented here.
   and `nockguard proxy --upstream <command> --agent <name>`) instead of a
   source-checkout `go run`, names the watched trail, and fills in the
   `--agent` the Wall was started with. The proxy command is always paired
-  with `nockguard wall --agent <name>`, because a
-  zero-config proxy writes the agent's own trail rather than the shared one. A filter that
-  hides every row now shows "No rows match these filters" until a row matches
-  or the filters clear.
+  with `nockguard wall --agent <name>`, because a zero-config proxy writes the
+  agent's own trail rather than the shared one. A filter that hides every row
+  now shows "No rows match these filters" until a row matches or the filters
+  clear.
 - When its Guard trail file does not exist yet, the Live Wall prints a startup
   warning naming the path, `/context` reports `trailExists: false`, and the
   empty view reads "No trail file at <path> yet" instead of looking like a
