@@ -124,7 +124,8 @@ test('first-run empty state shows installed commands and the watched trail', asy
   assert.equal(w.elements.get('empty-trail').hidden, false);
   assert.equal(w.elements.get('empty-trail-path').textContent, '/x/coder.audit.jsonl');
   assert.equal(w.elements.get('empty-proxy').textContent, 'nockguard proxy --upstream <command> --agent coder');
-  assert.equal(w.elements.get('empty-wall').hidden, true); // this wall already watches coder's trail
+  // The wall hint stays: with --agent and --audit this wall may not watch coder's own trail.
+  assert.ok(!w.elements.has('empty-wall')); // never hidden
   // --agent with an explicit --audit trail gets a different label; the name still fills in.
   const k = wall({ demo: false, agent: 'coder (key selection; explicit trail may contain other agents)', guardTrail: '/p/x.jsonl' });
   await tick();
@@ -137,6 +138,7 @@ test('first-run empty state shows installed commands and the watched trail', asy
   // ...and the proxy suggestion keeps its matching wall command: proxy --agent
   // writes that agent's own trail, not the shared one this wall watches.
   assert.ok(!u.elements.has('empty-wall'));
+  assert.ok(!k.elements.has('empty-wall'));
   assert.ok(emptyHTML.includes('<span id="empty-wall">'));
   assert.ok(emptyHTML.includes('nockguard wall --agent &lt;name&gt;'));
   // Demo mode keeps the generic text and names no trail.

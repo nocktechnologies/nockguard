@@ -9,8 +9,8 @@ All notable changes to NockGuard are documented here.
 - The Live Wall's empty view shows installed commands (`nockguard wall --demo`
   and `nockguard proxy --upstream <command> --agent <name>`) instead of a
   source-checkout `go run`, names the watched trail, and fills in the
-  `--agent` the Wall was started with. A Wall started without `--agent` pairs
-  the proxy command with `nockguard wall --agent <name>`, because a
+  `--agent` the Wall was started with. The proxy command is always paired
+  with `nockguard wall --agent <name>`, because a
   zero-config proxy writes the agent's own trail rather than the shared one. A filter that
   hides every row now shows "No rows match these filters" until a row matches
   or the filters clear.
