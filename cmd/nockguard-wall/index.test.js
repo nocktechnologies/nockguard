@@ -3,6 +3,10 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const { test } = require('node:test');
 
+const PAGE = fs.readFileSync(new URL('./index.html', `file://${__filename}`), 'utf8');
+const EMPTY_CHILDREN = [...PAGE.match(/<div class="empty" id="empty">[\s\S]*?<\/div>/)[0]
+  .matchAll(/id="(empty-[^"]+)"/g)].map(m => m[1]);
+
 function wall(contextPayload, mediaQuery, globals = {}) {
   const elements = new Map();
   function element() {
@@ -29,6 +33,8 @@ function wall(contextPayload, mediaQuery, globals = {}) {
   const document = {
     body: { dataset: {} }, visibilityState: globals.visibilityState,
     getElementById(id) {
+      // Like the DOM, #empty's children are gone once render() removes it.
+      if (EMPTY_CHILDREN.includes(id) && !feed.children.includes(empty)) return null;
       if (!elements.has(id)) {
         const el = element();
         el.classList.owner = el;
@@ -118,6 +124,7 @@ test('first-run empty state shows installed commands and the watched trail', asy
   assert.equal(w.elements.get('empty-trail').hidden, false);
   assert.equal(w.elements.get('empty-trail-path').textContent, '/x/coder.audit.jsonl');
   assert.equal(w.elements.get('empty-proxy').textContent, 'nockguard proxy --upstream <command> --agent coder');
+  assert.equal(w.elements.get('empty-wall').hidden, true); // this wall already watches coder's trail
   // --agent with an explicit --audit trail gets a different label; the name still fills in.
   const k = wall({ demo: false, agent: 'coder (key selection; explicit trail may contain other agents)', guardTrail: '/p/x.jsonl' });
   await tick();
@@ -127,10 +134,32 @@ test('first-run empty state shows installed commands and the watched trail', asy
   await tick();
   assert.equal(u.elements.get('empty-trail-path').textContent, '/x/audit.jsonl');
   assert.ok(!u.elements.has('empty-proxy')); // never rewritten
+  // ...and the proxy suggestion keeps its matching wall command: proxy --agent
+  // writes that agent's own trail, not the shared one this wall watches.
+  assert.ok(!u.elements.has('empty-wall'));
+  assert.ok(emptyHTML.includes('<span id="empty-wall">'));
+  assert.ok(emptyHTML.includes('nockguard wall --agent &lt;name&gt;'));
   // Demo mode keeps the generic text and names no trail.
   const d = wall({ demo: true, agent: 'coder (configured trail selection)', guardTrail: '/x/coder.audit.jsonl' });
   await tick();
-  for (const id of ['empty-trail', 'empty-trail-path', 'empty-proxy']) assert.ok(!d.elements.has(id), id);
+  for (const id of EMPTY_CHILDREN) assert.ok(!d.elements.has(id), id);
+});
+
+test('a row rendered before /context resolves does not stop context init', async () => {
+  let resolveContext;
+  const w = wall(undefined, undefined, {
+    fetch: url => new Promise(resolve => { if (url === '/context') resolveContext = resolve; }),
+  });
+  vm.runInContext("render({decision:'allow', bucket:'approved', agent:'coder'})", w.context);
+  assert.equal(w.context.document.getElementById('empty-trail-path'), null);
+  resolveContext({ json: () => Promise.resolve({
+    demo: false, agent: 'coder (configured trail selection)', guardTrail: '/x/coder.audit.jsonl', proof: false,
+  }) });
+  await tick();
+  assert.equal(w.elements.get('source-guard').textContent, '/x/coder.audit.jsonl');
+  // Written after the empty-state block: a throw there would skip it and land in .catch.
+  assert.match(w.elements.get('export-scope').textContent, /PROOF is unavailable/);
+  assert.notEqual(w.elements.get('verification-status')?.textContent, 'context unavailable');
 });
 
 test('a missing trail file says so instead of an empty, healthy feed', async () => {
