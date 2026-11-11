@@ -27,6 +27,11 @@ decision reason. The pulse tiles, `/pulse?q=` and the CSV and JSON exports
 apply the same match. Source: `rowMatches` in `cmd/nockguard-wall/index.html`
 and `matches` in `cmd/nockguard-wall/main.go`.
 
+The evidence section shows how long it has been since the latest decision and
+its local time. It refreshes every 30 seconds and includes decisions hidden by
+the current filters. Before any decision it reads "none yet"; demo data reads
+"synthetic (demo)".
+
 Session badges are local snapshots with refresh, row-count, key and external
 anchor limits. `UNVERIFIABLE` is never a green verdict. A missing key or
 large/unreadable Lock log cannot prove protection. For a combined offline

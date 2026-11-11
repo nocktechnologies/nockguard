@@ -2,6 +2,14 @@
 
 All notable changes to NockGuard are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- The Live Wall shows the age and local time of the latest decision in its
+  evidence section, updating every 30 seconds even when no new rows arrive.
+  Demo data is labeled synthetic.
+
 ## [0.12.0] - 2026-11-04
 
 ### Changed

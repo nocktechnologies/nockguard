@@ -183,6 +183,59 @@ test('a missing trail file says so instead of an empty, healthy feed', async () 
   assert.ok(!d.elements.has('empty-head'));
 });
 
+test('last decision starts empty, tracks hidden rows, and ages on the 30-second timer', async () => {
+  let now = Date.parse('2026-11-11T17:02:11Z');
+  const timers = [];
+  const w = wall({ demo: false }, undefined, {
+    Date: class extends Date { static now() { return now; } },
+    setInterval(fn, ms) { timers.push({ fn, ms }); },
+  });
+  await tick();
+  const last = w.elements.get('last-decision');
+  assert.match(PAGE, /Last decision:<\/span> <span class="value" id="last-decision">none yet<\/span>/);
+  assert.equal(last.textContent, 'none yet');
+  w.decisions.value = 'block';
+  vm.runInContext('applyFilters()', w.context);
+  vm.runInContext("render({ts:'2026-11-11T14:02:11Z', decision:'allow', bucket:'approved'})", w.context);
+  const localTime = new Date('2026-11-11T14:02:11Z').toLocaleTimeString([], { hour12: false });
+  assert.equal(last.textContent, `3h ago (${localTime})`); // an unmatched row still counts
+  assert.equal(w.elements.get('nomatch').hidden, false);
+  const refresh = timers.find(t => t.ms === 30000 && t.fn.name === 'renderLastDecision');
+  assert.ok(refresh);
+  now += 30 * 60 * 1000;
+  refresh.fn();
+  assert.match(last.textContent, /^3h ago \(/);
+  now += 30 * 60 * 1000;
+  refresh.fn();
+  assert.match(last.textContent, /^4h ago \(/);
+});
+
+test('newest valid timestamp wins even when rows arrive out of order', async () => {
+  const now = Date.parse('2026-11-11T17:02:11Z');
+  const w = wall({ demo: false }, undefined, { Date: class extends Date { static now() { return now; } } });
+  await tick();
+  const last = w.elements.get('last-decision');
+  vm.runInContext("render({ts:'2026-11-11T14:02:11Z'})", w.context);
+  assert.match(last.textContent, /^3h ago \(/);
+  vm.runInContext("render({ts:'2026-11-11T17:01:41Z'})", w.context);
+  assert.match(last.textContent, /^just now \(/);
+  const newest = last.textContent;
+  vm.runInContext("render({ts:'2026-11-11T15:02:11Z'})", w.context);
+  assert.equal(last.textContent, newest);
+});
+
+test('demo context labels synthetic decisions and invalid timestamps leave none yet', async () => {
+  const bad = wall({ demo: false });
+  await tick();
+  vm.runInContext("render({ts:'not a timestamp'})", bad.context);
+  assert.equal(bad.elements.get('last-decision').textContent, 'none yet');
+  const demo = wall({ demo: true });
+  await tick();
+  assert.equal(demo.elements.get('last-decision').textContent, 'synthetic (demo)');
+  vm.runInContext("render({ts:'2026-11-11T14:02:11Z'})", demo.context);
+  assert.equal(demo.elements.get('last-decision').textContent, 'synthetic (demo)');
+});
+
 test('a filter that hides every row says so until a row matches or filters clear', () => {
   const w = wall();
   const noMatch = w.elements.get('nomatch');

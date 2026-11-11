@@ -5,6 +5,10 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## What changed
 
+- 2026-11-11: The Live Wall evidence section now shows the latest decision's
+  age and local time. The age refreshes every 30 seconds, includes filtered
+  rows, and labels demo data as synthetic. Invalid timestamps are ignored.
+
 - 2026-11-04: A missing Guard trail is no longer shown as an empty feed.
   `trailMissing` in `cmd/nockguard-wall/main.go` drives a startup warning and
   the `/context` `trailExists` field; the page swaps its empty-view heading.
