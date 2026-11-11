@@ -5,6 +5,11 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## What changed
 
+- 2026-11-11: The Live Wall evidence section now shows the latest decision's
+  age and local time. The age refreshes every 30 seconds, includes filtered
+  rows, and labels demo data as synthetic. Invalid and future timestamps are
+  ignored, so clock-skewed rows cannot keep the age at "just now".
+
 - 2026-11-11: `go.mod` now requires Go 1.27.4 for GO-2026-6859 in
   `net/http`. CI and release builds derive their Go version from `go.mod`;
   the reported `MaxBytesReader` trigger is not called by project source.

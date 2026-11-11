@@ -261,6 +261,7 @@
       <div><span class="label">Lock DB:</span> <span class="value" id="source-lock">loading…</span></div>
       <div><span class="label">Agent:</span> <span class="value" id="context-agent">loading…</span> · <span class="label">Session:</span> <span class="value" id="context-session">none observed</span></div>
       <div><span class="label">Verification:</span> <span class="value" id="verification-status">checking…</span> · <span class="label">last check:</span> <span class="value" id="verification-time">—</span></div>
+      <div><span class="label">Last decision:</span> <span class="value" id="last-decision">none yet</span></div>
       <details class="scope" id="evidence-details"><summary>Evidence details</summary>
       <div class="scope" id="export-scope">PROOF: signed Guard rows only when enabled; never Lock rows. CSV/JSON: Guard rows plus available Lock snapshot; Lock rows are marked verified only for protected sessions.</div>
       <div class="scope">Counts and pulse cover the same filtered view of the newest <span id="window-size">500</span> decisions. A blank source or unverified trail is not a zero-violation finding.</div>
@@ -358,6 +359,7 @@
   let empty = document.getElementById('empty');
   let MAX_ROWS = 500;
   let demoMode = false;
+  let lastDecisionMs = NaN;
   let contextLive = false; // true only once /context loaded and said demo:false
   let recentSession = '';
   // open on wide screens, collapsed on narrow; follows resizes across the breakpoint
@@ -410,6 +412,7 @@
     } else if (!c.proof) {
       document.getElementById('export-scope').textContent += ' PROOF is unavailable until a signing key is configured.';
     }
+    renderLastDecision();
   }).catch(() => {
     document.getElementById('verification-status').textContent = 'context unavailable';
     setNotify(false, false); // shows the real state (off) but keeps the saved choice
@@ -665,12 +668,30 @@
     const d = new Date(ts);
     return isNaN(d) ? (ts || '') : d.toLocaleTimeString([], {hour12:false});
   }
+  function decisionAge(ms) {
+    const seconds = Math.floor(Math.max(0, Date.now() - ms) / 1000);
+    if (seconds < 60) return 'just now';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+    return Math.floor(seconds / 86400) + 'd ago';
+  }
+  function renderLastDecision() {
+    document.getElementById('last-decision').textContent = demoMode ? 'synthetic (demo)'
+      : Number.isFinite(lastDecisionMs) ? decisionAge(lastDecisionMs) + ' (' + hhmmss(lastDecisionMs) + ')'
+      : 'none yet';
+  }
+  setInterval(renderLastDecision, 30000);
   function esc(s){ const d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }
 
   // Severity is DERIVED server-side (forward.Severity) and arrives on the event;
   // the wall trusts that tag rather than re-classifying reasons in the browser.
   const SEV = { critical:1, high:1, low:1, none:1 };
   function render(ev) {
+    const ts = Date.parse(ev.ts);
+    if (Number.isFinite(ts) && ts <= Date.now() && (!Number.isFinite(lastDecisionMs) || ts > lastDecisionMs)) {
+      lastDecisionMs = ts;
+      renderLastDecision();
+    }
     if (empty) { empty.remove(); empty = null; }
     if (ev.session_id) {
       recentSession = ev.session_id;

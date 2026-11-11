@@ -4,6 +4,12 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- The Live Wall shows the age and local time of the latest decision in its
+  evidence section, updating every 30 seconds even when no new rows arrive.
+  Future-dated rows do not reset that age. Demo data is labeled synthetic.
+
 ### Security
 
 - Require Go 1.27.4 for GO-2026-6859 / CVE-2026-97054 in `net/http`.
