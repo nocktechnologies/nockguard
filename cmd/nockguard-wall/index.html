@@ -688,8 +688,9 @@
   const SEV = { critical:1, high:1, low:1, none:1 };
   function render(ev) {
     const ts = Date.parse(ev.ts);
-    if (Number.isFinite(ts) && ts <= Date.now() && (!Number.isFinite(lastDecisionMs) || ts > lastDecisionMs)) {
-      lastDecisionMs = ts;
+    const t = Math.min(ts, Date.now());
+    if (Number.isFinite(ts) && (!Number.isFinite(lastDecisionMs) || t > lastDecisionMs)) {
+      lastDecisionMs = t;
       renderLastDecision();
     }
     if (empty) { empty.remove(); empty = null; }
