@@ -2,6 +2,14 @@
 
 All notable changes to NockGuard are documented here.
 
+## [Unreleased]
+
+### Security
+
+- Require Go 1.27.4 for GO-2026-6859 / CVE-2026-97054 in `net/http`.
+  NockGuard does not call the `MaxBytesReader` trigger; this is a toolchain
+  bump to clear the standard-library vulnerability check.
+
 ## [0.12.0] - 2026-11-04
 
 ### Changed

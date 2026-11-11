@@ -5,6 +5,10 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## What changed
 
+- 2026-11-11: `go.mod` now requires Go 1.27.4 for GO-2026-6859 in
+  `net/http`. CI and release builds derive their Go version from `go.mod`;
+  the reported `MaxBytesReader` trigger is not called by project source.
+
 - 2026-11-04: A missing Guard trail is no longer shown as an empty feed.
   `trailMissing` in `cmd/nockguard-wall/main.go` drives a startup warning and
   the `/context` `trailExists` field; the page swaps its empty-view heading.
