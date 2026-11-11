@@ -2,6 +2,26 @@
 
 All notable changes to NockGuard are documented here.
 
+## [Unreleased]
+
+## [0.12.1] - 2026-11-11
+
+v0.12.1 raises the required Go toolchain to 1.27.4 for a standard-library
+security fix and shows the latest decision's age in the Live Wall.
+
+### Changed
+
+- The Live Wall shows the age and local time of the latest decision in its
+  evidence section, updating every 30 seconds even when no new rows arrive.
+  Rows stamped ahead of the browser clock count as now, so clock skew neither
+  hides a decision nor holds the age at just now. Demo data is labeled synthetic.
+
+### Security
+
+- Require Go 1.27.4 for GO-2026-6859 / CVE-2026-97054 in `net/http`.
+  NockGuard does not call the `MaxBytesReader` trigger; this is a toolchain
+  bump to clear the standard-library vulnerability check.
+
 ## [0.12.0] - 2026-11-04
 
 ### Changed
