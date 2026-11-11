@@ -215,6 +215,8 @@ test('newest valid timestamp wins even when rows arrive out of order', async () 
   const w = wall({ demo: false }, undefined, { Date: class extends Date { static now() { return now; } } });
   await tick();
   const last = w.elements.get('last-decision');
+  vm.runInContext("render({ts:'2026-11-11T18:02:11Z'})", w.context);
+  assert.equal(last.textContent, 'none yet');
   vm.runInContext("render({ts:'2026-11-11T14:02:11Z'})", w.context);
   assert.match(last.textContent, /^3h ago \(/);
   vm.runInContext("render({ts:'2026-11-11T17:01:41Z'})", w.context);
@@ -222,6 +224,8 @@ test('newest valid timestamp wins even when rows arrive out of order', async () 
   const newest = last.textContent;
   vm.runInContext("render({ts:'2026-11-11T15:02:11Z'})", w.context);
   assert.equal(last.textContent, newest);
+  vm.runInContext("render({ts:'2026-11-11T18:02:11Z'})", w.context);
+  assert.equal(last.textContent, newest); // a future row cannot pin the age at just now
 });
 
 test('demo context labels synthetic decisions and invalid timestamps leave none yet', async () => {
