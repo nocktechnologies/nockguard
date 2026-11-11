@@ -211,12 +211,14 @@ test('last decision starts empty, tracks hidden rows, and ages on the 30-second 
 });
 
 test('newest valid timestamp wins even when rows arrive out of order', async () => {
-  const now = Date.parse('2026-11-11T17:02:11Z');
-  const w = wall({ demo: false }, undefined, { Date: class extends Date { static now() { return now; } } });
+  let now = Date.parse('2026-11-11T17:02:11Z');
+  const timers = [];
+  const w = wall({ demo: false }, undefined, {
+    Date: class extends Date { static now() { return now; } },
+    setInterval(fn, ms) { timers.push({ fn, ms }); },
+  });
   await tick();
   const last = w.elements.get('last-decision');
-  vm.runInContext("render({ts:'2026-11-11T18:02:11Z'})", w.context);
-  assert.equal(last.textContent, 'none yet');
   vm.runInContext("render({ts:'2026-11-11T14:02:11Z'})", w.context);
   assert.match(last.textContent, /^3h ago \(/);
   vm.runInContext("render({ts:'2026-11-11T17:01:41Z'})", w.context);
@@ -225,7 +227,22 @@ test('newest valid timestamp wins even when rows arrive out of order', async () 
   vm.runInContext("render({ts:'2026-11-11T15:02:11Z'})", w.context);
   assert.equal(last.textContent, newest);
   vm.runInContext("render({ts:'2026-11-11T18:02:11Z'})", w.context);
-  assert.equal(last.textContent, newest); // a future row cannot pin the age at just now
+  const localNow = new Date(now).toLocaleTimeString([], { hour12: false });
+  assert.equal(last.textContent, `just now (${localNow})`);
+  now += 61 * 1000;
+  timers.find(t => t.ms === 30000 && t.fn.name === 'renderLastDecision').fn();
+  assert.equal(last.textContent, `1m ago (${localNow})`); // a future row cannot pin the age at just now
+});
+
+test('a decision two seconds ahead of the browser clock counts immediately', async () => {
+  const now = Date.parse('2026-11-11T17:02:11Z');
+  const w = wall({ demo: false }, undefined, { Date: class extends Date { static now() { return now; } } });
+  await tick();
+  const last = w.elements.get('last-decision');
+  assert.equal(last.textContent, 'none yet');
+  vm.runInContext("render({ts:'2026-11-11T17:02:13Z'})", w.context);
+  const localNow = new Date(now).toLocaleTimeString([], { hour12: false });
+  assert.equal(last.textContent, `just now (${localNow})`);
 });
 
 test('demo context labels synthetic decisions and invalid timestamps leave none yet', async () => {

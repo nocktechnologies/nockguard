@@ -13,7 +13,8 @@ security fix and shows the latest decision's age in the Live Wall.
 
 - The Live Wall shows the age and local time of the latest decision in its
   evidence section, updating every 30 seconds even when no new rows arrive.
-  Future-dated rows do not reset that age. Demo data is labeled synthetic.
+  Rows stamped ahead of the browser clock count as now, so clock skew neither
+  hides a decision nor holds the age at just now. Demo data is labeled synthetic.
 
 ### Security
 
