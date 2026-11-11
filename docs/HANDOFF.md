@@ -5,6 +5,10 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## What changed
 
+- 2026-11-11: Release metadata now names v0.12.1. The changelog groups the
+  Go 1.27.4 security toolchain update and Live Wall decision age in this
+  release; the CLI version and roadmap agree.
+
 - 2026-11-11: The Live Wall evidence section now shows the latest decision's
   age and local time. The age refreshes every 30 seconds, includes filtered
   rows, and labels demo data as synthetic. Invalid and future timestamps are
@@ -41,7 +45,6 @@ and what is still open, and remove anything no longer true. Keep it short.
   name unapproved MCP tool calls, distinguish enforcement from observe/shadow
   checks and retain the separate egress-proxy scope.
 
-- Release metadata was updated for v0.12.0.
 - `AGENTS.md` indexes project documentation and CI checks its linked paths.
 
 - 2026-10-17: `ci.yml` skips the suite on docs-only PRs
@@ -68,9 +71,7 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## Still open
 
-- v0.12.0 release: `next` stays frozen from the release-prep merge until
-  the post-release back-sync of `main`. Only maintainer-approved release-fix
-  PRs merge during the freeze.
+- v0.12.1 release packaging and publication are pending.
 - PROOF text filter: a query found only in a reason shows rows on the Wall
   and in CSV/JSON but not in PROOF. Matching the reason there needs a new
   export schema version so older verifiers fail closed on it.

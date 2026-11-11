@@ -4,6 +4,11 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-11
+
+v0.12.1 raises the required Go toolchain to 1.27.4 for a standard-library
+security fix and shows the latest decision's age in the Live Wall.
+
 ### Changed
 
 - The Live Wall shows the age and local time of the latest decision in its
