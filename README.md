@@ -70,6 +70,8 @@ Examples you can copy:
   the GitHub MCP server for Claude Code so the agent cannot create, fork or
   delete a repository through it, with a signed trail you check with
   `nockguard verify`.
+- [`examples/github-mcp-codex/`](examples/github-mcp-codex/): the same GitHub
+  MCP wrap and policy for Codex CLI, as a `config.toml` entry.
 - [`examples/exfil-demo/`](examples/exfil-demo/): a poisoned MCP server tries
   to steal a key, and the starter policy blocks it.
 
