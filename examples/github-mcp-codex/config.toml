@@ -1,0 +1,8 @@
+# Add this to ~/.codex/config.toml, or to .codex/config.toml in a trusted
+# project. Replace the four <...> placeholders; see README.md.
+[mcp_servers.github]
+command = "<NOCKGUARD_PATH>"
+args = ["proxy", "--upstream", "<DOCKER_PATH> run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server:v2.0.3", "--agent", "codex", "--policy", "<POLICY_PATH>"]
+env = { PATH = "<SHELL_PATH>" }
+# Forwards the token from the environment Codex runs in, so it never sits in this file.
+env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]

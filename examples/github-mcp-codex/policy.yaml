@@ -1,0 +1,19 @@
+# Policy for the GitHub MCP server under Codex CLI.
+#
+# Copy it next to your project or to ~/.nockguard/, and point --policy in
+# config.toml at it. Allows every GitHub tool except the three below.
+audit:
+  # Writes ~/.nockguard/logs/codex.audit.jsonl, signed with the key from
+  # `nockguard keygen --agent codex`.
+  enabled: true
+
+agents:
+  codex:
+    mode: allow
+    deny:
+      # Policy matches tool names, not the `private` argument, so all repo
+      # creation is denied. See README.md.
+      - "create_repository"
+      # A fork of a public repo is public.
+      - "fork_repository"
+      - "delete_repository"
