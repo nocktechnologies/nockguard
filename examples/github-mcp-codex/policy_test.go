@@ -52,7 +52,7 @@ func TestConfigWrapsGitHubServer(t *testing.T) {
 		`command = "<NOCKGUARD_PATH>"`,
 		`"proxy", "--upstream"`,
 		"ghcr.io/github/github-mcp-server:v2.0.3",
-		`"--agent", "codex"`,
+		`"--agent", "codex",`,
 		`"--policy"`,
 		`env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]`,
 	} {

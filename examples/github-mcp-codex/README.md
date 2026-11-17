@@ -62,9 +62,19 @@ in the shell you start Codex from.
    with the `PATH` value, and `<POLICY_PATH>` with the absolute path of your
    policy copy. `env_vars` tells Codex to forward
    `GITHUB_PERSONAL_ACCESS_TOKEN` from its own environment to the server, so
-   the token never sits in the file.
+   the token never sits in the file. Codex starts the server with a short
+   list of environment variables, so if your shell sets others the proxy or
+   Docker needs, such as `DOCKER_HOST` or the `NOCKGUARD_AUDIT_*` and
+   `NOCKGUARD_AGENT_CODEX_*` signing keys, add their names to `env_vars` too.
 
-5. Check that Codex reads the entry:
+5. Pull the server image once, so the first start fits inside Codex's
+   10-second MCP startup timeout:
+
+   ```bash
+   docker pull ghcr.io/github/github-mcp-server:v2.0.3
+   ```
+
+6. Check that Codex reads the entry:
 
    ```bash
    codex mcp get github
@@ -74,7 +84,7 @@ in the shell you start Codex from.
    `proxy --upstream ...` args, and `GITHUB_PERSONAL_ACCESS_TOKEN` in `env`
    (masked).
 
-6. Check the deny before you start Codex. This sends one `create_repository`
+7. Check the deny before you start Codex. This sends one `create_repository`
    call through the same policy, with `cat` standing in for the GitHub server,
    so nothing reaches GitHub even if the policy were wrong:
 
@@ -86,7 +96,7 @@ in the shell you start Codex from.
    The reply is a JSON-RPC error, `tool "create_repository" denied by policy`,
    and the trail gets a row with `"tool":"create_repository","decision":"deny"`.
 
-7. Start `codex` and run `/mcp`: the `github` server should be listed with its
+8. Start `codex` and run `/mcp`: the `github` server should be listed with its
    tools. Ask the agent to list your open pull requests. The three denied
    tools are not in its tool list.
 
@@ -94,7 +104,7 @@ in the shell you start Codex from.
 
 ```bash
 nockguard verify --agent codex   # exit 0 and PROTECTED for a non-empty, fully checkpointed trail
-grep '"tool":"create_repository"' ~/.nockguard/logs/codex.audit.jsonl   # the deny from step 6
+grep '"tool":"create_repository"' ~/.nockguard/logs/codex.audit.jsonl   # the deny from step 7
 nockguard wall --agent codex     # browse the decisions in the Live Wall
 ```
 
