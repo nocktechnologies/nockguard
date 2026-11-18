@@ -7,8 +7,9 @@ All notable changes to NockGuard are documented here.
 ### Changed
 
 - The Live Wall shows plain-language labels and hover explanations for known
-  decisions in rows and filters. Decision values in exports and audit trails
-  remain unchanged.
+  decisions in rows and filters. Method, policy and Guard stops have distinct
+  labels; approval labels describe the recorded outcome without attributing it
+  to a person. Decision values in exports and audit trails remain unchanged.
 
 ## [0.12.1] - 2026-11-11
 

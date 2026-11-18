@@ -10,6 +10,8 @@ and what is still open, and remove anything no longer true. Keep it short.
   decision values remain in filtering, exports, proofs and trail data;
   unfamiliar values display as recorded. The mapping lives in
   `cmd/nockguard-wall/index.html` and browser coverage in its adjacent test.
+  Method, policy and Guard stops use distinct labels; approval labels describe
+  the recorded outcome without claiming who approved it.
 
 - 2026-11-11: The Live Wall caps future decision timestamps at the browser's
   current time when updating "Last decision." Clock skew no longer hides a
