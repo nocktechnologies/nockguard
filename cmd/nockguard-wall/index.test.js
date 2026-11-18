@@ -339,7 +339,7 @@ test('approval-denied uses rejection styling and a fixed decision filter option'
   assert.equal(w.elements.get('p-blocked').textContent, 1);
   assert.equal(w.decisions.options.filter(o => o.value === 'approval-denied').length, 1);
   const page = fs.readFileSync(new URL('./index.html', `file://${__filename}`), 'utf8');
-  assert.equal(w.decisions.options.find(o => o.value === 'approval-denied').textContent, 'NOT APPROVED');
+  assert.equal(w.decisions.options.find(o => o.value === 'approval-denied').textContent, 'DENIED AT APPROVAL');
   assert.match(page, /\.approval-denied\s*\{[^}]*border-left-color:var\(--deny\)/);
   assert.match(page, /\.approval-denied \.badge\s*\{[^}]*color:var\(--deny\)/);
 });
@@ -354,8 +354,8 @@ test('known decisions show plain-language badges and hover titles; unknown value
   const w = wall();
   const labels = {
     allow: 'ALLOWED', 'method-allow': 'ALLOWED (METHOD)', 'method-deny': 'STOPPED (METHOD)',
-    deny: 'STOPPED', block: 'STOPPED BY GUARD', ratelimit: 'SLOWED DOWN', hide: 'HIDDEN FROM AGENT',
-    'approval-denied': 'NOT APPROVED', 'approval-granted': 'APPROVED',
+    deny: 'STOPPED (POLICY)', block: 'STOPPED (BLOCKED)', ratelimit: 'STOPPED (RATE LIMIT)', hide: 'HIDDEN FROM AGENT',
+    'approval-denied': 'DENIED AT APPROVAL', 'approval-granted': 'APPROVED',
     'would-deny': 'WOULD BE STOPPED (WATCH MODE)', dispatch: 'READY TO SEND',
     observe: 'WATCHED', 'state-write': 'APPROVAL STATE RECORDED',
     inject: 'CREDENTIAL ADDED', 'budget-ask': 'BUDGET THRESHOLD REACHED',
@@ -368,8 +368,8 @@ test('known decisions show plain-language badges and hover titles; unknown value
     assert.equal(badge[2], labels[decision], decision);
     assert.match(badge[1], /\.$/, decision);
     assert.equal(w.decisions.options.find(o => o.value === decision).textContent, labels[decision]);
-    if (decision === 'approval-granted') assert.equal(badge[1], 'Approval was granted for this tool call.');
-    if (decision === 'approval-denied') assert.equal(badge[1], 'The call was stopped because approval was denied or unavailable.');
+    if (decision === 'approval-granted') assert.equal(badge[1], 'Allowed after the approval step.');
+    if (decision === 'approval-denied') assert.equal(badge[1], 'Refused at the approval step.');
   }
   assert.equal(new Set(w.decisions.options.map(o => o.textContent)).size, w.decisions.options.length);
   vm.runInContext("render({decision:'future-review', bucket:'other'})", w.context);
@@ -379,7 +379,7 @@ test('known decisions show plain-language badges and hover titles; unknown value
 
 test('method, policy and Guard stops have distinct labels and filter by raw decision', () => {
   const w = wall();
-  const labels = { 'method-deny': 'STOPPED (METHOD)', deny: 'STOPPED', block: 'STOPPED BY GUARD' };
+  const labels = { 'method-deny': 'STOPPED (METHOD)', deny: 'STOPPED (POLICY)', block: 'STOPPED (BLOCKED)' };
   for (const decision of Object.keys(labels)) vm.runInContext(`render({decision:'${decision}'})`, w.context);
   for (const [decision, label] of Object.entries(labels)) {
     const option = w.decisions.options.find(o => o.value === decision);
@@ -390,6 +390,22 @@ test('method, policy and Guard stops have distinct labels and filter by raw deci
     assert.deepEqual(shown.map(r => r.dataset.decision), [decision]);
     assert.match(w.elements.get('f-export').href, new RegExp('decision=' + decision));
   }
+});
+
+test('Lock fence rows use fence hover text for allowed and blocked decisions', () => {
+  const w = wall();
+  for (const [decision, title] of [
+    ['allow', 'The fence allowed this.'],
+    ['block', 'The fence stopped this.'],
+  ]) {
+    vm.runInContext(`render({decision:'${decision}', source:'LOCK'})`, w.context);
+    assert.ok(w.elements.get('feed').children[0].innerHTML.includes(`title="${title}"`));
+    assert.doesNotMatch(w.elements.get('feed').children[0].innerHTML, /tool call/);
+  }
+  vm.runInContext("render({decision:'allow', source:'GUARD'})", w.context);
+  assert.match(w.elements.get('feed').children[0].innerHTML, /title="The tool call was allowed by policy\."/);
+  vm.runInContext("render({decision:'block', source:'GUARD'})", w.context);
+  assert.match(w.elements.get('feed').children[0].innerHTML, /title="Guard stopped the tool call before forwarding\."/);
 });
 
 test('a labeled decision filter still selects the raw decision value', () => {
