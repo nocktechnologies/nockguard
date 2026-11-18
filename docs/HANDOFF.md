@@ -13,7 +13,7 @@ and what is still open, and remove anything no longer true. Keep it short.
   Method, policy, Guard and rate-limit stops use distinct labels; approval
   labels name the recorded step without claiming who approved it. Lock fence
   rows reuse `allow` and `block`, so their hover text checks the row source.
-  The demo screenshot is attached to the PR, not tracked in the docs tree.
+  The demo screenshot was reviewed on the PR and is not tracked in the repo.
 
 - 2026-11-11: The Live Wall caps future decision timestamps at the browser's
   current time when updating "Last decision." Clock skew no longer hides a
