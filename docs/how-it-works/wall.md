@@ -27,6 +27,11 @@ decision reason. The pulse tiles, `/pulse?q=` and the CSV and JSON exports
 apply the same match. Source: `rowMatches` in `cmd/nockguard-wall/index.html`
 and `matches` in `cmd/nockguard-wall/main.go`.
 
+Decision badges and decision filter options show short plain-language labels.
+Hovering over a badge explains what its decision records. Filters, exports,
+proofs and the audit trail continue to use the raw decision values; unknown
+values appear as recorded.
+
 The evidence section shows how long it has been since the latest decision and
 its local time. It refreshes every 30 seconds and includes decisions hidden by
 the current filters. Before any decision it reads "none yet"; demo data reads

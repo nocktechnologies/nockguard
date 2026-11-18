@@ -483,6 +483,28 @@
   // --- filters: substring match on agent/tool/reason + exact decision + time range ---
   const fText = document.getElementById('f-text');
   const fDecision = document.getElementById('f-decision');
+  const decisionLabels = new Map([
+    ['allow', ['ALLOWED', 'The tool call was allowed by policy.']],
+    ['method-allow', ['ALLOWED (METHOD)', 'The MCP method was allowed to pass through.']],
+    ['method-deny', ['STOPPED', 'The MCP method was not forwarded.']],
+    ['deny', ['STOPPED', 'The tool call was denied by policy.']],
+    ['block', ['STOPPED', 'The tool call was blocked by a validation check.']],
+    ['ratelimit', ['SLOWED DOWN', 'The tool call was stopped by a rate limit.']],
+    ['hide', ['HIDDEN FROM AGENT', 'The tool was hidden from the agent during discovery.']],
+    ['approval-denied', ['DENIED BY YOU', 'A person denied this tool call.']],
+    ['approval-granted', ['APPROVED BY YOU', 'A person approved this tool call.']],
+    ['would-deny', ['WOULD BE STOPPED (WATCH MODE)', 'Watch mode recorded a denial without blocking the call.']],
+    ['dispatch', ['READY TO SEND', 'A forwarding decision was recorded before the call was sent to the server.']],
+    ['observe', ['WATCHED', 'The call was observed without enforcement.']],
+    ['state-write', ['APPROVAL STATE RECORDED', 'An older Guard version recorded a change to saved approval state.']],
+    ['inject', ['CREDENTIAL ADDED', 'A configured credential was inserted into the forwarded call.']],
+    ['budget-ask', ['BUDGET THRESHOLD REACHED', 'Recorded spend crossed a configured budget threshold.']],
+    ['downgrade', ['CHEAPER ROUTE CHOSEN', 'A lower cost upstream was selected after the budget cap was reached.']],
+  ]);
+  for (const option of fDecision.options) {
+    const label = decisionLabels.get(option.value);
+    if (label) option.textContent = label[0];
+  }
   const fixedDecisions = new Set([...fDecision.options].map(option => option.value));
   const fixedDecisionCount = fDecision.options.length;
   const fSeverity = document.getElementById('f-severity');
@@ -722,13 +744,15 @@
         : '';
     const sevChip = (sev === 'critical' || sev === 'high')
       ? '<span class="sev">' + sev + '</span>' : '';
+    const decisionLabel = decisionLabels.get(ev.decision);
     row.innerHTML =
       '<span class="ts">' + esc(hhmmss(ev.ts)) + '</span>' +
       '<span class="agent">' + (ev.source && document.body.dataset.lock === '1' ? '<span class="src ' + (ev.source === 'LOCK' ? 'lock' : 'guard') + '">' + esc(ev.source) + '</span>' : '') + esc(ev.agent || '—') + '</span>' +
       '<span class="tool">' + esc(ev.tool || '') +
         (ev.reason ? '<div class="reason">' + esc(ev.reason) + '</div>' : '') + '</span>' +
       '<span class="verdict">' + vChip + sevChip +
-        '<span class="badge">' + esc(ev.decision || '?') + '</span></span>';
+        '<span class="badge"' + (decisionLabel ? ' title="' + esc(decisionLabel[1]) + '"' : '') + '>' +
+          esc(decisionLabel ? decisionLabel[0] : ev.decision || '?') + '</span></span>';
     feed.prepend(row);
     while (feed.childElementCount > MAX_ROWS) feed.lastElementChild.remove();
     const selectedDecision = fDecision.value;

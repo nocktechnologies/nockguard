@@ -4,6 +4,12 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- The Live Wall shows plain-language labels and hover explanations for known
+  decisions in rows and filters. Decision values in exports and audit trails
+  remain unchanged.
+
 ## [0.12.1] - 2026-11-11
 
 v0.12.1 raises the required Go toolchain to 1.27.4 for a standard-library

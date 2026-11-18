@@ -60,8 +60,8 @@ function wall(contextPayload, mediaQuery, globals = {}) {
   empty.remove = empty.removeSelf;
   feed.children.push(empty);
   const decisions = document.getElementById('f-decision');
-  decisions.options = [...page.match(/<select id="f-decision"[\s\S]*?<\/select>/)[0].matchAll(/<option value="([^"]*)"/g)]
-    .map(m => ({ value: m[1] }));
+  decisions.options = [...page.match(/<select id="f-decision"[\s\S]*?<\/select>/)[0].matchAll(/<option value="([^"]*)">([^<]*)<\/option>/g)]
+    .map(m => ({ value: m[1], textContent: m[2] }));
   Object.defineProperty(decisions, 'value', {
     get() { return this.selectedValue ?? ''; },
     set(value) {
@@ -339,7 +339,7 @@ test('approval-denied uses rejection styling and a fixed decision filter option'
   assert.equal(w.elements.get('p-blocked').textContent, 1);
   assert.equal(w.decisions.options.filter(o => o.value === 'approval-denied').length, 1);
   const page = fs.readFileSync(new URL('./index.html', `file://${__filename}`), 'utf8');
-  assert.match(page, /<option value="approval-denied">approval-denied<\/option>/);
+  assert.equal(w.decisions.options.find(o => o.value === 'approval-denied').textContent, 'DENIED BY YOU');
   assert.match(page, /\.approval-denied\s*\{[^}]*border-left-color:var\(--deny\)/);
   assert.match(page, /\.approval-denied \.badge\s*\{[^}]*color:var\(--deny\)/);
 });
@@ -349,6 +349,44 @@ test('approval-denied uses rejection styling and a fixed decision filter option'
 const EMITTED = ['allow', 'method-allow', 'method-deny', 'deny', 'block', 'ratelimit', 'hide', 'approval-denied', 'approval-granted',
   'would-deny', 'dispatch', 'observe', 'state-write', 'inject', 'budget-ask', 'downgrade'];
 const FIXED = ['', ...EMITTED];
+
+test('known decisions show plain-language badges and hover titles; unknown values stay raw', () => {
+  const w = wall();
+  const labels = {
+    allow: 'ALLOWED', 'method-allow': 'ALLOWED (METHOD)', 'method-deny': 'STOPPED',
+    deny: 'STOPPED', block: 'STOPPED', ratelimit: 'SLOWED DOWN', hide: 'HIDDEN FROM AGENT',
+    'approval-denied': 'DENIED BY YOU', 'approval-granted': 'APPROVED BY YOU',
+    'would-deny': 'WOULD BE STOPPED (WATCH MODE)', dispatch: 'READY TO SEND',
+    observe: 'WATCHED', 'state-write': 'APPROVAL STATE RECORDED',
+    inject: 'CREDENTIAL ADDED', 'budget-ask': 'BUDGET THRESHOLD REACHED',
+    downgrade: 'CHEAPER ROUTE CHOSEN',
+  };
+  for (const decision of EMITTED) {
+    vm.runInContext(`render({decision:'${decision}', bucket:'approved'})`, w.context);
+    const badge = w.elements.get('feed').children[0].innerHTML.match(/<span class="badge" title="([^"]+)">([^<]+)<\/span>/);
+    assert.ok(badge, decision);
+    assert.equal(badge[2], labels[decision], decision);
+    assert.match(badge[1], /\.$/, decision);
+    assert.equal(w.decisions.options.find(o => o.value === decision).textContent, labels[decision]);
+  }
+  vm.runInContext("render({decision:'future-review', bucket:'other'})", w.context);
+  assert.match(w.elements.get('feed').children[0].innerHTML, /<span class="badge">future-review<\/span>/);
+  assert.equal(w.decisions.options.find(o => o.value === 'future-review').label, 'future-review');
+});
+
+test('a labeled decision filter still selects the raw decision value', () => {
+  const w = wall();
+  vm.runInContext("render({decision:'allow'}); render({decision:'method-allow'})", w.context);
+  const option = w.decisions.options.find(o => o.value === 'method-allow');
+  assert.equal(option.textContent, 'ALLOWED (METHOD)');
+  w.decisions.value = option.value;
+  vm.runInContext('applyFilters()', w.context);
+  const shown = w.elements.get('feed').children.filter(r => r.classList.contains('row') && !r.classList.contains('fout'));
+  assert.deepEqual(shown.map(r => r.dataset.decision), ['method-allow']);
+  assert.match(w.elements.get('f-export').href, /decision=method-allow/);
+  assert.match(w.elements.get('f-proof').href, /decision=method-allow/);
+  assert.doesNotMatch(w.elements.get('f-export').href, /ALLOWED/);
+});
 
 test('filter lists every emitted decision and filters to exactly its rows', () => {
   const w = wall();
