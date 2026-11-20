@@ -60,8 +60,8 @@ function wall(contextPayload, mediaQuery, globals = {}) {
   empty.remove = empty.removeSelf;
   feed.children.push(empty);
   const decisions = document.getElementById('f-decision');
-  decisions.options = [...page.match(/<select id="f-decision"[\s\S]*?<\/select>/)[0].matchAll(/<option value="([^"]*)"/g)]
-    .map(m => ({ value: m[1] }));
+  decisions.options = [...page.match(/<select id="f-decision"[\s\S]*?<\/select>/)[0].matchAll(/<option value="([^"]*)">([^<]*)<\/option>/g)]
+    .map(m => ({ value: m[1], textContent: m[2] }));
   Object.defineProperty(decisions, 'value', {
     get() { return this.selectedValue ?? ''; },
     set(value) {
@@ -339,7 +339,7 @@ test('approval-denied uses rejection styling and a fixed decision filter option'
   assert.equal(w.elements.get('p-blocked').textContent, 1);
   assert.equal(w.decisions.options.filter(o => o.value === 'approval-denied').length, 1);
   const page = fs.readFileSync(new URL('./index.html', `file://${__filename}`), 'utf8');
-  assert.match(page, /<option value="approval-denied">approval-denied<\/option>/);
+  assert.equal(w.decisions.options.find(o => o.value === 'approval-denied').textContent, 'DENIED AT APPROVAL');
   assert.match(page, /\.approval-denied\s*\{[^}]*border-left-color:var\(--deny\)/);
   assert.match(page, /\.approval-denied \.badge\s*\{[^}]*color:var\(--deny\)/);
 });
@@ -349,6 +349,78 @@ test('approval-denied uses rejection styling and a fixed decision filter option'
 const EMITTED = ['allow', 'method-allow', 'method-deny', 'deny', 'block', 'ratelimit', 'hide', 'approval-denied', 'approval-granted',
   'would-deny', 'dispatch', 'observe', 'state-write', 'inject', 'budget-ask', 'downgrade'];
 const FIXED = ['', ...EMITTED];
+
+test('known decisions show plain-language badges and hover titles; unknown values stay raw', () => {
+  const w = wall();
+  const labels = {
+    allow: 'ALLOWED', 'method-allow': 'ALLOWED (METHOD)', 'method-deny': 'STOPPED (METHOD)',
+    deny: 'STOPPED (POLICY)', block: 'STOPPED (BLOCKED)', ratelimit: 'STOPPED (RATE LIMIT)', hide: 'HIDDEN FROM AGENT',
+    'approval-denied': 'DENIED AT APPROVAL', 'approval-granted': 'APPROVED',
+    'would-deny': 'WOULD BE STOPPED (WATCH MODE)', dispatch: 'READY TO SEND',
+    observe: 'WATCHED', 'state-write': 'APPROVAL STATE RECORDED',
+    inject: 'CREDENTIAL ADDED', 'budget-ask': 'BUDGET THRESHOLD REACHED',
+    downgrade: 'CHEAPER ROUTE CHOSEN',
+  };
+  for (const decision of EMITTED) {
+    vm.runInContext(`render({decision:'${decision}', bucket:'approved'})`, w.context);
+    const badge = w.elements.get('feed').children[0].innerHTML.match(/<span class="badge" title="([^"]+)">([^<]+)<\/span>/);
+    assert.ok(badge, decision);
+    assert.equal(badge[2], labels[decision], decision);
+    assert.match(badge[1], /\.$/, decision);
+    assert.equal(w.decisions.options.find(o => o.value === decision).textContent, labels[decision]);
+    if (decision === 'approval-granted') assert.equal(badge[1], 'Allowed after the approval step.');
+    if (decision === 'approval-denied') assert.equal(badge[1], 'Refused at the approval step.');
+  }
+  assert.equal(new Set(w.decisions.options.map(o => o.textContent)).size, w.decisions.options.length);
+  vm.runInContext("render({decision:'future-review', bucket:'other'})", w.context);
+  assert.match(w.elements.get('feed').children[0].innerHTML, /<span class="badge">future-review<\/span>/);
+  assert.equal(w.decisions.options.find(o => o.value === 'future-review').label, 'future-review');
+});
+
+test('method, policy and Guard stops have distinct labels and filter by raw decision', () => {
+  const w = wall();
+  const labels = { 'method-deny': 'STOPPED (METHOD)', deny: 'STOPPED (POLICY)', block: 'STOPPED (BLOCKED)' };
+  for (const decision of Object.keys(labels)) vm.runInContext(`render({decision:'${decision}'})`, w.context);
+  for (const [decision, label] of Object.entries(labels)) {
+    const option = w.decisions.options.find(o => o.value === decision);
+    assert.equal(option.textContent, label);
+    w.decisions.value = option.value;
+    vm.runInContext('applyFilters()', w.context);
+    const shown = w.elements.get('feed').children.filter(r => r.classList.contains('row') && !r.classList.contains('fout'));
+    assert.deepEqual(shown.map(r => r.dataset.decision), [decision]);
+    assert.match(w.elements.get('f-export').href, new RegExp('decision=' + decision));
+  }
+});
+
+test('Lock fence rows use fence hover text for allowed and blocked decisions', () => {
+  const w = wall();
+  for (const [decision, title] of [
+    ['allow', 'The fence allowed this.'],
+    ['block', 'The fence stopped this.'],
+  ]) {
+    vm.runInContext(`render({decision:'${decision}', source:'LOCK'})`, w.context);
+    assert.ok(w.elements.get('feed').children[0].innerHTML.includes(`title="${title}"`));
+    assert.doesNotMatch(w.elements.get('feed').children[0].innerHTML, /tool call/);
+  }
+  vm.runInContext("render({decision:'allow', source:'GUARD'})", w.context);
+  assert.match(w.elements.get('feed').children[0].innerHTML, /title="The tool call was allowed by policy\."/);
+  vm.runInContext("render({decision:'block', source:'GUARD'})", w.context);
+  assert.match(w.elements.get('feed').children[0].innerHTML, /title="Guard stopped the tool call before forwarding\."/);
+});
+
+test('a labeled decision filter still selects the raw decision value', () => {
+  const w = wall();
+  vm.runInContext("render({decision:'allow'}); render({decision:'method-allow'})", w.context);
+  const option = w.decisions.options.find(o => o.value === 'method-allow');
+  assert.equal(option.textContent, 'ALLOWED (METHOD)');
+  w.decisions.value = option.value;
+  vm.runInContext('applyFilters()', w.context);
+  const shown = w.elements.get('feed').children.filter(r => r.classList.contains('row') && !r.classList.contains('fout'));
+  assert.deepEqual(shown.map(r => r.dataset.decision), ['method-allow']);
+  assert.match(w.elements.get('f-export').href, /decision=method-allow/);
+  assert.match(w.elements.get('f-proof').href, /decision=method-allow/);
+  assert.doesNotMatch(w.elements.get('f-export').href, /ALLOWED/);
+});
 
 test('filter lists every emitted decision and filters to exactly its rows', () => {
   const w = wall();

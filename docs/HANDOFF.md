@@ -5,6 +5,20 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## What changed
 
+- 2026-11-20: Release metadata now names v0.12.2. The changelog groups the
+  Codex CLI GitHub MCP example and the Live Wall decision labels in this
+  release; the CLI version and roadmap agree.
+
+- 2026-11-18: Live Wall decision badges and filter options now show
+  plain-language labels. Badge hover text explains the recorded event. Raw
+  decision values remain in filtering, exports, proofs and trail data;
+  unfamiliar values display as recorded. The mapping lives in
+  `cmd/nockguard-wall/index.html` and browser coverage in its adjacent test.
+  Method, policy, Guard and rate-limit stops use distinct labels; approval
+  labels name the recorded step without claiming who approved it. Lock fence
+  rows reuse `allow` and `block`, so their hover text checks the row source.
+  The demo screenshot was reviewed on the PR and is not tracked in the repo.
+
 - 2026-11-11: The Live Wall caps future decision timestamps at the browser's
   current time when updating "Last decision." Clock skew no longer hides a
   decision, and a far-future row ages normally after it arrives.
@@ -74,7 +88,7 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## Still open
 
-- v0.12.1 release packaging and publication are pending.
+- v0.12.2 release packaging and publication are pending.
 - PROOF text filter: a query found only in a reason shows rows on the Wall
   and in CSV/JSON but not in PROOF. Matching the reason there needs a new
   export schema version so older verifiers fail closed on it.

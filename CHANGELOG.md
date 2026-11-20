@@ -4,6 +4,25 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-11-20
+
+v0.12.2 adds a worked Codex CLI example for the GitHub MCP server and shows
+plain-language decision labels in the Live Wall.
+
+### Added
+
+- `examples/github-mcp-codex/`: a worked Codex CLI setup for the GitHub MCP
+  server, with a `config.toml` snippet, a `policy.yaml` that denies
+  repository create, fork and delete, and a policy test.
+
+### Changed
+
+- The Live Wall shows plain-language labels and hover explanations for known
+  decisions in rows and filters. Method, policy and Guard stops have distinct
+  labels; approval labels describe the recorded step without attributing it
+  to a person. Lock fence rows use fence-specific hover explanations. Decision
+  values in exports and audit trails remain unchanged.
+
 ## [0.12.1] - 2026-11-11
 
 v0.12.1 raises the required Go toolchain to 1.27.4 for a standard-library
