@@ -4,6 +4,17 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-11-20
+
+v0.12.2 adds a worked Codex CLI example for the GitHub MCP server and shows
+plain-language decision labels in the Live Wall.
+
+### Added
+
+- `examples/github-mcp-codex/`: a worked Codex CLI setup for the GitHub MCP
+  server, with a `config.toml` snippet, a `policy.yaml` that denies
+  repository create, fork and delete, and a policy test.
+
 ### Changed
 
 - The Live Wall shows plain-language labels and hover explanations for known
