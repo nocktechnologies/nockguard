@@ -5,6 +5,10 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## What changed
 
+- 2026-11-20: Release metadata now names v0.12.2. The changelog groups the
+  Codex CLI GitHub MCP example and the Live Wall decision labels in this
+  release; the CLI version and roadmap agree.
+
 - 2026-11-18: Live Wall decision badges and filter options now show
   plain-language labels. Badge hover text explains the recorded event. Raw
   decision values remain in filtering, exports, proofs and trail data;
@@ -84,7 +88,7 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## Still open
 
-- v0.12.1 release packaging and publication are pending.
+- v0.12.2 release packaging and publication are pending.
 - PROOF text filter: a query found only in a reason shows rows on the Wall
   and in CSV/JSON but not in PROOF. Matching the reason there needs a new
   export schema version so older verifiers fail closed on it.
