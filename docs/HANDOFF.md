@@ -5,6 +5,12 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## What changed
 
+- 2026-11-24: `examples/github-mcp-cursor/` adds the GitHub MCP wrap for
+  Cursor. Cursor interpolates `${env:NAME}`, not plain `${NAME}`;
+  `policy_test.go` pins that for the token. Approving the server in the
+  Cursor CLI (`cursor-agent mcp enable github`) is tied to the entry's
+  content, so re-run it after editing the entry.
+
 - 2026-11-20: Release metadata now names v0.12.2. The changelog groups the
   Codex CLI GitHub MCP example and the Live Wall decision labels in this
   release; the CLI version and roadmap agree.

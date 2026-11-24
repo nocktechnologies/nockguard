@@ -4,6 +4,12 @@ All notable changes to NockGuard are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `examples/github-mcp-cursor/`: a worked Cursor setup for the GitHub MCP
+  server, with an `mcp.json` entry, a `policy.yaml` that denies repository
+  create, fork and delete, and a policy test.
+
 ## [0.12.2] - 2026-11-20
 
 v0.12.2 adds a worked Codex CLI example for the GitHub MCP server and shows
