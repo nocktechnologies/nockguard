@@ -62,8 +62,7 @@ gives it the variable.
    `github` entry, replacing any `github` server already there. Replace
    `<NOCKGUARD_PATH>` and `<DOCKER_PATH>` with the paths above, `<SHELL_PATH>`
    with the `PATH` value, and `<POLICY_PATH>` with the absolute path of your
-   policy copy. The `PATH` entry is set explicitly so `nockguard` and `docker`
-   resolve when Cursor starts the server. Cursor fills in
+   policy copy. Cursor fills in
    `${env:GITHUB_PERSONAL_ACCESS_TOKEN}` from its own environment, so the token
    never sits in the file. If the proxy or Docker needs other variables from
    your shell, such as `DOCKER_HOST` or the `NOCKGUARD_AUDIT_*` and
@@ -96,7 +95,7 @@ gives it the variable.
 
    ```bash
    cursor-agent mcp enable github       # approve the server on first use
-   cursor-agent mcp list-tools github   # lists the tools; the three denied ones are absent
+   cursor-agent mcp list-tools github   # the three denied tools are absent
    ```
 
 ## Check the trail
@@ -134,13 +133,12 @@ The config paths (`.cursor/mcp.json` per project, `~/.cursor/mcp.json`
 global), the `mcpServers.<name>` keys used here (`type`, `command`, `args`,
 `env`) and the `${env:NAME}` interpolation follow the Cursor MCP docs at
 <https://cursor.com/docs/context/mcp>, read 2026-11-24. The stdio table there
-lists `type: "stdio"` as required, so the entry sets it. The CLI commands follow
+lists `type: "stdio"` as required. The CLI commands follow
 <https://cursor.com/docs/cli/mcp>, read the same day; the CLI uses the same
 `mcp.json` as the editor. With Cursor CLI 2026.10.01-e373342,
-`cursor-agent mcp list-tools github` on this snippet (placeholders filled in,
-a test token in the environment) lists 44 tools without the three denied
-ones, the server receives the token, and `nockguard verify --agent cursor`
-reports PROTECTED.
+`cursor-agent mcp list-tools github` on this snippet (placeholders filled in)
+lists the tools without the three denied ones, and
+`nockguard verify --agent cursor` reports PROTECTED.
 
 ## Files
 
