@@ -10,7 +10,7 @@ Go tests live beside each package as `*_test.go` unless noted otherwise.
 | `cmd/nockguard-pool/` | Pool CLI scaffold; router tests live in `internal/pool/`. |
 | `docs/` | Customer, feature, design, contract and operator documentation; reviewed against source and CI. |
 | `examples/exfil-demo/` | Poisoned-server demonstration; `run.sh` runs it. |
-| `examples/github-mcp-claude-code/` | GitHub MCP server policy and Claude Code config; `policy_test.go` checks the verdicts. |
+| `examples/github-mcp-claude-code/` | GitHub MCP server policy and Claude Code config; `policy_test.go` checks the verdicts and the config entry. |
 | `examples/github-mcp-codex/` | GitHub MCP server policy and Codex CLI config; `policy_test.go` checks the verdicts and the config entry. |
 | `examples/github-mcp-cursor/` | GitHub MCP server policy and Cursor `mcp.json` entry; `policy_test.go` checks the verdicts and the config entry. |
 | `internal/approval/` | Telegram and local-socket approvers; package and proxy end-to-end tests. |

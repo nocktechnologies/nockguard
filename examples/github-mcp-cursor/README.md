@@ -66,7 +66,8 @@ gives it the variable.
    `${env:GITHUB_PERSONAL_ACCESS_TOKEN}` from its own environment, so the token
    never sits in the file. If the proxy or Docker needs other variables from
    your shell, such as `DOCKER_HOST` or the `NOCKGUARD_AUDIT_*` and
-   `NOCKGUARD_AGENT_CURSOR_*` signing keys, add them to `env` the same way.
+   `NOCKGUARD_AGENT_CURSOR_*` signing keys, add them to `env` the same way,
+   as `"NAME": "${env:NAME}"`, so their values stay out of the file.
 
 5. Pull the server image once, so the first start is not the image download:
 
@@ -94,7 +95,7 @@ gives it the variable.
    With the Cursor CLI, run these from the project directory instead:
 
    ```bash
-   cursor-agent mcp enable github       # approve the server on first use
+   cursor-agent mcp enable github       # approve the server; re-run after editing the entry
    cursor-agent mcp list-tools github   # the three denied tools are absent
    ```
 

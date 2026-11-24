@@ -2,8 +2,9 @@ package githubmcpcursor
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
-	"strings"
+	"slices"
 	"testing"
 
 	"github.com/nocktechnologies/nockguard/internal/policy"
@@ -44,27 +45,27 @@ func TestMCPConfigWrapsGitHubServer(t *testing.T) {
 	}
 	var cfg struct {
 		MCPServers map[string]struct {
-			Type string            `json:"type"`
-			Args []string          `json:"args"`
-			Env  map[string]string `json:"env"`
+			Type    string            `json:"type"`
+			Command string            `json:"command"`
+			Args    []string          `json:"args"`
+			Env     map[string]string `json:"env"`
 		} `json:"mcpServers"`
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("mcp.json is not valid JSON: %v", err)
 	}
 	github := cfg.MCPServers["github"]
-	if github.Type != "stdio" {
-		t.Errorf("mcp.json github type = %q, want stdio", github.Type)
+	if github.Type != "stdio" || github.Command != "<NOCKGUARD_PATH>" {
+		t.Errorf("mcp.json github type/command = %q/%q, want stdio/<NOCKGUARD_PATH>", github.Type, github.Command)
 	}
-	args := strings.Join(github.Args, " ")
-	for _, want := range []string{"proxy --upstream", "ghcr.io/github/github-mcp-server:v2.0.3", "--agent cursor", "--policy"} {
-		if !strings.Contains(args, want) {
-			t.Errorf("mcp.json github args %q missing %q", args, want)
-		}
+	wantArgs := []string{"proxy", "--upstream", "<DOCKER_PATH> run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server:v2.0.3", "--agent", "cursor", "--policy", "<POLICY_PATH>"}
+	if !slices.Equal(github.Args, wantArgs) {
+		t.Errorf("mcp.json github args = %q, want %q", github.Args, wantArgs)
 	}
 	// Cursor documents ${env:NAME} for environment interpolation, not the
 	// plain ${NAME} the Claude Code example uses.
-	if got := github.Env["GITHUB_PERSONAL_ACCESS_TOKEN"]; got != "${env:GITHUB_PERSONAL_ACCESS_TOKEN}" {
-		t.Errorf("mcp.json github token env = %q, want ${env:GITHUB_PERSONAL_ACCESS_TOKEN}", got)
+	wantEnv := map[string]string{"PATH": "<SHELL_PATH>", "GITHUB_PERSONAL_ACCESS_TOKEN": "${env:GITHUB_PERSONAL_ACCESS_TOKEN}"}
+	if !maps.Equal(github.Env, wantEnv) {
+		t.Errorf("mcp.json github env = %q, want %q", github.Env, wantEnv)
 	}
 }
