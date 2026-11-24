@@ -72,6 +72,8 @@ Examples you can copy:
   `nockguard verify`.
 - [`examples/github-mcp-codex/`](examples/github-mcp-codex/): the same GitHub
   MCP wrap and policy for Codex CLI, as a `config.toml` entry.
+- [`examples/github-mcp-cursor/`](examples/github-mcp-cursor/): the same GitHub
+  MCP wrap and policy for Cursor, as a `.cursor/mcp.json` entry.
 - [`examples/exfil-demo/`](examples/exfil-demo/): a poisoned MCP server tries
   to steal a key, and the starter policy blocks it.
 
