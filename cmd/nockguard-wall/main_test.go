@@ -2101,18 +2101,50 @@ func serveWallStatus(t *testing.T, b *broker, path string, want int) *httptest.R
 	return rec
 }
 
-func TestPendingShowsCallsHeldForApproval(t *testing.T) {
-	tmp, err := os.MkdirTemp("/tmp", "ngw") // short: unix socket path limit
+// localApprovals starts a local approver in a short /tmp directory (unix
+// socket path limit). hold has one call held as kit/deploy_prod and returns it
+// once listed; resolve denies it and waits for the Ask to return.
+func localApprovals(t *testing.T) (tmp, dir string, hold func() approval.Pending, resolve func(approval.Pending)) {
+	t.Helper()
+	tmp, err := os.MkdirTemp("/tmp", "ngw")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(tmp) })
-	dir := filepath.Join(tmp, "approvals")
+	dir = filepath.Join(tmp, "approvals")
 	a, err := approval.NewLocalApprover(dir, 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { a.Close() })
+	done := make(chan approval.Verdict, 1)
+	hold = func() approval.Pending {
+		t.Helper()
+		go func() {
+			done <- a.Ask(approval.Request{Agent: "kit", Tool: "deploy_prod", Reason: "ask rule",
+				Params: []byte(`{"arguments":{"secret":"hunter2"}}`)})
+		}()
+		for i := 0; i < 200; i++ {
+			if h, _ := approval.ListPending(dir); len(h) == 1 {
+				return h[0]
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("held call never listed")
+		return approval.Pending{}
+	}
+	resolve = func(h approval.Pending) {
+		t.Helper()
+		if err := approval.Decide(dir, h.ID, false); err != nil {
+			t.Fatal(err)
+		}
+		<-done
+	}
+	return tmp, dir, hold, resolve
+}
+
+func TestPendingShowsCallsHeldForApproval(t *testing.T) {
+	tmp, dir, hold, resolve := localApprovals(t)
 	b := newBroker()
 	b.auditPath = filepath.Join(tmp, "audit.jsonl")
 	b.approvalsDir = dir
@@ -2136,30 +2168,6 @@ func TestPendingShowsCallsHeldForApproval(t *testing.T) {
 			t.Fatalf("%s: /pending %+v, pulse pending %d, want %d", label, held, n, want)
 		}
 	}
-	done := make(chan approval.Verdict, 1)
-	hold := func() approval.Pending {
-		t.Helper()
-		go func() {
-			done <- a.Ask(approval.Request{Agent: "kit", Tool: "deploy_prod", Reason: "ask rule",
-				Params: []byte(`{"arguments":{"secret":"hunter2"}}`)})
-		}()
-		for i := 0; i < 200; i++ {
-			if h, _ := approval.ListPending(dir); len(h) == 1 {
-				return h[0]
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		t.Fatal("held call never listed")
-		return approval.Pending{}
-	}
-	resolve := func(h approval.Pending) {
-		t.Helper()
-		if err := approval.Decide(dir, h.ID, false); err != nil {
-			t.Fatal(err)
-		}
-		<-done
-	}
-
 	wantHeld("before any hold", 0)
 	h := hold()
 	held, n := pending()
@@ -2209,27 +2217,8 @@ func TestPendingShowsCallsHeldForApproval(t *testing.T) {
 // approvals listing, so a poll tick dials each socket once; after the TTL the
 // next call lists afresh.
 func TestHeldCallsShareOneListing(t *testing.T) {
-	tmp, err := os.MkdirTemp("/tmp", "ngw") // short: unix socket path limit
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(tmp) })
-	dir := filepath.Join(tmp, "approvals")
-	a, err := approval.NewLocalApprover(dir, 10*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { a.Close() })
-	done := make(chan approval.Verdict, 1)
-	go func() { done <- a.Ask(approval.Request{Agent: "kit", Tool: "deploy_prod"}) }()
-	var h []approval.Pending
-	for i := 0; i < 200 && len(h) != 1; i++ {
-		time.Sleep(10 * time.Millisecond)
-		h, _ = approval.ListPending(dir)
-	}
-	if len(h) != 1 {
-		t.Fatal("held call never listed")
-	}
+	tmp, dir, hold, resolve := localApprovals(t)
+	h := hold()
 
 	b := newBroker()
 	b.auditPath = filepath.Join(tmp, "audit.jsonl")
@@ -2246,10 +2235,7 @@ func TestHeldCallsShareOneListing(t *testing.T) {
 	if err := json.Unmarshal(serveWall(t, b, "/pending").Body.Bytes(), &held); err != nil || len(held) != 1 {
 		t.Fatalf("/pending = %+v, %v; want 1 held", held, err)
 	}
-	if err := approval.Decide(dir, h[0].ID, false); err != nil {
-		t.Fatal(err)
-	}
-	<-done
+	resolve(h)
 	// The hold is gone, but /pulse inside the TTL still answers from the
 	// listing /pending made: it did not dial again.
 	if n := pulsePending(); n != 1 {

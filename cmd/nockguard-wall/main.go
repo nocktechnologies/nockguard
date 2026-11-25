@@ -140,8 +140,9 @@ type broker struct {
 	// approvalsDirErr is why approvalsDir could not be resolved; held calls
 	// are then unknown, never zero.
 	approvalsDirErr error
-	// heldTTL is how long one approvals listing answers both /pulse and
-	// /pending, so a poll tick dials each approval socket once. hmu guards
+	// heldTTL is how long one approvals listing answers every /pulse and
+	// /pending caller (open pages, scripts, monitors), so callers inside it
+	// dial each approval socket once between them. hmu guards
 	// the cached listing and is held across the dial so concurrent callers
 	// share it. Zero lists on every call.
 	heldTTL time.Duration
@@ -161,7 +162,7 @@ func newBroker() *broker {
 	return &broker{
 		clients:          make(map[chan event]struct{}),
 		exportTrailLimit: maxExportTrailBytes,
-		heldTTL:          2 * time.Second, // under the page's 5 s poll
+		heldTTL:          2 * time.Second, // under the page's 5 s /pending poll
 	}
 }
 
@@ -575,7 +576,7 @@ type heldCall struct {
 }
 
 // heldCalls returns listHeldCalls, reusing one listing (or its error) for
-// heldTTL so /pulse and /pending in the same poll tick dial once.
+// heldTTL so /pulse and /pending callers inside it share one dial.
 func (b *broker) heldCalls() ([]heldCall, error) {
 	b.hmu.Lock()
 	defer b.hmu.Unlock()
