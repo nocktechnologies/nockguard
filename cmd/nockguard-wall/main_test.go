@@ -2082,27 +2082,17 @@ func TestMethodRowsExcludedFromToolCounts(t *testing.T) {
 	}
 }
 
-// pendingAt reads /pending and the /pulse pending count from b.
-func pendingAt(t *testing.T, b *broker) ([]heldCall, int) {
+// serveWall sends a loopback GET for path through the Wall handler.
+func serveWall(t *testing.T, b *broker, path string) *httptest.ResponseRecorder {
 	t.Helper()
-	h := wallHandler(b, "8787", "")
-	get := func(path string, v any) {
-		req := httptest.NewRequest(http.MethodGet, path, nil)
-		req.Host = "127.0.0.1:8787"
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("%s = %d %s", path, rec.Code, rec.Body)
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), v); err != nil {
-			t.Fatalf("%s: %v in %s", path, err, rec.Body)
-		}
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Host = "127.0.0.1:8787"
+	rec := httptest.NewRecorder()
+	wallHandler(b, "8787", "").ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s = %d %s", path, rec.Code, rec.Body)
 	}
-	var held []heldCall
-	get("/pending", &held)
-	var p pulse
-	get("/pulse", &p)
-	return held, p.Pending
+	return rec
 }
 
 func TestPendingShowsCallsHeldForApproval(t *testing.T) {
@@ -2121,29 +2111,56 @@ func TestPendingShowsCallsHeldForApproval(t *testing.T) {
 	b.auditPath = filepath.Join(tmp, "audit.jsonl")
 	b.approvalsDir = dir
 
-	if held, n := pendingAt(t, b); len(held) != 0 || n != 0 {
-		t.Fatalf("before any hold: /pending %+v, pulse pending %d", held, n)
+	// pending returns /pending and the /pulse pending count.
+	pending := func() ([]heldCall, int) {
+		var held []heldCall
+		var p pulse
+		for path, v := range map[string]any{"/pending": &held, "/pulse": &p} {
+			rec := serveWall(t, b, path)
+			if err := json.Unmarshal(rec.Body.Bytes(), v); err != nil {
+				t.Fatalf("%s: %v in %s", path, err, rec.Body)
+			}
+		}
+		return held, p.Pending
+	}
+	wantHeld := func(label string, want int) {
+		t.Helper()
+		if held, n := pending(); len(held) != want || n != want {
+			t.Fatalf("%s: /pending %+v, pulse pending %d, want %d", label, held, n, want)
+		}
 	}
 	done := make(chan approval.Verdict, 1)
-	go func() {
-		done <- a.Ask(approval.Request{Agent: "kit", Tool: "deploy_prod", Reason: "ask rule",
-			Params: []byte(`{"arguments":{"secret":"hunter2"}}`)})
-	}()
-	var held []heldCall
-	var n int
-	for i := 0; i < 200 && len(held) == 0; i++ {
-		time.Sleep(10 * time.Millisecond)
-		held, n = pendingAt(t, b)
+	hold := func() approval.Pending {
+		t.Helper()
+		go func() {
+			done <- a.Ask(approval.Request{Agent: "kit", Tool: "deploy_prod", Reason: "ask rule",
+				Params: []byte(`{"arguments":{"secret":"hunter2"}}`)})
+		}()
+		for i := 0; i < 200; i++ {
+			if h, _ := approval.ListPending(dir); len(h) == 1 {
+				return h[0]
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("held call never listed")
+		return approval.Pending{}
 	}
+	resolve := func(h approval.Pending) {
+		t.Helper()
+		if err := approval.Decide(dir, h.ID, false); err != nil {
+			t.Fatal(err)
+		}
+		<-done
+	}
+
+	wantHeld("before any hold", 0)
+	h := hold()
+	held, n := pending()
 	if len(held) != 1 || n != 1 || held[0].Agent != "kit" || held[0].Tool != "deploy_prod" || held[0].AgeSec < 0 {
 		t.Fatalf("held call: /pending %+v, pulse pending %d", held, n)
 	}
-
 	// The Wall shows agent, tool and wait time only: no hold id, reason or arguments.
-	req := httptest.NewRequest(http.MethodGet, "/pending", nil)
-	req.Host = "127.0.0.1:8787"
-	rec := httptest.NewRecorder()
-	wallHandler(b, "8787", "").ServeHTTP(rec, req)
+	rec := serveWall(t, b, "/pending")
 	for _, leak := range []string{"ask rule", "hunter2", `"id"`, "reason"} {
 		if strings.Contains(rec.Body.String(), leak) {
 			t.Fatalf("/pending exposes %q: %s", leak, rec.Body)
@@ -2152,45 +2169,17 @@ func TestPendingShowsCallsHeldForApproval(t *testing.T) {
 	if rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("/pending Cache-Control = %q", rec.Header().Get("Cache-Control"))
 	}
+	resolve(h)
+	wantHeld("after resolve", 0)
 
-	ids, err := approval.ListPending(dir)
-	if err != nil || len(ids) != 1 {
-		t.Fatalf("ListPending = %+v, %v", ids, err)
-	}
-	if err := approval.Decide(dir, ids[0].ID, false); err != nil {
-		t.Fatal(err)
-	}
-	<-done
-	if held, n := pendingAt(t, b); len(held) != 0 || n != 0 {
-		t.Fatalf("after resolve: /pending %+v, pulse pending %d", held, n)
-	}
-
-	// Negative controls: demo mode and an approvals dir no proxy ever made read as none held.
-	go func() {
-		done <- a.Ask(approval.Request{Agent: "kit", Tool: "deploy_prod"})
-	}()
-	for i := 0; i < 200; i++ {
-		if h, _ := approval.ListPending(dir); len(h) == 1 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	b.demo = true
-	if held, n := pendingAt(t, b); len(held) != 0 || n != 0 {
-		t.Fatalf("demo: /pending %+v, pulse pending %d", held, n)
-	}
-	b.demo = false
+	// Negative controls: no approvals dir (as under --demo) and one no proxy
+	// ever made read as none held while a call is held.
+	h = hold()
+	b.approvalsDir = ""
+	wantHeld("no approvals dir", 0)
 	b.approvalsDir = filepath.Join(tmp, "never-made")
-	if held, n := pendingAt(t, b); len(held) != 0 || n != 0 {
-		t.Fatalf("absent dir: /pending %+v, pulse pending %d", held, n)
-	}
+	wantHeld("absent dir", 0)
 	b.approvalsDir = dir
-	if held, n := pendingAt(t, b); len(held) != 1 || n != 1 {
-		t.Fatalf("real dir after controls: /pending %+v, pulse pending %d", held, n)
-	}
-	h, _ := approval.ListPending(dir)
-	if err := approval.Decide(dir, h[0].ID, false); err != nil {
-		t.Fatal(err)
-	}
-	<-done
+	wantHeld("real dir after controls", 1)
+	resolve(h)
 }

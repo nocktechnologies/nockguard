@@ -133,7 +133,7 @@ type broker struct {
 	view    *wallView
 
 	// approvalsDir is the local approver's socket directory, the same one
-	// `nockguard approvals list` reads. Empty (or --demo) means no held calls.
+	// `nockguard approvals list` reads. Empty (as under --demo) means no held calls.
 	approvalsDir string
 
 	// Test seams for mutating the live files at each capture boundary.
@@ -557,7 +557,7 @@ type heldCall struct {
 // first, via the same approval.ListPending call `nockguard approvals list` makes.
 // An approvals directory that is absent or unreadable reads as none held.
 func (b *broker) heldCalls() []heldCall {
-	if b.demo || b.approvalsDir == "" {
+	if b.approvalsDir == "" {
 		return []heldCall{}
 	}
 	pending, err := approval.ListPending(b.approvalsDir)
@@ -1156,10 +1156,12 @@ func main() {
 		log.Printf("offline proof signing enabled from %s", *proofKeyEnv)
 	}
 	b.demo = *demoMode
-	if dir, err := approval.DefaultLocalDir(); err == nil {
+	if !*demoMode { // a synthetic stream never mixes in real held calls
+		dir, err := approval.DefaultLocalDir()
+		if err != nil {
+			log.Printf("warning: approvals directory: %v (the wall shows no held calls)", err)
+		}
 		b.approvalsDir = dir
-	} else {
-		log.Printf("warning: approvals directory: %v (the wall shows no held calls)", err)
 	}
 	if *lockDB != "" {
 		if *demoMode {

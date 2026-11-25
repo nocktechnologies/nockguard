@@ -10,7 +10,7 @@ and what is still open, and remove anything no longer true. Keep it short.
   `/pulse` `pending` is the same count. The Wall calls
   `approval.ListPending` on `approval.DefaultLocalDir()`, like
   `nockguard approvals list`. A missing or unprovable approvals directory reads
-  as zero held calls, and `--demo` never reads it. The browser test harness
+  as zero held calls, and `--demo` leaves the directory unset. The browser test harness
   in `cmd/nockguard-wall/index.test.js` gained `replaceChildren`; its `esc`
   stub does not escape, so HTML escaping is not observable there.
 
