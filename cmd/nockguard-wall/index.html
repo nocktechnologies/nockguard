@@ -108,7 +108,8 @@
   .needs-you .ny-agent { color:var(--accent); font-weight:600; }
   .needs-you .ny-age { color:var(--dim); margin-left:auto; }
   /* Read by screen readers, never drawn. */
-  .sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+  .sr-only { position:absolute; width:1px; height:1px; margin:-1px; padding:0; border:0; overflow:hidden;
+             clip:rect(0 0 0 0); clip-path:inset(50%); white-space:nowrap; }
 
   #feed { flex:1; overflow-x:hidden; overflow-y:auto; padding:10px 14px; display:flex; flex-direction:column; gap:6px; }
   #feed .row.fout { display:none; }
@@ -362,7 +363,7 @@
   <!-- The live region is present and shown from page load, so the first held call is announced. -->
   <span id="needs-you-status" class="sr-only" role="status" aria-live="polite"></span>
   <div id="needs-you" class="needs-you" hidden>
-    <span class="ny-head" id="needs-you-head"></span><span class="ny-hint">approve or deny with: <code>nockguard approvals</code></span>
+    <span class="ny-head" id="needs-you-head" aria-hidden="true"></span><span class="ny-hint">approve or deny with: <code>nockguard approvals</code></span>
     <div id="needs-you-rows" role="region" tabindex="0" aria-label="calls held for approval"></div>
   </div>
   <div class="empty nomatch" id="nomatch" role="status" hidden>No rows match these filters. Press ✕ CLEAR to show every row.</div>

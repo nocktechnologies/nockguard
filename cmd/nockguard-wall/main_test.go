@@ -2312,10 +2312,15 @@ func TestPulseNeverWaitsOnApprovalsDial(t *testing.T) {
 	b.auditPath = filepath.Join(tmp, "audit.jsonl")
 	b.approvalsDir = dir
 	b.heldTTL = 0 // every call is past the TTL, so /pulse would dial if it could
-	pendingDone := make(chan struct{})
+	// The /pending call runs off the test goroutine, so it reports its status
+	// on a channel instead of calling t.Fatal.
+	pendingDone := make(chan int, 1)
 	go func() {
-		defer close(pendingDone)
-		serveWall(t, b, "/pending")
+		req := httptest.NewRequest(http.MethodGet, "/pending", nil)
+		req.Host = "127.0.0.1:8787"
+		rec := httptest.NewRecorder()
+		wallHandler(b, "8787", "").ServeHTTP(rec, req)
+		pendingDone <- rec.Code
 	}()
 	var stalled net.Conn
 	select {
@@ -2349,7 +2354,10 @@ func TestPulseNeverWaitsOnApprovalsDial(t *testing.T) {
 	}
 	stalled.Close()
 	select {
-	case <-pendingDone:
+	case code := <-pendingDone:
+		if code != http.StatusOK {
+			t.Fatalf("/pending after the dial was released = %d, want 200", code)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("/pending never returned after the dial was released")
 	}

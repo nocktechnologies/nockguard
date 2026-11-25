@@ -584,9 +584,10 @@ type heldCall struct {
 // (/pending) it takes the running refresh's result.
 func (b *broker) heldCalls(wait bool) ([]heldCall, error) {
 	b.hmu.Lock()
-	defer b.hmu.Unlock()
 	if time.Since(b.heldAt) < b.heldTTL {
-		return b.held, b.heldErr
+		held, err := b.held, b.heldErr
+		b.hmu.Unlock()
+		return held, err
 	}
 	busy := b.heldBusy
 	if busy == nil {
@@ -594,21 +595,31 @@ func (b *broker) heldCalls(wait bool) ([]heldCall, error) {
 		b.heldBusy = busy
 		go b.refreshHeld(busy)
 	}
+	b.hmu.Unlock()
 	if wait {
-		b.hmu.Unlock()
 		<-busy
-		b.hmu.Lock()
 	}
+	b.hmu.Lock()
+	defer b.hmu.Unlock()
 	return b.held, b.heldErr
 }
 
-// refreshHeld lists the held calls outside hmu, stores the result and closes done.
+// refreshHeld lists the held calls outside hmu, stores the result and closes
+// done. A panic in the listing is stored as its error, so the Wall keeps
+// running and the next caller past the TTL lists again.
 func (b *broker) refreshHeld(done chan struct{}) {
-	held, err := b.listHeldCalls()
-	b.hmu.Lock()
-	b.held, b.heldErr, b.heldAt, b.heldBusy = held, err, time.Now(), nil
-	b.hmu.Unlock()
-	close(done)
+	var held []heldCall
+	var err error
+	defer func() {
+		if p := recover(); p != nil {
+			held, err = nil, fmt.Errorf("approvals listing panicked: %v", p)
+		}
+		b.hmu.Lock()
+		b.held, b.heldErr, b.heldAt, b.heldBusy = held, err, time.Now(), nil
+		b.hmu.Unlock()
+		close(done)
+	}()
+	held, err = b.listHeldCalls()
 }
 
 // listHeldCalls lists the calls every live local-approver proxy is holding, oldest
@@ -1241,7 +1252,6 @@ func main() {
 	if !*demoMode { // a synthetic stream never mixes in real held calls
 		b.useLocalApprovals()
 	}
-	b.heldCalls(false) // start the first listing now, so the first /pulse has a count
 	if *lockDB != "" {
 		if *demoMode {
 			log.Fatal("--demo and --lock-db cannot be combined: synthetic rows would hide the real Lock badges")
@@ -1263,6 +1273,7 @@ func main() {
 		go tailLock(ctx, b.lockDB, b)
 	}
 	b.refreshSnapshot() // seed the snapshot so live badges have a baseline
+	b.heldCalls(false)  // start the first approvals listing, so the first /pulse has a count
 
 	if *demoMode {
 		go demo(ctx, b)
