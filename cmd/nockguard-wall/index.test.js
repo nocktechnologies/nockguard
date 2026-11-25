@@ -834,6 +834,60 @@ test('Needs you renders every held call and caps the box with a scroll', async (
   assert.match(PAGE, /<div id="needs-you-rows" role="region" tabindex="0"/);
 });
 
+test('Needs you announces only the head line, and only when it changes', async () => {
+  let held = [{ agent: 'kit', tool: 'deploy_prod', age_s: 1 }];
+  const w = wall({ demo: false });
+  await tick();
+  w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(held) });
+  // The live region is the head line alone; the ticking rows sit outside it.
+  const box = PAGE.match(/<div id="needs-you"[^>]*>/)[0];
+  assert.doesNotMatch(box, /aria-live|role="status"/);
+  assert.match(PAGE, /<span class="ny-head" id="needs-you-head" role="status" aria-live="polite">/);
+  const head = w.elements.get('needs-you-head');
+  let writes = 0;
+  let text = '';
+  Object.defineProperty(head, 'textContent', { get: () => text, set: v => { writes++; text = v; } });
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(writes, 1);
+  // Same count, older wait time: the announced text is not rewritten.
+  held = [{ agent: 'kit', tool: 'deploy_prod', age_s: 6 }];
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(writes, 1);
+  assert.match(w.elements.get('needs-you-rows').children[0].innerHTML, /waiting 6s/);
+  // Negative control: a new count is announced.
+  held = [held[0], { agent: 'coder', tool: 'refund', age_s: 0 }];
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(writes, 2);
+  assert.equal(text, 'Needs you: 2 calls waiting for approval');
+  // The unknown state is announced once, then left alone.
+  w.context.fetch = () => Promise.resolve({ ok: false });
+  await vm.runInContext('checkPending()', w.context);
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(writes, 3);
+  assert.equal(text, 'Needs you: held calls could not be read');
+});
+
+test('Needs you treats a non-JSON or non-list /pending body as unknown, never zero', async () => {
+  const w = wall({ demo: false });
+  await tick();
+  const line = w.elements.get('needs-you');
+  const head = () => w.elements.get('needs-you-head').textContent;
+  for (const json of [() => Promise.reject(new SyntaxError('Unexpected token <')), () => Promise.resolve(null), () => Promise.resolve({})]) {
+    w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+    await vm.runInContext('checkPending()', w.context);
+    assert.equal(line.hidden, true); // control: a real empty list hides the line
+    w.context.fetch = () => Promise.resolve({ ok: true, json });
+    await vm.runInContext('checkPending()', w.context); // must not reject
+    assert.equal(line.hidden, false);
+    assert.equal(head(), 'Needs you: held calls could not be read');
+    assert.equal(w.elements.get('needs-you-rows').children.length, 0);
+  }
+  // The busy guard was released: the next good answer draws.
+  w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve([{ agent: 'kit', tool: 'x', age_s: 0 }]) });
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(head(), 'Needs you: 1 call waiting for approval');
+});
+
 test('Needs you polls never overlap, so an older response cannot overwrite a newer one', async () => {
   const w = wall({ demo: false });
   await tick();

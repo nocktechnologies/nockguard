@@ -357,8 +357,8 @@
     </div>
   </div>
   <div id="sessions" hidden title="signed-proof verdict per session: both the NockLock and the NockGuard chain must verify"></div>
-  <div id="needs-you" class="needs-you" role="status" aria-live="polite" hidden>
-    <span class="ny-head" id="needs-you-head"></span><span class="ny-hint">approve or deny with: <code>nockguard approvals</code></span>
+  <div id="needs-you" class="needs-you" hidden>
+    <span class="ny-head" id="needs-you-head" role="status" aria-live="polite"></span><span class="ny-hint">approve or deny with: <code>nockguard approvals</code></span>
     <div id="needs-you-rows" role="region" tabindex="0" aria-label="calls held for approval"></div>
   </div>
   <div class="empty nomatch" id="nomatch" role="status" hidden>No rows match these filters. Press ✕ CLEAR to show every row.</div>
@@ -916,15 +916,19 @@
       const rows = document.getElementById('needs-you-rows');
       let r;
       try { r = await fetch('/pending', { cache: 'no-store' }); } catch (e) { return; } // transient: keep the line as-is
-      if (!r.ok) { // the approvals directory could not be read: unknown, never zero
+      let held = null;
+      if (r.ok) { try { held = await r.json(); } catch (e) { /* not JSON: unknown */ } }
+      // Only the head line is announced, and only when its text changes, so
+      // the ticking wait times in the rows never re-announce.
+      const say = text => { if (head.textContent !== text) head.textContent = text; };
+      if (!Array.isArray(held)) { // the held calls could not be read: unknown, never zero
         needsYou.hidden = false;
-        head.textContent = 'Needs you: held calls could not be read';
+        say('Needs you: held calls could not be read');
         rows.replaceChildren();
         return;
       }
-      const held = await r.json();
       needsYou.hidden = held.length === 0;
-      head.textContent = 'Needs you: ' + held.length + (held.length === 1 ? ' call' : ' calls') + ' waiting for approval';
+      say('Needs you: ' + held.length + (held.length === 1 ? ' call' : ' calls') + ' waiting for approval');
       rows.replaceChildren(...held.map(h => {
         const el = document.createElement('div');
         el.className = 'ny-row';

@@ -2116,6 +2116,7 @@ func TestPendingShowsCallsHeldForApproval(t *testing.T) {
 	b := newBroker()
 	b.auditPath = filepath.Join(tmp, "audit.jsonl")
 	b.approvalsDir = dir
+	b.heldTTL = 0 // every read lists afresh; TestHeldCallsShareOneListing covers the cache
 
 	// pending returns /pending and the /pulse pending count.
 	pending := func() ([]heldCall, int) {
@@ -2204,12 +2205,72 @@ func TestPendingShowsCallsHeldForApproval(t *testing.T) {
 	resolve(h)
 }
 
+// TestHeldCallsShareOneListing: /pending and /pulse within heldTTL share one
+// approvals listing, so a poll tick dials each socket once; after the TTL the
+// next call lists afresh.
+func TestHeldCallsShareOneListing(t *testing.T) {
+	tmp, err := os.MkdirTemp("/tmp", "ngw") // short: unix socket path limit
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(tmp) })
+	dir := filepath.Join(tmp, "approvals")
+	a, err := approval.NewLocalApprover(dir, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	done := make(chan approval.Verdict, 1)
+	go func() { done <- a.Ask(approval.Request{Agent: "kit", Tool: "deploy_prod"}) }()
+	var h []approval.Pending
+	for i := 0; i < 200 && len(h) != 1; i++ {
+		time.Sleep(10 * time.Millisecond)
+		h, _ = approval.ListPending(dir)
+	}
+	if len(h) != 1 {
+		t.Fatal("held call never listed")
+	}
+
+	b := newBroker()
+	b.auditPath = filepath.Join(tmp, "audit.jsonl")
+	b.approvalsDir = dir
+	b.heldTTL = time.Minute
+	pulsePending := func() int {
+		var p pulse
+		if err := json.Unmarshal(serveWall(t, b, "/pulse").Body.Bytes(), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p.Pending
+	}
+	var held []heldCall
+	if err := json.Unmarshal(serveWall(t, b, "/pending").Body.Bytes(), &held); err != nil || len(held) != 1 {
+		t.Fatalf("/pending = %+v, %v; want 1 held", held, err)
+	}
+	if err := approval.Decide(dir, h[0].ID, false); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	// The hold is gone, but /pulse inside the TTL still answers from the
+	// listing /pending made: it did not dial again.
+	if n := pulsePending(); n != 1 {
+		t.Fatalf("/pulse within TTL = %d, want the shared listing's 1", n)
+	}
+	// Negative control: once the TTL has passed the next call lists afresh.
+	b.hmu.Lock()
+	b.heldAt = time.Now().Add(-2 * time.Minute)
+	b.hmu.Unlock()
+	if n := pulsePending(); n != 0 {
+		t.Fatalf("/pulse after TTL = %d, want 0", n)
+	}
+}
+
 // TestPendingUnknownWhenApprovalsDirUnresolved: when DefaultLocalDir fails (no
 // home directory), /pending and /pulse report an error instead of a quiet 0.
 func TestPendingUnknownWhenApprovalsDirUnresolved(t *testing.T) {
 	t.Setenv("HOME", "")
 	b := newBroker()
 	b.auditPath = filepath.Join(t.TempDir(), "audit.jsonl")
+	b.heldTTL = 0 // the control below swaps the directory
 	b.useLocalApprovals()
 	if b.approvalsDirErr == nil {
 		t.Fatal("DefaultLocalDir with no HOME resolved; the control proves nothing")

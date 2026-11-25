@@ -19,6 +19,10 @@ All notable changes to NockGuard are documented here.
   `/pending`, sets `pendingError` on `/pulse`, and the line reads "held calls
   could not be read". The list shows about six rows and scrolls for the rest,
   and one poll runs at a time, so an older answer never overwrites a newer one.
+  Screen readers hear the head line only, and only when its count or the
+  unknown state changes. A `/pending` body that is not a JSON list reads as
+  unknown. `/pulse` and `/pending` share one approvals listing for 2 seconds,
+  so each poll dials every approval socket once.
 
 ## [0.12.2] - 2026-11-20
 

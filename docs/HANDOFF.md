@@ -13,7 +13,10 @@ and what is still open, and remove anything no longer true. Keep it short.
   calls; one that fails the owner/mode check, or a `DefaultLocalDir` error
   (kept in `broker.approvalsDirErr` by `useLocalApprovals`), is a 503 and
   `pendingError`, never zero. The row list is height-capped and scrolls;
-  `checkPending` skips a tick while its last request is in flight. `--demo` leaves the directory unset. Only the local approver's holds
+  `checkPending` skips a tick while its last request is in flight.
+  `broker.heldCalls` caches one listing for `heldTTL` (2 s) for both
+  endpoints; tests that swap the directory set `heldTTL = 0`. Only the head
+  line is a live region and is rewritten only when its text changes. `--demo` leaves the directory unset. Only the local approver's holds
   appear. The browser test harness
   in `cmd/nockguard-wall/index.test.js` gained `replaceChildren`; its `esc`
   stub does not escape, so a source assertion there pins `esc()` on the agent

@@ -140,6 +140,15 @@ type broker struct {
 	// approvalsDirErr is why approvalsDir could not be resolved; held calls
 	// are then unknown, never zero.
 	approvalsDirErr error
+	// heldTTL is how long one approvals listing answers both /pulse and
+	// /pending, so a poll tick dials each approval socket once. hmu guards
+	// the cached listing and is held across the dial so concurrent callers
+	// share it. Zero lists on every call.
+	heldTTL time.Duration
+	hmu     sync.Mutex
+	heldAt  time.Time
+	held    []heldCall
+	heldErr error
 
 	// Test seams for mutating the live files at each capture boundary.
 	// Production leaves both nil.
@@ -152,6 +161,7 @@ func newBroker() *broker {
 	return &broker{
 		clients:          make(map[chan event]struct{}),
 		exportTrailLimit: maxExportTrailBytes,
+		heldTTL:          2 * time.Second, // under the page's 5 s poll
 	}
 }
 
@@ -564,12 +574,24 @@ type heldCall struct {
 	AgeSec int64  `json:"age_s"`
 }
 
-// heldCalls lists the calls every live local-approver proxy is holding, oldest
+// heldCalls returns listHeldCalls, reusing one listing (or its error) for
+// heldTTL so /pulse and /pending in the same poll tick dial once.
+func (b *broker) heldCalls() ([]heldCall, error) {
+	b.hmu.Lock()
+	defer b.hmu.Unlock()
+	if time.Since(b.heldAt) >= b.heldTTL {
+		b.held, b.heldErr = b.listHeldCalls()
+		b.heldAt = time.Now()
+	}
+	return b.held, b.heldErr
+}
+
+// listHeldCalls lists the calls every live local-approver proxy is holding, oldest
 // first, via the same approval.ListPending call `nockguard approvals list`
 // makes. An approvals directory no proxy has created yet means none held; any
 // other failure (a home directory that cannot be resolved, or a directory with
 // the wrong owner or mode) is an error, never a quiet zero.
-func (b *broker) heldCalls() ([]heldCall, error) {
+func (b *broker) listHeldCalls() ([]heldCall, error) {
 	if b.approvalsDirErr != nil {
 		return nil, fmt.Errorf("approvals directory: %w", b.approvalsDirErr)
 	}
