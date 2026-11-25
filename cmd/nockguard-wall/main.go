@@ -34,6 +34,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/forward"
 	"github.com/nocktechnologies/nockguard/internal/policy"
@@ -130,6 +131,10 @@ type broker struct {
 	lmu     sync.Mutex
 	builds  int // views built so far (guarded by smu); lets a waiting fresh caller reuse a build that finished while it waited
 	view    *wallView
+
+	// approvalsDir is the local approver's socket directory, the same one
+	// `nockguard approvals list` reads. Empty (or --demo) means no held calls.
+	approvalsDir string
 
 	// Test seams for mutating the live files at each capture boundary.
 	// Production leaves both nil.
@@ -292,7 +297,7 @@ type pulse struct {
 	Blocked     int `json:"blocked"`     // explicit rejections only
 	Other       int `json:"other"`       // unfamiliar decisions
 	Hidden      int `json:"hidden"`      // tools/list hides; discovery filtering, not refused calls
-	Pending     int `json:"pending"`     // held calls (none of the current decisions)
+	Pending     int `json:"pending"`     // calls held for approval right now; live approver state, not filtered with the window
 	RateLimited int `json:"rateLimited"` // rejected by rate or spend limit; subset of Blocked
 	// Sub-counts inside Approved, like RateLimited inside Blocked.
 	Granted    int `json:"granted"`    // approval-granted records
@@ -535,8 +540,42 @@ func (b *broker) handlePulse(w http.ResponseWriter, r *http.Request) {
 	since := parseTimeFilter(q.Get("since"))
 	until := parseTimeFilter(q.Get("until"))
 	p := computePulse(b.windowEvents(), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
+	p.Pending = len(b.heldCalls())
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(p)
+}
+
+// heldCall is one call held for approval as the Wall shows it: agent, tool and
+// wait time only. The hold id and reason stay with `nockguard approvals`.
+type heldCall struct {
+	Agent  string `json:"agent"`
+	Tool   string `json:"tool"`
+	AgeSec int64  `json:"age_s"`
+}
+
+// heldCalls lists the calls every live proxy is holding for approval, oldest
+// first, via the same approval.ListPending call `nockguard approvals list` makes.
+// An approvals directory that is absent or unreadable reads as none held.
+func (b *broker) heldCalls() []heldCall {
+	if b.demo || b.approvalsDir == "" {
+		return []heldCall{}
+	}
+	pending, err := approval.ListPending(b.approvalsDir)
+	if err != nil {
+		return []heldCall{}
+	}
+	held := make([]heldCall, len(pending))
+	for i, p := range pending {
+		held[i] = heldCall{Agent: p.Agent, Tool: p.Tool, AgeSec: p.AgeSec}
+	}
+	return held
+}
+
+// handlePending serves the calls held for approval as a read-only JSON list.
+func (b *broker) handlePending(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(b.heldCalls())
 }
 
 // handleContext names the configured evidence sources and the scope of this
@@ -966,6 +1005,7 @@ func wallHandler(b *broker, port, allowHost string) http.Handler {
 	mux.HandleFunc("/export", b.handleExport)
 	mux.HandleFunc("/verify", b.handleVerify)
 	mux.HandleFunc("/sessions", b.handleSessions)
+	mux.HandleFunc("/pending", b.handlePending)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -1116,6 +1156,11 @@ func main() {
 		log.Printf("offline proof signing enabled from %s", *proofKeyEnv)
 	}
 	b.demo = *demoMode
+	if dir, err := approval.DefaultLocalDir(); err == nil {
+		b.approvalsDir = dir
+	} else {
+		log.Printf("warning: approvals directory: %v (the wall shows no held calls)", err)
+	}
 	if *lockDB != "" {
 		if *demoMode {
 			log.Fatal("--demo and --lock-db cannot be combined: synthetic rows would hide the real Lock badges")

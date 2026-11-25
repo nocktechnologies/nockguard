@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/forward"
 	"github.com/nocktechnologies/nockguard/internal/policy"
@@ -2079,4 +2080,117 @@ func TestMethodRowsExcludedFromToolCounts(t *testing.T) {
 	if evs[1].Severity != "none" || evs[2].Severity != "high" {
 		t.Fatalf("method severity = %+v", evs)
 	}
+}
+
+// pendingAt reads /pending and the /pulse pending count from b.
+func pendingAt(t *testing.T, b *broker) ([]heldCall, int) {
+	t.Helper()
+	h := wallHandler(b, "8787", "")
+	get := func(path string, v any) {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Host = "127.0.0.1:8787"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s = %d %s", path, rec.Code, rec.Body)
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), v); err != nil {
+			t.Fatalf("%s: %v in %s", path, err, rec.Body)
+		}
+	}
+	var held []heldCall
+	get("/pending", &held)
+	var p pulse
+	get("/pulse", &p)
+	return held, p.Pending
+}
+
+func TestPendingShowsCallsHeldForApproval(t *testing.T) {
+	tmp, err := os.MkdirTemp("/tmp", "ngw") // short: unix socket path limit
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(tmp) })
+	dir := filepath.Join(tmp, "approvals")
+	a, err := approval.NewLocalApprover(dir, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	b := newBroker()
+	b.auditPath = filepath.Join(tmp, "audit.jsonl")
+	b.approvalsDir = dir
+
+	if held, n := pendingAt(t, b); len(held) != 0 || n != 0 {
+		t.Fatalf("before any hold: /pending %+v, pulse pending %d", held, n)
+	}
+	done := make(chan approval.Verdict, 1)
+	go func() {
+		done <- a.Ask(approval.Request{Agent: "kit", Tool: "deploy_prod", Reason: "ask rule",
+			Params: []byte(`{"arguments":{"secret":"hunter2"}}`)})
+	}()
+	var held []heldCall
+	var n int
+	for i := 0; i < 200 && len(held) == 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+		held, n = pendingAt(t, b)
+	}
+	if len(held) != 1 || n != 1 || held[0].Agent != "kit" || held[0].Tool != "deploy_prod" || held[0].AgeSec < 0 {
+		t.Fatalf("held call: /pending %+v, pulse pending %d", held, n)
+	}
+
+	// The Wall shows agent, tool and wait time only: no hold id, reason or arguments.
+	req := httptest.NewRequest(http.MethodGet, "/pending", nil)
+	req.Host = "127.0.0.1:8787"
+	rec := httptest.NewRecorder()
+	wallHandler(b, "8787", "").ServeHTTP(rec, req)
+	for _, leak := range []string{"ask rule", "hunter2", `"id"`, "reason"} {
+		if strings.Contains(rec.Body.String(), leak) {
+			t.Fatalf("/pending exposes %q: %s", leak, rec.Body)
+		}
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("/pending Cache-Control = %q", rec.Header().Get("Cache-Control"))
+	}
+
+	ids, err := approval.ListPending(dir)
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("ListPending = %+v, %v", ids, err)
+	}
+	if err := approval.Decide(dir, ids[0].ID, false); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if held, n := pendingAt(t, b); len(held) != 0 || n != 0 {
+		t.Fatalf("after resolve: /pending %+v, pulse pending %d", held, n)
+	}
+
+	// Negative controls: demo mode and an approvals dir no proxy ever made read as none held.
+	go func() {
+		done <- a.Ask(approval.Request{Agent: "kit", Tool: "deploy_prod"})
+	}()
+	for i := 0; i < 200; i++ {
+		if h, _ := approval.ListPending(dir); len(h) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	b.demo = true
+	if held, n := pendingAt(t, b); len(held) != 0 || n != 0 {
+		t.Fatalf("demo: /pending %+v, pulse pending %d", held, n)
+	}
+	b.demo = false
+	b.approvalsDir = filepath.Join(tmp, "never-made")
+	if held, n := pendingAt(t, b); len(held) != 0 || n != 0 {
+		t.Fatalf("absent dir: /pending %+v, pulse pending %d", held, n)
+	}
+	b.approvalsDir = dir
+	if held, n := pendingAt(t, b); len(held) != 1 || n != 1 {
+		t.Fatalf("real dir after controls: /pending %+v, pulse pending %d", held, n)
+	}
+	h, _ := approval.ListPending(dir)
+	if err := approval.Decide(dir, h[0].ID, false); err != nil {
+		t.Fatal(err)
+	}
+	<-done
 }

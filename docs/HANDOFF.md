@@ -5,6 +5,15 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## What changed
 
+- 2026-11-25: The Live Wall shows a read-only "Needs you" line for calls held
+  for approval, from `GET /pending` (agent, tool, wait time) polled every 5 s;
+  `/pulse` `pending` is the same count. The Wall calls
+  `approval.ListPending` on `approval.DefaultLocalDir()`, like
+  `nockguard approvals list`. A missing or unprovable approvals directory reads
+  as zero held calls, and `--demo` never reads it. The browser test harness
+  in `cmd/nockguard-wall/index.test.js` gained `replaceChildren`; its `esc`
+  stub does not escape, so HTML escaping is not observable there.
+
 - 2026-11-24: `examples/github-mcp-cursor/` adds the GitHub MCP wrap for
   Cursor. Cursor interpolates `${env:NAME}`, not plain `${NAME}`;
   `policy_test.go` pins that for the token. Approving the server in the

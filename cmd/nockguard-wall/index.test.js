@@ -25,6 +25,7 @@ function wall(contextPayload, mediaQuery, globals = {}) {
       add(option) { this.options.push(option); },
       remove(index) { this.options.splice(index, 1); },
       prepend(child) { this.children.unshift(child); child.parent = this; },
+      replaceChildren(...children) { this.children = children; },
       get childElementCount() { return this.children.length; },
       get lastElementChild() { return this.children.at(-1); },
       removeSelf() { this.parent.children.splice(this.parent.children.indexOf(this), 1); },
@@ -780,4 +781,34 @@ test('a chain that turns intact again re-arms the break notification', async () 
   await vm.runInContext('checkChain()', w.context);
   assert.equal(env.shown.length, 2);
   assert.equal(env.shown[1].body, 'Audit trail broken at entry 4: the record may have been altered.');
+});
+
+test('Needs you lists each held call and hides at zero', async () => {
+  let held = [{ agent: 'kit', tool: 'deploy_prod', age_s: 42 }, { agent: 'coder', tool: 'refund', age_s: 125 }];
+  const w = wall({ demo: false });
+  await tick();
+  w.context.fetch = url => Promise.resolve({ ok: true, json: () => Promise.resolve(url === '/pending' ? held : null) });
+  const line = w.elements.get('needs-you');
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(line.hidden, false);
+  assert.equal(w.elements.get('needs-you-head').textContent, 'Needs you: 2 calls waiting for approval');
+  const rows = w.elements.get('needs-you-rows').children.map(r => r.innerHTML);
+  assert.equal(rows.length, 2);
+  assert.match(rows[0], /kit<\/span>.*deploy_prod<\/span>.*waiting 42s/);
+  assert.match(rows[1], /coder<\/span>.*refund<\/span>.*waiting 2m 5s/);
+  assert.match(PAGE, /approve or deny with: <code>nockguard approvals<\/code>/);
+  assert.doesNotMatch(PAGE.match(/<div id="needs-you"[\s\S]*?<\/div>\s*<\/div>/)[0], /<button/);
+  held = [{ agent: 'kit', tool: 'deploy_prod', age_s: 1 }];
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(w.elements.get('needs-you-head').textContent, 'Needs you: 1 call waiting for approval');
+  held = [];
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(line.hidden, true);
+  assert.equal(w.elements.get('needs-you-rows').children.length, 0);
+  // A failed poll leaves the last answer in place rather than claiming zero.
+  held = [{ agent: 'kit', tool: 'deploy_prod', age_s: 3 }];
+  await vm.runInContext('checkPending()', w.context);
+  w.context.fetch = () => Promise.resolve({ ok: false });
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(line.hidden, false);
 });

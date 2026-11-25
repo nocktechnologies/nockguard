@@ -97,6 +97,15 @@
   .pagent .pa-count { color:var(--dim); margin-left:6px; }
   .dimquiet { color:var(--dim); }
 
+  /* "Needs you": calls a proxy is holding for an operator decision. Read-only. */
+  .needs-you { padding:10px 22px; border-bottom:1px solid var(--line); border-left:4px solid var(--ratelimit);
+               background:var(--panel); font-size:13px; }
+  .needs-you .ny-head { color:var(--ratelimit); font-weight:700; }
+  .needs-you .ny-hint { color:var(--dim); margin-left:10px; font-size:11px; }
+  .needs-you .ny-row { display:flex; gap:14px; margin-top:6px; }
+  .needs-you .ny-agent { color:var(--accent); font-weight:600; }
+  .needs-you .ny-age { color:var(--dim); margin-left:auto; }
+
   #feed { flex:1; overflow-x:hidden; overflow-y:auto; padding:10px 14px; display:flex; flex-direction:column; gap:6px; }
   #feed .row.fout { display:none; }
   .row {
@@ -346,6 +355,10 @@
     </div>
   </div>
   <div id="sessions" hidden title="signed-proof verdict per session: both the NockLock and the NockGuard chain must verify"></div>
+  <div id="needs-you" class="needs-you" role="status" aria-live="polite" hidden>
+    <span class="ny-head" id="needs-you-head"></span><span class="ny-hint">approve or deny with: <code>nockguard approvals</code></span>
+    <div id="needs-you-rows"></div>
+  </div>
   <div class="empty nomatch" id="nomatch" role="status" hidden>No rows match these filters. Press ✕ CLEAR to show every row.</div>
   <div id="feed"><div class="empty" id="empty"><span id="empty-head">No decisions in this view yet.</span><span id="empty-trail" hidden><br>Watching <code id="empty-trail-path"></code></span><br>Run <code>nockguard wall --demo</code> for sample traffic,<br>or run <code id="empty-proxy">nockguard proxy --upstream &lt;command&gt; --agent &lt;name&gt;</code> with auditing enabled<span id="empty-wall">,<br>then watch its trail with <code id="empty-wall-cmd">nockguard wall --agent &lt;name&gt;</code></span>.</div></div>
   <footer>
@@ -881,6 +894,34 @@
   }
   checkSessions();
   setInterval(checkSessions, 5000);
+
+  // --- "Needs you": calls held for approval, from the same listing as
+  // `nockguard approvals list`. Agent, tool and wait time only; no buttons. ---
+  const needsYou = document.getElementById('needs-you');
+  function waited(s) {
+    s = Math.max(0, Math.floor(Number(s) || 0));
+    return s < 60 ? s + 's' : s < 3600 ? Math.floor(s / 60) + 'm ' + (s % 60) + 's'
+      : Math.floor(s / 3600) + 'h ' + Math.floor(s % 3600 / 60) + 'm';
+  }
+  async function checkPending() {
+    try {
+      const r = await fetch('/pending', { cache: 'no-store' });
+      if (!r.ok) return;
+      const held = (await r.json()) || [];
+      needsYou.hidden = held.length === 0;
+      document.getElementById('needs-you-head').textContent =
+        'Needs you: ' + held.length + (held.length === 1 ? ' call' : ' calls') + ' waiting for approval';
+      document.getElementById('needs-you-rows').replaceChildren(...held.map(h => {
+        const el = document.createElement('div');
+        el.className = 'ny-row';
+        el.innerHTML = '<span class="ny-agent">' + esc(h.agent) + '</span><span class="ny-tool">' + esc(h.tool) +
+          '</span><span class="ny-age">waiting ' + waited(h.age_s) + '</span>';
+        return el;
+      }));
+    } catch (e) { /* transient fetch failure: leave the line as-is */ }
+  }
+  checkPending();
+  setInterval(checkPending, 5000);
   // Re-apply filters every 30s to age out rows that pass the time window
   setInterval(() => {
     if (fTimerange.value) applyFilters();
