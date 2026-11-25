@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2150,16 +2151,22 @@ func TestPendingShowsCallsHeldForApproval(t *testing.T) {
 	b.approvalsDir = dir
 	b.heldTTL = 0 // every read lists afresh; TestHeldCallsShareOneListing covers the cache
 
-	// pending returns /pending and the /pulse pending count.
+	// pending returns /pending and then the /pulse pending count, which reads
+	// the listing /pending just made; it waits out the refresh /pulse starts
+	// before the test changes the broker.
 	pending := func() ([]heldCall, int) {
 		var held []heldCall
 		var p pulse
-		for path, v := range map[string]any{"/pending": &held, "/pulse": &p} {
-			rec := serveWall(t, b, path)
-			if err := json.Unmarshal(rec.Body.Bytes(), v); err != nil {
-				t.Fatalf("%s: %v in %s", path, err, rec.Body)
+		for _, c := range []struct {
+			path string
+			v    any
+		}{{"/pending", &held}, {"/pulse", &p}} {
+			rec := serveWall(t, b, c.path)
+			if err := json.Unmarshal(rec.Body.Bytes(), c.v); err != nil {
+				t.Fatalf("%s: %v in %s", c.path, err, rec.Body)
 			}
 		}
+		waitHeldIdle(b)
 		return held, p.Pending
 	}
 	wantHeld := func(label string, want int) {
@@ -2207,6 +2214,7 @@ func TestPendingShowsCallsHeldForApproval(t *testing.T) {
 	if err := json.Unmarshal(serveWall(t, b, "/pulse").Body.Bytes(), &p); err != nil || p.Pending != 0 || p.PendingError == "" {
 		t.Fatalf("unprovable dir: pulse = %+v, %v", p, err)
 	}
+	waitHeldIdle(b)
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -2241,13 +2249,109 @@ func TestHeldCallsShareOneListing(t *testing.T) {
 	if n := pulsePending(); n != 1 {
 		t.Fatalf("/pulse within TTL = %d, want the shared listing's 1", n)
 	}
-	// Negative control: once the TTL has passed the next call lists afresh.
+	// Negative control: once the TTL has passed /pending lists afresh, and
+	// /pulse inside the new TTL answers from that listing.
 	b.hmu.Lock()
 	b.heldAt = time.Now().Add(-2 * time.Minute)
 	b.hmu.Unlock()
+	if err := json.Unmarshal(serveWall(t, b, "/pending").Body.Bytes(), &held); err != nil || len(held) != 0 {
+		t.Fatalf("/pending after TTL = %+v, %v; want 0 held", held, err)
+	}
 	if n := pulsePending(); n != 0 {
 		t.Fatalf("/pulse after TTL = %d, want 0", n)
 	}
+}
+
+// waitHeldIdle waits for an approvals refresh started by /pulse to finish.
+func waitHeldIdle(b *broker) {
+	b.hmu.Lock()
+	busy := b.heldBusy
+	b.hmu.Unlock()
+	if busy != nil {
+		<-busy
+	}
+}
+
+// TestPulseNeverWaitsOnApprovalsDial: while a listing is stuck dialing a
+// socket that accepts but never answers, /pulse returns at once with the last
+// result and starts no second dial; the /pending caller that started the
+// listing is the one that waits.
+func TestPulseNeverWaitsOnApprovalsDial(t *testing.T) {
+	tmp, err := os.MkdirTemp("/tmp", "ngw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(tmp) })
+	dir := filepath.Join(tmp, "approvals")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(dir, "1-0123456789abcdef.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err := os.Chmod(sock, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan net.Conn, 4)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- c // held open, never answered: the dial stalls
+		}
+	}()
+
+	b := newBroker()
+	b.auditPath = filepath.Join(tmp, "audit.jsonl")
+	b.approvalsDir = dir
+	b.heldTTL = 0 // every call is past the TTL, so /pulse would dial if it could
+	pendingDone := make(chan struct{})
+	go func() {
+		defer close(pendingDone)
+		serveWall(t, b, "/pending")
+	}()
+	var stalled net.Conn
+	select {
+	case stalled = <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("/pending never dialed the approvals socket")
+	}
+
+	start := time.Now()
+	var p pulse
+	if err := json.Unmarshal(serveWall(t, b, "/pulse").Body.Bytes(), &p); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("/pulse took %v during a stalled dial", d)
+	}
+	if p.PendingError == "" {
+		t.Fatalf("/pulse before any listing = %+v, want pendingError (unknown, not 0)", p)
+	}
+	// Negative control: the dial really was in progress when /pulse answered.
+	select {
+	case <-pendingDone:
+		t.Fatal("/pending returned before the stalled dial was released; the test proves nothing")
+	default:
+	}
+	select {
+	case c := <-accepted:
+		c.Close()
+		t.Fatal("/pulse started a second dial during the refresh")
+	case <-time.After(100 * time.Millisecond):
+	}
+	stalled.Close()
+	select {
+	case <-pendingDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("/pending never returned after the dial was released")
+	}
+	waitHeldIdle(b)
 }
 
 // TestPendingUnknownWhenApprovalsDirUnresolved: when DefaultLocalDir fails (no
@@ -2270,7 +2374,9 @@ func TestPendingUnknownWhenApprovalsDirUnresolved(t *testing.T) {
 	}
 
 	// Negative control: the same broker with a resolved directory reads as zero, no error.
+	waitHeldIdle(b)
 	b.approvalsDir, b.approvalsDirErr = filepath.Join(t.TempDir(), "never-made"), nil
+	serveWall(t, b, "/pending")
 	var ok pulse
 	if err := json.Unmarshal(serveWall(t, b, "/pulse").Body.Bytes(), &ok); err != nil || ok.PendingError != "" {
 		t.Fatalf("resolved dir: pulse = %+v, %v", ok, err)

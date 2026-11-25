@@ -23,7 +23,9 @@ All notable changes to NockGuard are documented here.
   unknown state changes. A `/pending` body that is not a JSON list reads as
   unknown. `/pulse` and `/pending` share one approvals listing for 2 seconds,
   so open pages, scripts and monitors polling together dial each approval
-  socket once between them.
+  socket once between them; `/pulse` answers with the last listing at once
+  while a refresh dials. The announcement comes from a status node present
+  from page load, so the first held call is read out.
 
 ## [0.12.2] - 2026-11-20
 

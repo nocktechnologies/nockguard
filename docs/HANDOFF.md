@@ -21,7 +21,10 @@ and what is still open, and remove anything no longer true. Keep it short.
   in `cmd/nockguard-wall/index.test.js` gained `replaceChildren`; its `esc`
   stub does not escape, so a source assertion there pins `esc()` on the agent
   and tool. `ListPending` dials each socket in turn (2 s connect, 10 s
-  exchange), so an unresponsive proxy slows `/pending` and `/pulse`;
+  exchange), so an unresponsive proxy slows `/pending`; the dial runs outside
+  `hmu`, one refresh at a time, and `/pulse` answers with the last listing
+  without waiting. Before the first listing it sets `pendingError`. The live
+  region is the always-present `#needs-you-status` node, empty at zero.
   `nockguard approvals prune` clears dead sockets.
 
 - 2026-11-24: `examples/github-mcp-cursor/` adds the GitHub MCP wrap for

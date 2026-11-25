@@ -839,11 +839,10 @@ test('Needs you announces only the head line, and only when it changes', async (
   const w = wall({ demo: false });
   await tick();
   w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(held) });
-  // The live region is the head line alone; the ticking rows sit outside it.
-  const box = PAGE.match(/<div id="needs-you"[^>]*>/)[0];
+  // The live region is the status node alone; the box and its ticking rows sit outside it.
+  const box = PAGE.match(/<div id="needs-you"[\s\S]*?<\/div>\s*<\/div>/)[0];
   assert.doesNotMatch(box, /aria-live|role="status"/);
-  assert.match(PAGE, /<span class="ny-head" id="needs-you-head" role="status" aria-live="polite">/);
-  const head = w.elements.get('needs-you-head');
+  const head = w.elements.get('needs-you-status');
   let writes = 0;
   let text = '';
   Object.defineProperty(head, 'textContent', { get: () => text, set: v => { writes++; text = v; } });
@@ -865,6 +864,36 @@ test('Needs you announces only the head line, and only when it changes', async (
   await vm.runInContext('checkPending()', w.context);
   assert.equal(writes, 3);
   assert.equal(text, 'Needs you: held calls could not be read');
+  // Back to zero clears the status without announcing a count.
+  w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(writes, 4);
+  assert.equal(text, '');
+});
+
+test('Needs you status node is present and shown before the first held call', async () => {
+  // In the page markup: outside the hidden box, never hidden, a polite live region.
+  const tag = PAGE.match(/<span id="needs-you-status"[^>]*>/)?.[0];
+  assert.ok(tag, 'status node missing from the page');
+  assert.match(tag, /role="status"/);
+  assert.match(tag, /aria-live="polite"/);
+  assert.doesNotMatch(tag, /\bhidden\b|aria-hidden/);
+  assert.ok(PAGE.indexOf(tag) < PAGE.indexOf('<div id="needs-you"'), 'status node sits inside the hidden box');
+  assert.match(PAGE, /\.sr-only\s*\{[^}]*position:absolute[^}]*\}/);
+  assert.doesNotMatch(PAGE.match(/\.sr-only\s*\{[^}]*\}/)[0], /display:\s*none|visibility:\s*hidden/);
+  // At zero the status stays empty; the first held call fills it while the node stays shown.
+  let held = [];
+  const w = wall({ demo: false });
+  await tick();
+  w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(held) });
+  const status = w.elements.get('needs-you-status');
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(status.textContent, '');
+  assert.equal(status.hidden, false);
+  held = [{ agent: 'kit', tool: 'deploy_prod', age_s: 0 }];
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(status.hidden, false);
+  assert.equal(status.textContent, 'Needs you: 1 call waiting for approval');
 });
 
 test('Needs you treats a non-JSON or non-list /pending body as unknown, never zero', async () => {

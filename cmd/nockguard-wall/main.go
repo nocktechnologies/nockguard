@@ -142,14 +142,15 @@ type broker struct {
 	approvalsDirErr error
 	// heldTTL is how long one approvals listing answers every /pulse and
 	// /pending caller (open pages, scripts, monitors), so callers inside it
-	// dial each approval socket once between them. hmu guards
-	// the cached listing and is held across the dial so concurrent callers
-	// share it. Zero lists on every call.
-	heldTTL time.Duration
-	hmu     sync.Mutex
-	heldAt  time.Time
-	held    []heldCall
-	heldErr error
+	// dial each approval socket once between them. hmu guards the cached
+	// listing and is never held across a dial; heldBusy is non-nil while the
+	// one refresh runs and is closed when it ends. Zero lists on every call.
+	heldTTL  time.Duration
+	hmu      sync.Mutex
+	heldAt   time.Time
+	held     []heldCall
+	heldErr  error
+	heldBusy chan struct{}
 
 	// Test seams for mutating the live files at each capture boundary.
 	// Production leaves both nil.
@@ -163,6 +164,7 @@ func newBroker() *broker {
 		clients:          make(map[chan event]struct{}),
 		exportTrailLimit: maxExportTrailBytes,
 		heldTTL:          2 * time.Second, // under the page's 5 s /pending poll
+		heldErr:          errors.New("approvals not listed yet"),
 	}
 }
 
@@ -558,7 +560,7 @@ func (b *broker) handlePulse(w http.ResponseWriter, r *http.Request) {
 	since := parseTimeFilter(q.Get("since"))
 	until := parseTimeFilter(q.Get("until"))
 	p := computePulse(b.windowEvents(), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
-	if held, err := b.heldCalls(); err != nil {
+	if held, err := b.heldCalls(false); err != nil {
 		p.PendingError = err.Error()
 	} else {
 		p.Pending = len(held)
@@ -575,16 +577,41 @@ type heldCall struct {
 	AgeSec int64  `json:"age_s"`
 }
 
-// heldCalls returns listHeldCalls, reusing one listing (or its error) for
-// heldTTL so /pulse and /pending callers inside it share one dial.
-func (b *broker) heldCalls() ([]heldCall, error) {
+// heldCalls returns the last listHeldCalls result (or its error), shared by
+// every /pulse and /pending caller for heldTTL. Past the TTL a caller starts
+// the one refresh unless it is already running. Without wait (/pulse) it
+// returns the last result at once and never blocks on a dial; with wait
+// (/pending) it waits for a refresh it started itself.
+func (b *broker) heldCalls(wait bool) ([]heldCall, error) {
 	b.hmu.Lock()
 	defer b.hmu.Unlock()
-	if time.Since(b.heldAt) >= b.heldTTL {
-		b.held, b.heldErr = b.listHeldCalls()
-		b.heldAt = time.Now()
+	for time.Since(b.heldAt) >= b.heldTTL {
+		busy, own := b.heldBusy, b.heldBusy == nil
+		if own {
+			busy = make(chan struct{})
+			b.heldBusy = busy
+			go b.refreshHeld(busy)
+		}
+		if !wait {
+			break
+		}
+		b.hmu.Unlock()
+		<-busy
+		b.hmu.Lock()
+		if own {
+			break
+		}
 	}
 	return b.held, b.heldErr
+}
+
+// refreshHeld lists the held calls outside hmu, stores the result and closes done.
+func (b *broker) refreshHeld(done chan struct{}) {
+	held, err := b.listHeldCalls()
+	b.hmu.Lock()
+	b.held, b.heldErr, b.heldAt, b.heldBusy = held, err, time.Now(), nil
+	b.hmu.Unlock()
+	close(done)
 }
 
 // listHeldCalls lists the calls every live local-approver proxy is holding, oldest
@@ -627,7 +654,7 @@ func (b *broker) useLocalApprovals() {
 // or 503 when the approvals directory cannot be read.
 func (b *broker) handlePending(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	held, err := b.heldCalls()
+	held, err := b.heldCalls(true)
 	if err != nil {
 		http.Error(w, "approvals: "+err.Error(), http.StatusServiceUnavailable)
 		return
