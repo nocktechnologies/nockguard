@@ -37,7 +37,8 @@ its local time. It refreshes every 30 seconds and includes decisions hidden by
 the current filters. Before any decision it reads "none yet"; demo data reads
 "synthetic (demo)".
 
-When a proxy holds a call for approval, a "Needs you" line above the feed
+When a proxy running the local approver (`NOCKGUARD_APPROVER=local`) holds a
+call for approval, a "Needs you" line above the feed
 counts the held calls and lists each one's agent, tool and wait time, with the
 hint to approve or deny with `nockguard approvals`. The line is read-only and
 hidden when nothing is held. It reads the same local approver listing as
@@ -45,6 +46,9 @@ hidden when nothing is held. It reads the same local approver listing as
 (`[{"agent","tool","age_s"}]`); `/pulse` carries the count as `pending`. Held
 calls are live state, so the filters do not apply to them. An approvals
 directory no proxy has created reads as none held, and `--demo` shows none.
+A directory that fails the owner or mode check returns 503 from `/pending`,
+sets `pendingError` on `/pulse`, and the line reads "held calls could not be
+read". The Wall must run as the same user as the proxies to see their holds.
 Source: `handlePending` in `cmd/nockguard-wall/main.go`,
 `internal/approval/local.go`.
 

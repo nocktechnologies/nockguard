@@ -904,21 +904,26 @@
       : Math.floor(s / 3600) + 'h ' + Math.floor(s % 3600 / 60) + 'm';
   }
   async function checkPending() {
-    try {
-      const r = await fetch('/pending', { cache: 'no-store' });
-      if (!r.ok) return;
-      const held = await r.json();
-      needsYou.hidden = held.length === 0;
-      document.getElementById('needs-you-head').textContent =
-        'Needs you: ' + held.length + (held.length === 1 ? ' call' : ' calls') + ' waiting for approval';
-      document.getElementById('needs-you-rows').replaceChildren(...held.map(h => {
-        const el = document.createElement('div');
-        el.className = 'ny-row';
-        el.innerHTML = '<span class="ny-agent">' + esc(h.agent) + '</span><span class="ny-tool">' + esc(h.tool) +
-          '</span><span class="ny-age">waiting ' + waited(h.age_s) + '</span>';
-        return el;
-      }));
-    } catch (e) { /* transient fetch failure: leave the line as-is */ }
+    const head = document.getElementById('needs-you-head');
+    const rows = document.getElementById('needs-you-rows');
+    let r;
+    try { r = await fetch('/pending', { cache: 'no-store' }); } catch (e) { return; } // transient: keep the line as-is
+    if (!r.ok) { // the approvals directory could not be read: unknown, never zero
+      needsYou.hidden = false;
+      head.textContent = 'Needs you: held calls could not be read';
+      rows.replaceChildren();
+      return;
+    }
+    const held = await r.json();
+    needsYou.hidden = held.length === 0;
+    head.textContent = 'Needs you: ' + held.length + (held.length === 1 ? ' call' : ' calls') + ' waiting for approval';
+    rows.replaceChildren(...held.map(h => {
+      const el = document.createElement('div');
+      el.className = 'ny-row';
+      el.innerHTML = '<span class="ny-agent">' + esc(h.agent) + '</span><span class="ny-tool">' + esc(h.tool) +
+        '</span><span class="ny-age">waiting ' + waited(h.age_s) + '</span>';
+      return el;
+    }));
   }
   checkPending();
   setInterval(checkPending, 5000);

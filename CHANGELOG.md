@@ -9,9 +9,10 @@ All notable changes to NockGuard are documented here.
 - `examples/github-mcp-cursor/`: a worked Cursor setup for the GitHub MCP
   server, with an `mcp.json` entry, a `policy.yaml` that denies repository
   create, fork and delete, and a policy test.
-- Live Wall: a read-only "Needs you" line above the feed counts the calls held
-  for approval and lists each one's agent, tool and wait time, with the hint
-  to approve or deny with `nockguard approvals`; it is hidden at zero. The
+- Live Wall: a read-only "Needs you" line above the feed counts the calls the
+  local approver (`NOCKGUARD_APPROVER=local`) is holding and lists each one's
+  agent, tool and wait time, with the hint to approve or deny with
+  `nockguard approvals`; it is hidden at zero. The
   Wall reads the same listing as `nockguard approvals list` from the new
   `GET /pending` endpoint, and `/pulse` now fills `pending` with the count.
 

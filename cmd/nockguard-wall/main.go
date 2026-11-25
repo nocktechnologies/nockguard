@@ -17,9 +17,11 @@ import (
 	"embed"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"math/rand"
 	"net"
@@ -313,6 +315,8 @@ type pulse struct {
 	High      int          `json:"high"`
 	Low       int          `json:"low"`
 	TopAgents []agentCount `json:"topAgents"`
+	// PendingError says why Pending could not be read; Pending is then 0 and unknown.
+	PendingError string `json:"pendingError,omitempty"`
 }
 
 type agentCount struct {
@@ -540,7 +544,11 @@ func (b *broker) handlePulse(w http.ResponseWriter, r *http.Request) {
 	since := parseTimeFilter(q.Get("since"))
 	until := parseTimeFilter(q.Get("until"))
 	p := computePulse(b.windowEvents(), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
-	p.Pending = len(b.heldCalls())
+	if held, err := b.heldCalls(); err != nil {
+		p.PendingError = err.Error()
+	} else {
+		p.Pending = len(held)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(p)
 }
@@ -553,29 +561,40 @@ type heldCall struct {
 	AgeSec int64  `json:"age_s"`
 }
 
-// heldCalls lists the calls every live proxy is holding for approval, oldest
-// first, via the same approval.ListPending call `nockguard approvals list` makes.
-// An approvals directory that is absent or unreadable reads as none held.
-func (b *broker) heldCalls() []heldCall {
+// heldCalls lists the calls every live local-approver proxy is holding, oldest
+// first, via the same approval.ListPending call `nockguard approvals list`
+// makes. An approvals directory no proxy has created yet means none held; any
+// other failure (for example a directory with the wrong owner or mode) is an
+// error, never a quiet zero.
+func (b *broker) heldCalls() ([]heldCall, error) {
 	if b.approvalsDir == "" {
-		return []heldCall{}
+		return []heldCall{}, nil
 	}
 	pending, err := approval.ListPending(b.approvalsDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return []heldCall{}, nil
+	}
 	if err != nil {
-		return []heldCall{}
+		return nil, err
 	}
 	held := make([]heldCall, len(pending))
 	for i, p := range pending {
 		held[i] = heldCall{Agent: p.Agent, Tool: p.Tool, AgeSec: p.AgeSec}
 	}
-	return held
+	return held, nil
 }
 
-// handlePending serves the calls held for approval as a read-only JSON list.
+// handlePending serves the calls held for approval as a read-only JSON list,
+// or 503 when the approvals directory cannot be read.
 func (b *broker) handlePending(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(b.heldCalls())
+	held, err := b.heldCalls()
+	if err != nil {
+		http.Error(w, "approvals: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(held)
 }
 
 // handleContext names the configured evidence sources and the scope of this

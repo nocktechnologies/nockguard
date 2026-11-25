@@ -805,10 +805,16 @@ test('Needs you lists each held call and hides at zero', async () => {
   await vm.runInContext('checkPending()', w.context);
   assert.equal(line.hidden, true);
   assert.equal(w.elements.get('needs-you-rows').children.length, 0);
-  // A failed poll leaves the last answer in place rather than claiming zero.
-  held = [{ agent: 'kit', tool: 'deploy_prod', age_s: 3 }];
-  await vm.runInContext('checkPending()', w.context);
+  // An unreadable approvals directory shows as unknown, never as zero.
   w.context.fetch = () => Promise.resolve({ ok: false });
   await vm.runInContext('checkPending()', w.context);
   assert.equal(line.hidden, false);
+  assert.equal(w.elements.get('needs-you-head').textContent, 'Needs you: held calls could not be read');
+  // A network blip leaves the last answer in place.
+  w.context.fetch = () => Promise.reject(new Error('offline'));
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(line.hidden, false);
+  // Agent and tool names come from proxies; the page escapes both.
+  assert.match(PAGE, /esc\(h\.agent\)/);
+  assert.match(PAGE, /esc\(h\.tool\)/);
 });

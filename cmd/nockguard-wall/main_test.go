@@ -2181,5 +2181,25 @@ func TestPendingShowsCallsHeldForApproval(t *testing.T) {
 	wantHeld("absent dir", 0)
 	b.approvalsDir = dir
 	wantHeld("real dir after controls", 1)
+
+	// A directory that fails the approvals ownership/mode check is an error,
+	// not a quiet zero, on both endpoints.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/pending", nil)
+	req.Host = "127.0.0.1:8787"
+	bad := httptest.NewRecorder()
+	wallHandler(b, "8787", "").ServeHTTP(bad, req)
+	if bad.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unprovable dir: /pending = %d %s", bad.Code, bad.Body)
+	}
+	var p pulse
+	if err := json.Unmarshal(serveWall(t, b, "/pulse").Body.Bytes(), &p); err != nil || p.Pending != 0 || p.PendingError == "" {
+		t.Fatalf("unprovable dir: pulse = %+v, %v", p, err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	resolve(h)
 }
