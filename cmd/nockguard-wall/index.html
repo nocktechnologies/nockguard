@@ -359,7 +359,7 @@
   <div id="sessions" hidden title="signed-proof verdict per session: both the NockLock and the NockGuard chain must verify"></div>
   <div id="needs-you" class="needs-you" role="status" aria-live="polite" hidden>
     <span class="ny-head" id="needs-you-head"></span><span class="ny-hint">approve or deny with: <code>nockguard approvals</code></span>
-    <div id="needs-you-rows" tabindex="0" aria-label="calls held for approval"></div>
+    <div id="needs-you-rows" role="region" tabindex="0" aria-label="calls held for approval"></div>
   </div>
   <div class="empty nomatch" id="nomatch" role="status" hidden>No rows match these filters. Press ✕ CLEAR to show every row.</div>
   <div id="feed"><div class="empty" id="empty"><span id="empty-head">No decisions in this view yet.</span><span id="empty-trail" hidden><br>Watching <code id="empty-trail-path"></code></span><br>Run <code>nockguard wall --demo</code> for sample traffic,<br>or run <code id="empty-proxy">nockguard proxy --upstream &lt;command&gt; --agent &lt;name&gt;</code> with auditing enabled<span id="empty-wall">,<br>then watch its trail with <code id="empty-wall-cmd">nockguard wall --agent &lt;name&gt;</code></span>.</div></div>
@@ -905,32 +905,36 @@
     return s < 60 ? s + 's' : s < 3600 ? Math.floor(s / 60) + 'm ' + (s % 60) + 's'
       : Math.floor(s / 3600) + 'h ' + Math.floor(s % 3600 / 60) + 'm';
   }
-  // Polls can overlap on a slow server; only the newest request may draw.
-  let pendingSeq = 0;
+  // One request at a time: a tick that finds the last one still running skips,
+  // so a slow server never has requests pile up and every answer can draw.
+  let pendingBusy = false;
   async function checkPending() {
-    const seq = ++pendingSeq;
-    const head = document.getElementById('needs-you-head');
-    const rows = document.getElementById('needs-you-rows');
-    let r;
-    try { r = await fetch('/pending', { cache: 'no-store' }); } catch (e) { return; } // transient: keep the line as-is
-    if (seq !== pendingSeq) return;
-    if (!r.ok) { // the approvals directory could not be read: unknown, never zero
-      needsYou.hidden = false;
-      head.textContent = 'Needs you: held calls could not be read';
-      rows.replaceChildren();
-      return;
+    if (pendingBusy) return;
+    pendingBusy = true;
+    try {
+      const head = document.getElementById('needs-you-head');
+      const rows = document.getElementById('needs-you-rows');
+      let r;
+      try { r = await fetch('/pending', { cache: 'no-store' }); } catch (e) { return; } // transient: keep the line as-is
+      if (!r.ok) { // the approvals directory could not be read: unknown, never zero
+        needsYou.hidden = false;
+        head.textContent = 'Needs you: held calls could not be read';
+        rows.replaceChildren();
+        return;
+      }
+      const held = await r.json();
+      needsYou.hidden = held.length === 0;
+      head.textContent = 'Needs you: ' + held.length + (held.length === 1 ? ' call' : ' calls') + ' waiting for approval';
+      rows.replaceChildren(...held.map(h => {
+        const el = document.createElement('div');
+        el.className = 'ny-row';
+        el.innerHTML = '<span class="ny-agent">' + esc(h.agent) + '</span><span class="ny-tool">' + esc(h.tool) +
+          '</span><span class="ny-age">waiting ' + waited(h.age_s) + '</span>';
+        return el;
+      }));
+    } finally {
+      pendingBusy = false;
     }
-    const held = await r.json();
-    if (seq !== pendingSeq) return;
-    needsYou.hidden = held.length === 0;
-    head.textContent = 'Needs you: ' + held.length + (held.length === 1 ? ' call' : ' calls') + ' waiting for approval';
-    rows.replaceChildren(...held.map(h => {
-      const el = document.createElement('div');
-      el.className = 'ny-row';
-      el.innerHTML = '<span class="ny-agent">' + esc(h.agent) + '</span><span class="ny-tool">' + esc(h.tool) +
-        '</span><span class="ny-age">waiting ' + waited(h.age_s) + '</span>';
-      return el;
-    }));
   }
   checkPending();
   setInterval(checkPending, 5000);

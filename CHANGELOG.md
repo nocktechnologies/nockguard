@@ -15,6 +15,10 @@ All notable changes to NockGuard are documented here.
   `nockguard approvals`; it is hidden at zero. The
   Wall reads the same listing as `nockguard approvals list` from the new
   `GET /pending` endpoint, and `/pulse` now fills `pending` with the count.
+  An approvals directory that cannot be resolved or read returns 503 from
+  `/pending`, sets `pendingError` on `/pulse`, and the line reads "held calls
+  could not be read". The list shows about six rows and scrolls for the rest,
+  and one poll runs at a time, so an older answer never overwrites a newer one.
 
 ## [0.12.2] - 2026-11-20
 

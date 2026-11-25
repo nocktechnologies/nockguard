@@ -2210,7 +2210,7 @@ func TestPendingUnknownWhenApprovalsDirUnresolved(t *testing.T) {
 	t.Setenv("HOME", "")
 	b := newBroker()
 	b.auditPath = filepath.Join(t.TempDir(), "audit.jsonl")
-	b.approvalsDir, b.approvalsDirErr = approval.DefaultLocalDir() // as main does
+	b.useLocalApprovals()
 	if b.approvalsDirErr == nil {
 		t.Fatal("DefaultLocalDir with no HOME resolved; the control proves nothing")
 	}

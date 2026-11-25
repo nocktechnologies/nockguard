@@ -49,8 +49,8 @@ directory no proxy has created reads as none held, and `--demo` shows none.
 A directory that fails the owner or mode check, or one the Wall cannot resolve
 (no home directory), returns 503 from `/pending`, sets `pendingError` on
 `/pulse`, and the line reads "held calls could not be read". The list shows
-about six rows and scrolls for the rest, and a slower, older poll never
-overwrites a newer answer. The Wall must run as the same user as the proxies to see their holds.
+about six rows and scrolls for the rest. One poll runs at a time, so an older
+answer never overwrites a newer one. The Wall must run as the same user as the proxies to see their holds.
 Source: `handlePending` in `cmd/nockguard-wall/main.go`,
 `internal/approval/local.go`.
 

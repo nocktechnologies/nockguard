@@ -590,6 +590,16 @@ func (b *broker) heldCalls() ([]heldCall, error) {
 	return held, nil
 }
 
+// useLocalApprovals points the Wall at the local approver's default directory,
+// the one `nockguard approvals list` reads. A directory that cannot be resolved
+// is kept as approvalsDirErr, so held calls read as unknown, never zero.
+func (b *broker) useLocalApprovals() {
+	b.approvalsDir, b.approvalsDirErr = approval.DefaultLocalDir()
+	if b.approvalsDirErr != nil {
+		log.Printf("warning: approvals directory: %v (the wall shows held calls as unknown)", b.approvalsDirErr)
+	}
+}
+
 // handlePending serves the calls held for approval as a read-only JSON list,
 // or 503 when the approvals directory cannot be read.
 func (b *broker) handlePending(w http.ResponseWriter, r *http.Request) {
@@ -1182,10 +1192,7 @@ func main() {
 	}
 	b.demo = *demoMode
 	if !*demoMode { // a synthetic stream never mixes in real held calls
-		b.approvalsDir, b.approvalsDirErr = approval.DefaultLocalDir()
-		if b.approvalsDirErr != nil {
-			log.Printf("warning: approvals directory: %v (the wall shows held calls as unknown)", b.approvalsDirErr)
-		}
+		b.useLocalApprovals()
 	}
 	if *lockDB != "" {
 		if *demoMode {

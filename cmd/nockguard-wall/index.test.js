@@ -830,32 +830,44 @@ test('Needs you renders every held call and caps the box with a scroll', async (
   assert.equal(rows.length, 40);
   held.forEach((h, i) => assert.match(rows[i], new RegExp(h.agent + '</span>.*' + h.tool + '</span>')));
   // The list is height-capped and scrolls, and keyboard users can focus it to scroll.
-  assert.match(PAGE, /#needs-you-rows \{ max-height:\d+px; overflow-y:auto; \}/);
-  assert.match(PAGE, /<div id="needs-you-rows" tabindex="0"/);
+  assert.match(PAGE, /#needs-you-rows\s*\{[^}]*max-height:[^;}]+;[^}]*overflow-y:\s*(auto|scroll)/);
+  assert.match(PAGE, /<div id="needs-you-rows" role="region" tabindex="0"/);
 });
 
-test('an older Needs you response cannot overwrite a newer one', async () => {
+test('Needs you polls never overlap, so an older response cannot overwrite a newer one', async () => {
   const w = wall({ demo: false });
   await tick();
   const pending = [];
   w.context.fetch = () => new Promise(resolve => pending.push(resolve));
   const reply = held => ({ ok: true, json: () => Promise.resolve(held) });
-  const older = vm.runInContext('checkPending()', w.context);
-  const newer = vm.runInContext('checkPending()', w.context);
-  pending[1](reply([{ agent: 'kit', tool: 'deploy_prod', age_s: 3 }]));
-  await newer;
+  const head = () => w.elements.get('needs-you-head').textContent;
+  // A tick while a request is in flight makes no second request.
+  const first = vm.runInContext('checkPending()', w.context);
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(pending.length, 1);
   pending[0](reply([{ agent: 'old', tool: 'stale', age_s: 1 }, { agent: 'old', tool: 'stale2', age_s: 1 }]));
-  await older;
-  assert.equal(w.elements.get('needs-you-head').textContent, 'Needs you: 1 call waiting for approval');
+  await first;
+  assert.equal(head(), 'Needs you: 2 calls waiting for approval');
+  // The next tick asks again, and its newer answer is the one shown.
+  const second = vm.runInContext('checkPending()', w.context);
+  assert.equal(pending.length, 2);
+  pending[1](reply([{ agent: 'kit', tool: 'deploy_prod', age_s: 3 }]));
+  await second;
+  assert.equal(head(), 'Needs you: 1 call waiting for approval');
   const rows = w.elements.get('needs-you-rows').children;
   assert.equal(rows.length, 1);
   assert.match(rows[0].innerHTML, /kit<\/span>.*deploy_prod/);
-  // A stale failure cannot overwrite a newer answer either.
-  const a = vm.runInContext('checkPending()', w.context);
-  const b = vm.runInContext('checkPending()', w.context);
-  pending[3](reply([]));
-  await b;
-  pending[2]({ ok: false });
-  await a;
+  // A server slower than the poll still draws every answer it sends.
+  const slow = vm.runInContext('checkPending()', w.context);
+  for (let i = 0; i < 3; i++) await vm.runInContext('checkPending()', w.context); // ticks while slow
+  assert.equal(pending.length, 3);
+  pending[2](reply([]));
+  await slow;
   assert.equal(w.elements.get('needs-you').hidden, true);
+  // A failed request releases the guard too.
+  w.context.fetch = () => Promise.reject(new Error('offline'));
+  await vm.runInContext('checkPending()', w.context);
+  w.context.fetch = () => Promise.resolve(reply([{ agent: 'kit', tool: 'x', age_s: 0 }]));
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(head(), 'Needs you: 1 call waiting for approval');
 });
