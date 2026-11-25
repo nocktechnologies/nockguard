@@ -137,6 +137,9 @@ type broker struct {
 	// approvalsDir is the local approver's socket directory, the same one
 	// `nockguard approvals list` reads. Empty (as under --demo) means no held calls.
 	approvalsDir string
+	// approvalsDirErr is why approvalsDir could not be resolved; held calls
+	// are then unknown, never zero.
+	approvalsDirErr error
 
 	// Test seams for mutating the live files at each capture boundary.
 	// Production leaves both nil.
@@ -564,9 +567,12 @@ type heldCall struct {
 // heldCalls lists the calls every live local-approver proxy is holding, oldest
 // first, via the same approval.ListPending call `nockguard approvals list`
 // makes. An approvals directory no proxy has created yet means none held; any
-// other failure (for example a directory with the wrong owner or mode) is an
-// error, never a quiet zero.
+// other failure (a home directory that cannot be resolved, or a directory with
+// the wrong owner or mode) is an error, never a quiet zero.
 func (b *broker) heldCalls() ([]heldCall, error) {
+	if b.approvalsDirErr != nil {
+		return nil, fmt.Errorf("approvals directory: %w", b.approvalsDirErr)
+	}
 	if b.approvalsDir == "" {
 		return []heldCall{}, nil
 	}
@@ -1176,11 +1182,10 @@ func main() {
 	}
 	b.demo = *demoMode
 	if !*demoMode { // a synthetic stream never mixes in real held calls
-		dir, err := approval.DefaultLocalDir()
-		if err != nil {
-			log.Printf("warning: approvals directory: %v (the wall shows no held calls)", err)
+		b.approvalsDir, b.approvalsDirErr = approval.DefaultLocalDir()
+		if b.approvalsDirErr != nil {
+			log.Printf("warning: approvals directory: %v (the wall shows held calls as unknown)", b.approvalsDirErr)
 		}
-		b.approvalsDir = dir
 	}
 	if *lockDB != "" {
 		if *demoMode {

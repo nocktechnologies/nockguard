@@ -10,8 +10,10 @@ and what is still open, and remove anything no longer true. Keep it short.
   `/pulse` `pending` is the same count. The Wall calls
   `approval.ListPending` on `approval.DefaultLocalDir()`, like
   `nockguard approvals list`. A missing approvals directory reads as zero held
-  calls; one that fails the owner/mode check is a 503 and `pendingError`, never
-  zero. `--demo` leaves the directory unset. Only the local approver's holds
+  calls; one that fails the owner/mode check, or a `DefaultLocalDir` error
+  (kept in `broker.approvalsDirErr`), is a 503 and `pendingError`, never
+  zero. The row list is height-capped and scrolls; `checkPending` keeps a
+  request sequence so a stale response is dropped. `--demo` leaves the directory unset. Only the local approver's holds
   appear. The browser test harness
   in `cmd/nockguard-wall/index.test.js` gained `replaceChildren`; its `esc`
   stub does not escape, so a source assertion there pins `esc()` on the agent

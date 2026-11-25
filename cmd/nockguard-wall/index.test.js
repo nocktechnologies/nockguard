@@ -818,3 +818,44 @@ test('Needs you lists each held call and hides at zero', async () => {
   assert.match(PAGE, /esc\(h\.agent\)/);
   assert.match(PAGE, /esc\(h\.tool\)/);
 });
+
+test('Needs you renders every held call and caps the box with a scroll', async () => {
+  const held = Array.from({ length: 40 }, (_, i) => ({ agent: 'agent' + i, tool: 'tool' + i, age_s: i }));
+  const w = wall({ demo: false });
+  await tick();
+  w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(held) });
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(w.elements.get('needs-you-head').textContent, 'Needs you: 40 calls waiting for approval');
+  const rows = w.elements.get('needs-you-rows').children.map(r => r.innerHTML);
+  assert.equal(rows.length, 40);
+  held.forEach((h, i) => assert.match(rows[i], new RegExp(h.agent + '</span>.*' + h.tool + '</span>')));
+  // The list is height-capped and scrolls, and keyboard users can focus it to scroll.
+  assert.match(PAGE, /#needs-you-rows \{ max-height:\d+px; overflow-y:auto; \}/);
+  assert.match(PAGE, /<div id="needs-you-rows" tabindex="0"/);
+});
+
+test('an older Needs you response cannot overwrite a newer one', async () => {
+  const w = wall({ demo: false });
+  await tick();
+  const pending = [];
+  w.context.fetch = () => new Promise(resolve => pending.push(resolve));
+  const reply = held => ({ ok: true, json: () => Promise.resolve(held) });
+  const older = vm.runInContext('checkPending()', w.context);
+  const newer = vm.runInContext('checkPending()', w.context);
+  pending[1](reply([{ agent: 'kit', tool: 'deploy_prod', age_s: 3 }]));
+  await newer;
+  pending[0](reply([{ agent: 'old', tool: 'stale', age_s: 1 }, { agent: 'old', tool: 'stale2', age_s: 1 }]));
+  await older;
+  assert.equal(w.elements.get('needs-you-head').textContent, 'Needs you: 1 call waiting for approval');
+  const rows = w.elements.get('needs-you-rows').children;
+  assert.equal(rows.length, 1);
+  assert.match(rows[0].innerHTML, /kit<\/span>.*deploy_prod/);
+  // A stale failure cannot overwrite a newer answer either.
+  const a = vm.runInContext('checkPending()', w.context);
+  const b = vm.runInContext('checkPending()', w.context);
+  pending[3](reply([]));
+  await b;
+  pending[2]({ ok: false });
+  await a;
+  assert.equal(w.elements.get('needs-you').hidden, true);
+});

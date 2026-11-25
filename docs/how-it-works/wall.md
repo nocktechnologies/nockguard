@@ -46,9 +46,11 @@ hidden when nothing is held. It reads the same local approver listing as
 (`[{"agent","tool","age_s"}]`); `/pulse` carries the count as `pending`. Held
 calls are live state, so the filters do not apply to them. An approvals
 directory no proxy has created reads as none held, and `--demo` shows none.
-A directory that fails the owner or mode check returns 503 from `/pending`,
-sets `pendingError` on `/pulse`, and the line reads "held calls could not be
-read". The Wall must run as the same user as the proxies to see their holds.
+A directory that fails the owner or mode check, or one the Wall cannot resolve
+(no home directory), returns 503 from `/pending`, sets `pendingError` on
+`/pulse`, and the line reads "held calls could not be read". The list shows
+about six rows and scrolls for the rest, and a slower, older poll never
+overwrites a newer answer. The Wall must run as the same user as the proxies to see their holds.
 Source: `handlePending` in `cmd/nockguard-wall/main.go`,
 `internal/approval/local.go`.
 

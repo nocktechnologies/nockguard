@@ -2203,3 +2203,33 @@ func TestPendingShowsCallsHeldForApproval(t *testing.T) {
 	}
 	resolve(h)
 }
+
+// TestPendingUnknownWhenApprovalsDirUnresolved: when DefaultLocalDir fails (no
+// home directory), /pending and /pulse report an error instead of a quiet 0.
+func TestPendingUnknownWhenApprovalsDirUnresolved(t *testing.T) {
+	t.Setenv("HOME", "")
+	b := newBroker()
+	b.auditPath = filepath.Join(t.TempDir(), "audit.jsonl")
+	b.approvalsDir, b.approvalsDirErr = approval.DefaultLocalDir() // as main does
+	if b.approvalsDirErr == nil {
+		t.Fatal("DefaultLocalDir with no HOME resolved; the control proves nothing")
+	}
+	req := httptest.NewRequest(http.MethodGet, "/pending", nil)
+	req.Host = "127.0.0.1:8787"
+	rec := httptest.NewRecorder()
+	wallHandler(b, "8787", "").ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "approvals directory") {
+		t.Fatalf("/pending = %d %s, want 503 naming the approvals directory", rec.Code, rec.Body)
+	}
+	var p pulse
+	if err := json.Unmarshal(serveWall(t, b, "/pulse").Body.Bytes(), &p); err != nil || p.Pending != 0 || p.PendingError == "" {
+		t.Fatalf("pulse = %+v, %v; want pendingError set", p, err)
+	}
+
+	// Negative control: the same broker with a resolved directory reads as zero, no error.
+	b.approvalsDir, b.approvalsDirErr = filepath.Join(t.TempDir(), "never-made"), nil
+	var ok pulse
+	if err := json.Unmarshal(serveWall(t, b, "/pulse").Body.Bytes(), &ok); err != nil || ok.PendingError != "" {
+		t.Fatalf("resolved dir: pulse = %+v, %v", ok, err)
+	}
+}
