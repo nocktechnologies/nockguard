@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/forward"
 	"github.com/nocktechnologies/nockguard/internal/policy"
@@ -2078,5 +2080,315 @@ func TestMethodRowsExcludedFromToolCounts(t *testing.T) {
 	}
 	if evs[1].Severity != "none" || evs[2].Severity != "high" {
 		t.Fatalf("method severity = %+v", evs)
+	}
+}
+
+// serveWall sends a loopback GET for path through the Wall handler and wants 200.
+func serveWall(t *testing.T, b *broker, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	return serveWallStatus(t, b, path, http.StatusOK)
+}
+
+// serveWallStatus is serveWall for a response status other than 200.
+func serveWallStatus(t *testing.T, b *broker, path string, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Host = "127.0.0.1:8787"
+	rec := httptest.NewRecorder()
+	wallHandler(b, "8787", "").ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("%s = %d %s, want %d", path, rec.Code, rec.Body, want)
+	}
+	return rec
+}
+
+// shortApprovalsDir names an approvals directory under a short /tmp
+// directory (unix socket path limit), removed when the test ends.
+func shortApprovalsDir(t *testing.T) (tmp, dir string) {
+	t.Helper()
+	tmp, err := os.MkdirTemp("/tmp", "ngw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(tmp) })
+	return tmp, filepath.Join(tmp, "approvals")
+}
+
+// localApprovals starts a local approver in a short /tmp directory (unix
+// socket path limit). hold has one call held as kit/deploy_prod and returns it
+// once listed; resolve denies it and waits for the Ask to return.
+func localApprovals(t *testing.T) (tmp, dir string, hold func() approval.Pending, resolve func(approval.Pending)) {
+	t.Helper()
+	tmp, dir = shortApprovalsDir(t)
+	a, err := approval.NewLocalApprover(dir, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	done := make(chan approval.Verdict, 1)
+	hold = func() approval.Pending {
+		t.Helper()
+		go func() {
+			done <- a.Ask(approval.Request{Agent: "kit", Tool: "deploy_prod", Reason: "ask rule",
+				Params: []byte(`{"arguments":{"secret":"hunter2"}}`)})
+		}()
+		for i := 0; i < 200; i++ {
+			if h, _ := approval.ListPending(dir); len(h) == 1 {
+				return h[0]
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("held call never listed")
+		return approval.Pending{}
+	}
+	resolve = func(h approval.Pending) {
+		t.Helper()
+		if err := approval.Decide(dir, h.ID, false); err != nil {
+			t.Fatal(err)
+		}
+		<-done
+	}
+	return tmp, dir, hold, resolve
+}
+
+func TestPendingShowsCallsHeldForApproval(t *testing.T) {
+	tmp, dir, hold, resolve := localApprovals(t)
+	b := newBroker()
+	b.auditPath = filepath.Join(tmp, "audit.jsonl")
+	b.approvalsDir = dir
+	b.heldTTL = 0 // every read lists afresh; TestHeldCallsShareOneListing covers the cache
+
+	// pending returns /pending and then the /pulse pending count, which reads
+	// the listing /pending just made; it waits out the refresh /pulse starts
+	// before the test changes the broker.
+	pending := func() ([]heldCall, int) {
+		var held []heldCall
+		var p pulse
+		for _, c := range []struct {
+			path string
+			v    any
+		}{{"/pending", &held}, {"/pulse", &p}} {
+			rec := serveWall(t, b, c.path)
+			if err := json.Unmarshal(rec.Body.Bytes(), c.v); err != nil {
+				t.Fatalf("%s: %v in %s", c.path, err, rec.Body)
+			}
+		}
+		waitHeldIdle(b)
+		return held, p.Pending
+	}
+	wantHeld := func(label string, want int) {
+		t.Helper()
+		if held, n := pending(); len(held) != want || n != want {
+			t.Fatalf("%s: /pending %+v, pulse pending %d, want %d", label, held, n, want)
+		}
+	}
+	wantHeld("before any hold", 0)
+	h := hold()
+	held, n := pending()
+	if len(held) != 1 || n != 1 || held[0].Agent != "kit" || held[0].Tool != "deploy_prod" || held[0].AgeSec < 0 {
+		t.Fatalf("held call: /pending %+v, pulse pending %d", held, n)
+	}
+	// The Wall shows agent, tool and wait time only: no hold id, reason or arguments.
+	rec := serveWall(t, b, "/pending")
+	for _, leak := range []string{"ask rule", "hunter2", `"id"`, "reason"} {
+		if strings.Contains(rec.Body.String(), leak) {
+			t.Fatalf("/pending exposes %q: %s", leak, rec.Body)
+		}
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("/pending Cache-Control = %q", rec.Header().Get("Cache-Control"))
+	}
+	resolve(h)
+	wantHeld("after resolve", 0)
+
+	// Negative controls: no approvals dir (as under --demo) and one no proxy
+	// ever made read as none held while a call is held.
+	h = hold()
+	b.approvalsDir = ""
+	wantHeld("no approvals dir", 0)
+	b.approvalsDir = filepath.Join(tmp, "never-made")
+	wantHeld("absent dir", 0)
+	b.approvalsDir = dir
+	wantHeld("real dir after controls", 1)
+
+	// A directory that fails the approvals ownership/mode check is an error,
+	// not a quiet zero, on both endpoints.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	serveWallStatus(t, b, "/pending", http.StatusServiceUnavailable)
+	var p pulse
+	if err := json.Unmarshal(serveWall(t, b, "/pulse").Body.Bytes(), &p); err != nil || p.Pending != 0 || p.PendingError == "" {
+		t.Fatalf("unprovable dir: pulse = %+v, %v", p, err)
+	}
+	waitHeldIdle(b)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resolve(h)
+}
+
+// TestHeldCallsShareOneListing: /pending and /pulse within heldTTL share one
+// approvals listing, so a poll tick dials each socket once; after the TTL the
+// next call lists afresh.
+func TestHeldCallsShareOneListing(t *testing.T) {
+	tmp, dir, hold, resolve := localApprovals(t)
+	h := hold()
+
+	b := newBroker()
+	b.auditPath = filepath.Join(tmp, "audit.jsonl")
+	b.approvalsDir = dir
+	b.heldTTL = time.Minute
+	pulsePending := func() int {
+		var p pulse
+		if err := json.Unmarshal(serveWall(t, b, "/pulse").Body.Bytes(), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p.Pending
+	}
+	var held []heldCall
+	if err := json.Unmarshal(serveWall(t, b, "/pending").Body.Bytes(), &held); err != nil || len(held) != 1 {
+		t.Fatalf("/pending = %+v, %v; want 1 held", held, err)
+	}
+	resolve(h)
+	// The hold is gone, but /pulse inside the TTL still answers from the
+	// listing /pending made: it did not dial again.
+	if n := pulsePending(); n != 1 {
+		t.Fatalf("/pulse within TTL = %d, want the shared listing's 1", n)
+	}
+	// Negative control: once the TTL has passed /pending lists afresh, and
+	// /pulse inside the new TTL answers from that listing.
+	b.hmu.Lock()
+	b.heldAt = time.Now().Add(-2 * time.Minute)
+	b.hmu.Unlock()
+	if err := json.Unmarshal(serveWall(t, b, "/pending").Body.Bytes(), &held); err != nil || len(held) != 0 {
+		t.Fatalf("/pending after TTL = %+v, %v; want 0 held", held, err)
+	}
+	if n := pulsePending(); n != 0 {
+		t.Fatalf("/pulse after TTL = %d, want 0", n)
+	}
+}
+
+// waitHeldIdle waits for an approvals refresh started by /pulse to finish.
+func waitHeldIdle(b *broker) {
+	b.hmu.Lock()
+	busy := b.heldBusy
+	b.hmu.Unlock()
+	if busy != nil {
+		<-busy
+	}
+}
+
+// TestPulseNeverWaitsOnApprovalsDial: while a listing is stuck dialing a
+// socket that accepts but never answers, /pulse returns at once with the last
+// result and starts no second dial; the /pending caller that started the
+// listing is the one that waits.
+func TestPulseNeverWaitsOnApprovalsDial(t *testing.T) {
+	tmp, dir := shortApprovalsDir(t)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(dir, "1-0123456789abcdef.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err := os.Chmod(sock, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan net.Conn, 4)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- c // held open, never answered: the dial stalls
+		}
+	}()
+
+	b := newBroker()
+	b.auditPath = filepath.Join(tmp, "audit.jsonl")
+	b.approvalsDir = dir
+	b.heldTTL = 0 // every call is past the TTL, so /pulse would dial if it could
+	// The /pending call runs off the test goroutine, so it reports its status
+	// on a channel instead of calling t.Fatal.
+	pendingDone := make(chan int, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodGet, "/pending", nil)
+		req.Host = "127.0.0.1:8787"
+		rec := httptest.NewRecorder()
+		wallHandler(b, "8787", "").ServeHTTP(rec, req)
+		pendingDone <- rec.Code
+	}()
+	var stalled net.Conn
+	select {
+	case stalled = <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("/pending never dialed the approvals socket")
+	}
+
+	start := time.Now()
+	var p pulse
+	if err := json.Unmarshal(serveWall(t, b, "/pulse").Body.Bytes(), &p); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("/pulse took %v during a stalled dial", d)
+	}
+	if p.PendingError == "" {
+		t.Fatalf("/pulse before any listing = %+v, want pendingError (unknown, not 0)", p)
+	}
+	// Negative control: the dial really was in progress when /pulse answered.
+	select {
+	case <-pendingDone:
+		t.Fatal("/pending returned before the stalled dial was released; the test proves nothing")
+	default:
+	}
+	select {
+	case c := <-accepted:
+		c.Close()
+		t.Fatal("/pulse started a second dial during the refresh")
+	case <-time.After(100 * time.Millisecond):
+	}
+	stalled.Close()
+	select {
+	case code := <-pendingDone:
+		if code != http.StatusOK {
+			t.Fatalf("/pending after the dial was released = %d, want 200", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("/pending never returned after the dial was released")
+	}
+	waitHeldIdle(b)
+}
+
+// TestPendingUnknownWhenApprovalsDirUnresolved: when DefaultLocalDir fails (no
+// home directory), /pending and /pulse report an error instead of a quiet 0.
+func TestPendingUnknownWhenApprovalsDirUnresolved(t *testing.T) {
+	t.Setenv("HOME", "")
+	b := newBroker()
+	b.auditPath = filepath.Join(t.TempDir(), "audit.jsonl")
+	b.heldTTL = 0 // the control below swaps the directory
+	b.useLocalApprovals()
+	if b.approvalsDirErr == nil {
+		t.Fatal("DefaultLocalDir with no HOME resolved; the control proves nothing")
+	}
+	if rec := serveWallStatus(t, b, "/pending", http.StatusServiceUnavailable); !strings.Contains(rec.Body.String(), "approvals directory") {
+		t.Fatalf("/pending body %q does not name the approvals directory", rec.Body)
+	}
+	var p pulse
+	if err := json.Unmarshal(serveWall(t, b, "/pulse").Body.Bytes(), &p); err != nil || p.Pending != 0 || p.PendingError == "" {
+		t.Fatalf("pulse = %+v, %v; want pendingError set", p, err)
+	}
+
+	// Negative control: the same broker with a resolved directory reads as zero, no error.
+	waitHeldIdle(b)
+	b.approvalsDir, b.approvalsDirErr = filepath.Join(t.TempDir(), "never-made"), nil
+	serveWall(t, b, "/pending")
+	var ok pulse
+	if err := json.Unmarshal(serveWall(t, b, "/pulse").Body.Bytes(), &ok); err != nil || ok.PendingError != "" {
+		t.Fatalf("resolved dir: pulse = %+v, %v", ok, err)
 	}
 }

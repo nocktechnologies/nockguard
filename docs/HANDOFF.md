@@ -5,6 +5,28 @@ and what is still open, and remove anything no longer true. Keep it short.
 
 ## What changed
 
+- 2026-11-25: The Live Wall shows a read-only "Needs you" line for calls held
+  for approval, from `GET /pending` (agent, tool, wait time) polled every 5 s;
+  `/pulse` `pending` is the same count. The Wall calls
+  `approval.ListPending` on `approval.DefaultLocalDir()`, like
+  `nockguard approvals list`. A missing approvals directory reads as zero held
+  calls; one that fails the owner/mode check, or a `DefaultLocalDir` error
+  (kept in `broker.approvalsDirErr` by `useLocalApprovals`), is a 503 and
+  `pendingError`, never zero. The row list is height-capped and scrolls;
+  `checkPending` skips a tick while its last request is in flight.
+  `broker.heldCalls` caches one listing for `heldTTL` (2 s) for both
+  endpoints; tests that swap the directory set `heldTTL = 0`. Only the head
+  line is a live region and is rewritten only when its text changes. `--demo` leaves the directory unset. Only the local approver's holds
+  appear. The browser test harness
+  in `cmd/nockguard-wall/index.test.js` gained `replaceChildren`; its `esc`
+  stub does not escape, so a source assertion there pins `esc()` on the agent
+  and tool. `ListPending` dials each socket in turn (2 s connect, 10 s
+  exchange), so an unresponsive proxy slows `/pending`; the dial runs outside
+  `hmu`, one refresh at a time, and `/pulse` answers with the last listing
+  without waiting. Before the first listing it sets `pendingError`. The live
+  region is the always-present `#needs-you-status` node, empty at zero.
+  `nockguard approvals prune` clears dead sockets.
+
 - 2026-11-24: `examples/github-mcp-cursor/` adds the GitHub MCP wrap for
   Cursor. Cursor interpolates `${env:NAME}`, not plain `${NAME}`;
   `policy_test.go` pins that for the token. Approving the server in the

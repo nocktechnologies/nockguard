@@ -17,9 +17,11 @@ import (
 	"embed"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"math/rand"
 	"net"
@@ -34,6 +36,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/nocktechnologies/nockguard/internal/approval"
 	"github.com/nocktechnologies/nockguard/internal/audit"
 	"github.com/nocktechnologies/nockguard/internal/forward"
 	"github.com/nocktechnologies/nockguard/internal/policy"
@@ -131,6 +134,24 @@ type broker struct {
 	builds  int // views built so far (guarded by smu); lets a waiting fresh caller reuse a build that finished while it waited
 	view    *wallView
 
+	// approvalsDir is the local approver's socket directory, the same one
+	// `nockguard approvals list` reads. Empty (as under --demo) means no held calls.
+	approvalsDir string
+	// approvalsDirErr is why approvalsDir could not be resolved; held calls
+	// are then unknown, never zero.
+	approvalsDirErr error
+	// heldTTL is how long one approvals listing answers every /pulse and
+	// /pending caller (open pages, scripts, monitors), so callers inside it
+	// dial each approval socket once between them. hmu guards the cached
+	// listing and is never held across a dial; heldBusy is non-nil while the
+	// one refresh runs and is closed when it ends. Zero lists on every call.
+	heldTTL  time.Duration
+	hmu      sync.Mutex
+	heldAt   time.Time
+	held     []heldCall
+	heldErr  error
+	heldBusy chan struct{}
+
 	// Test seams for mutating the live files at each capture boundary.
 	// Production leaves both nil.
 	afterExportCheckpoint func()
@@ -142,6 +163,8 @@ func newBroker() *broker {
 	return &broker{
 		clients:          make(map[chan event]struct{}),
 		exportTrailLimit: maxExportTrailBytes,
+		heldTTL:          2 * time.Second, // under the page's 5 s /pending poll
+		heldErr:          errors.New("approvals not listed yet"),
 	}
 }
 
@@ -292,7 +315,7 @@ type pulse struct {
 	Blocked     int `json:"blocked"`     // explicit rejections only
 	Other       int `json:"other"`       // unfamiliar decisions
 	Hidden      int `json:"hidden"`      // tools/list hides; discovery filtering, not refused calls
-	Pending     int `json:"pending"`     // held calls (none of the current decisions)
+	Pending     int `json:"pending"`     // calls held for approval right now; live approver state, not filtered with the window
 	RateLimited int `json:"rateLimited"` // rejected by rate or spend limit; subset of Blocked
 	// Sub-counts inside Approved, like RateLimited inside Blocked.
 	Granted    int `json:"granted"`    // approval-granted records
@@ -308,6 +331,8 @@ type pulse struct {
 	High      int          `json:"high"`
 	Low       int          `json:"low"`
 	TopAgents []agentCount `json:"topAgents"`
+	// PendingError says why Pending could not be read; Pending is then 0 and unknown.
+	PendingError string `json:"pendingError,omitempty"`
 }
 
 type agentCount struct {
@@ -535,8 +560,115 @@ func (b *broker) handlePulse(w http.ResponseWriter, r *http.Request) {
 	since := parseTimeFilter(q.Get("since"))
 	until := parseTimeFilter(q.Get("until"))
 	p := computePulse(b.windowEvents(), q.Get("q"), q.Get("decision"), q.Get("severity"), since, until)
+	if held, err := b.heldCalls(false); err != nil {
+		p.PendingError = err.Error()
+	} else {
+		p.Pending = len(held)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(p)
+}
+
+// heldCall is one call held for approval as the Wall shows it: agent, tool and
+// wait time only. The hold id and reason stay with `nockguard approvals`.
+type heldCall struct {
+	Agent  string `json:"agent"`
+	Tool   string `json:"tool"`
+	AgeSec int64  `json:"age_s"`
+}
+
+// heldCalls returns the last listHeldCalls result (or its error), shared by
+// every /pulse and /pending caller for heldTTL. Past the TTL a caller starts
+// the one refresh unless it is already running. Without wait (/pulse) it
+// returns the last result at once and never blocks on a dial; with wait
+// (/pending) it takes the running refresh's result.
+func (b *broker) heldCalls(wait bool) ([]heldCall, error) {
+	b.hmu.Lock()
+	if time.Since(b.heldAt) < b.heldTTL {
+		held, err := b.held, b.heldErr
+		b.hmu.Unlock()
+		return held, err
+	}
+	busy := b.heldBusy
+	if busy == nil {
+		busy = make(chan struct{})
+		b.heldBusy = busy
+		go b.refreshHeld(busy)
+	}
+	b.hmu.Unlock()
+	if wait {
+		<-busy
+	}
+	b.hmu.Lock()
+	defer b.hmu.Unlock()
+	return b.held, b.heldErr
+}
+
+// refreshHeld lists the held calls outside hmu, stores the result and closes
+// done. A panic in the listing is stored as its error, so the Wall keeps
+// running and the next caller past the TTL lists again.
+func (b *broker) refreshHeld(done chan struct{}) {
+	var held []heldCall
+	var err error
+	defer func() {
+		if p := recover(); p != nil {
+			held, err = nil, fmt.Errorf("approvals listing panicked: %v", p)
+		}
+		b.hmu.Lock()
+		b.held, b.heldErr, b.heldAt, b.heldBusy = held, err, time.Now(), nil
+		b.hmu.Unlock()
+		close(done)
+	}()
+	held, err = b.listHeldCalls()
+}
+
+// listHeldCalls lists the calls every live local-approver proxy is holding, oldest
+// first, via the same approval.ListPending call `nockguard approvals list`
+// makes. An approvals directory no proxy has created yet means none held; any
+// other failure (a home directory that cannot be resolved, or a directory with
+// the wrong owner or mode) is an error, never a quiet zero.
+func (b *broker) listHeldCalls() ([]heldCall, error) {
+	if b.approvalsDirErr != nil {
+		return nil, fmt.Errorf("approvals directory: %w", b.approvalsDirErr)
+	}
+	if b.approvalsDir == "" {
+		return []heldCall{}, nil
+	}
+	pending, err := approval.ListPending(b.approvalsDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return []heldCall{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	held := make([]heldCall, len(pending))
+	for i, p := range pending {
+		held[i] = heldCall{Agent: p.Agent, Tool: p.Tool, AgeSec: p.AgeSec}
+	}
+	return held, nil
+}
+
+// useLocalApprovals points the Wall at the local approver's default directory,
+// the one `nockguard approvals list` reads. A directory that cannot be resolved
+// is kept as approvalsDirErr, so held calls read as unknown, never zero.
+func (b *broker) useLocalApprovals() {
+	b.approvalsDir, b.approvalsDirErr = approval.DefaultLocalDir()
+	if b.approvalsDirErr != nil {
+		log.Printf("warning: approvals directory: %v (the wall shows held calls as unknown)", b.approvalsDirErr)
+	}
+}
+
+// handlePending serves the calls held for approval as a read-only JSON list,
+// or 503 when the approvals directory cannot be read.
+func (b *broker) handlePending(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	held, err := b.heldCalls(true)
+	if err != nil {
+		http.Error(w, "approvals: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(held)
 }
 
 // handleContext names the configured evidence sources and the scope of this
@@ -966,6 +1098,7 @@ func wallHandler(b *broker, port, allowHost string) http.Handler {
 	mux.HandleFunc("/export", b.handleExport)
 	mux.HandleFunc("/verify", b.handleVerify)
 	mux.HandleFunc("/sessions", b.handleSessions)
+	mux.HandleFunc("/pending", b.handlePending)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -1116,6 +1249,9 @@ func main() {
 		log.Printf("offline proof signing enabled from %s", *proofKeyEnv)
 	}
 	b.demo = *demoMode
+	if !*demoMode { // a synthetic stream never mixes in real held calls
+		b.useLocalApprovals()
+	}
 	if *lockDB != "" {
 		if *demoMode {
 			log.Fatal("--demo and --lock-db cannot be combined: synthetic rows would hide the real Lock badges")

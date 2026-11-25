@@ -25,6 +25,7 @@ function wall(contextPayload, mediaQuery, globals = {}) {
       add(option) { this.options.push(option); },
       remove(index) { this.options.splice(index, 1); },
       prepend(child) { this.children.unshift(child); child.parent = this; },
+      replaceChildren(...children) { this.children = children; },
       get childElementCount() { return this.children.length; },
       get lastElementChild() { return this.children.at(-1); },
       removeSelf() { this.parent.children.splice(this.parent.children.indexOf(this), 1); },
@@ -780,4 +781,174 @@ test('a chain that turns intact again re-arms the break notification', async () 
   await vm.runInContext('checkChain()', w.context);
   assert.equal(env.shown.length, 2);
   assert.equal(env.shown[1].body, 'Audit trail broken at entry 4: the record may have been altered.');
+});
+
+test('Needs you lists each held call and hides at zero', async () => {
+  let held = [{ agent: 'kit', tool: 'deploy_prod', age_s: 42 }, { agent: 'coder', tool: 'refund', age_s: 125 }];
+  const w = wall({ demo: false });
+  await tick();
+  w.context.fetch = url => Promise.resolve({ ok: true, json: () => Promise.resolve(url === '/pending' ? held : null) });
+  const line = w.elements.get('needs-you');
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(line.hidden, false);
+  assert.equal(w.elements.get('needs-you-head').textContent, 'Needs you: 2 calls waiting for approval');
+  const rows = w.elements.get('needs-you-rows').children.map(r => r.innerHTML);
+  assert.equal(rows.length, 2);
+  assert.match(rows[0], /kit<\/span>.*deploy_prod<\/span>.*waiting 42s/);
+  assert.match(rows[1], /coder<\/span>.*refund<\/span>.*waiting 2m 5s/);
+  assert.match(PAGE, /approve or deny with: <code>nockguard approvals<\/code>/);
+  assert.doesNotMatch(PAGE.match(/<div id="needs-you"[\s\S]*?<\/div>\s*<\/div>/)[0], /<button/);
+  held = [{ agent: 'kit', tool: 'deploy_prod', age_s: 1 }];
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(w.elements.get('needs-you-head').textContent, 'Needs you: 1 call waiting for approval');
+  held = [];
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(line.hidden, true);
+  assert.equal(w.elements.get('needs-you-rows').children.length, 0);
+  // An unreadable approvals directory shows as unknown, never as zero.
+  w.context.fetch = () => Promise.resolve({ ok: false });
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(line.hidden, false);
+  assert.equal(w.elements.get('needs-you-head').textContent, 'Needs you: held calls could not be read');
+  // A network blip leaves the last answer in place.
+  w.context.fetch = () => Promise.reject(new Error('offline'));
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(line.hidden, false);
+  // Agent and tool names come from proxies; the page escapes both.
+  assert.match(PAGE, /esc\(h\.agent\)/);
+  assert.match(PAGE, /esc\(h\.tool\)/);
+});
+
+test('Needs you renders every held call and caps the box with a scroll', async () => {
+  const held = Array.from({ length: 40 }, (_, i) => ({ agent: 'agent' + i, tool: 'tool' + i, age_s: i }));
+  const w = wall({ demo: false });
+  await tick();
+  w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(held) });
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(w.elements.get('needs-you-head').textContent, 'Needs you: 40 calls waiting for approval');
+  const rows = w.elements.get('needs-you-rows').children.map(r => r.innerHTML);
+  assert.equal(rows.length, 40);
+  held.forEach((h, i) => assert.match(rows[i], new RegExp(h.agent + '</span>.*' + h.tool + '</span>')));
+  // The list is height-capped and scrolls, and keyboard users can focus it to scroll.
+  assert.match(PAGE, /#needs-you-rows\s*\{[^}]*max-height:[^;}]+;[^}]*overflow-y:\s*(auto|scroll)/);
+  assert.match(PAGE, /<div id="needs-you-rows" role="region" tabindex="0"/);
+});
+
+test('Needs you announces only through the status node, and only when it changes', async () => {
+  let held = [{ agent: 'kit', tool: 'deploy_prod', age_s: 1 }];
+  const w = wall({ demo: false });
+  await tick();
+  w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(held) });
+  // The live region is the status node alone; the box and its ticking rows sit outside it.
+  const box = PAGE.match(/<div id="needs-you"[\s\S]*?<\/div>\s*<\/div>/)[0];
+  assert.doesNotMatch(box, /aria-live|role="status"/);
+  const status = w.elements.get('needs-you-status');
+  let writes = 0;
+  let text = '';
+  Object.defineProperty(status, 'textContent', { get: () => text, set: v => { writes++; text = v; } });
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(writes, 1);
+  // Same count, older wait time: the announced text is not rewritten.
+  held = [{ agent: 'kit', tool: 'deploy_prod', age_s: 6 }];
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(writes, 1);
+  assert.match(w.elements.get('needs-you-rows').children[0].innerHTML, /waiting 6s/);
+  // Negative control: a new count is announced.
+  held = [held[0], { agent: 'coder', tool: 'refund', age_s: 0 }];
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(writes, 2);
+  assert.equal(text, 'Needs you: 2 calls waiting for approval');
+  // The unknown state is announced once, then left alone.
+  w.context.fetch = () => Promise.resolve({ ok: false });
+  await vm.runInContext('checkPending()', w.context);
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(writes, 3);
+  assert.equal(text, 'Needs you: held calls could not be read');
+  // Back to zero clears the status without announcing a count.
+  w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(writes, 4);
+  assert.equal(text, '');
+});
+
+test('Needs you status node is present and shown before the first held call', async () => {
+  // In the page markup: outside the hidden box, never hidden, a polite live region.
+  const tag = PAGE.match(/<span id="needs-you-status"[^>]*>/)?.[0];
+  assert.ok(tag, 'status node missing from the page');
+  assert.match(tag, /role="status"/);
+  assert.match(tag, /aria-live="polite"/);
+  assert.doesNotMatch(tag, /\bhidden\b|aria-hidden/);
+  assert.ok(PAGE.indexOf(tag) < PAGE.indexOf('<div id="needs-you"'), 'status node sits inside the hidden box');
+  assert.match(PAGE, /\.sr-only\s*\{[^}]*position:absolute[^}]*\}/);
+  assert.doesNotMatch(PAGE.match(/\.sr-only\s*\{[^}]*\}/)[0], /display:\s*none|visibility:\s*hidden/);
+  // At zero the status stays empty; the first held call fills it while the node stays shown.
+  let held = [];
+  const w = wall({ demo: false });
+  await tick();
+  w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(held) });
+  const status = w.elements.get('needs-you-status');
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(status.textContent, '');
+  held = [{ agent: 'kit', tool: 'deploy_prod', age_s: 0 }];
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(status.textContent, 'Needs you: 1 call waiting for approval');
+});
+
+test('Needs you treats a non-JSON or non-list /pending body as unknown, never zero', async () => {
+  const w = wall({ demo: false });
+  await tick();
+  const line = w.elements.get('needs-you');
+  const head = () => w.elements.get('needs-you-head').textContent;
+  for (const json of [() => Promise.reject(new SyntaxError('Unexpected token <')), () => Promise.resolve(null), () => Promise.resolve({})]) {
+    w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+    await vm.runInContext('checkPending()', w.context);
+    assert.equal(line.hidden, true); // control: a real empty list hides the line
+    w.context.fetch = () => Promise.resolve({ ok: true, json });
+    await vm.runInContext('checkPending()', w.context); // must not reject
+    assert.equal(line.hidden, false);
+    assert.equal(head(), 'Needs you: held calls could not be read');
+    assert.equal(w.elements.get('needs-you-rows').children.length, 0);
+  }
+  // The busy guard was released: the next good answer draws.
+  w.context.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve([{ agent: 'kit', tool: 'x', age_s: 0 }]) });
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(head(), 'Needs you: 1 call waiting for approval');
+});
+
+test('Needs you polls never overlap, so an older response cannot overwrite a newer one', async () => {
+  const w = wall({ demo: false });
+  await tick();
+  const pending = [];
+  w.context.fetch = () => new Promise(resolve => pending.push(resolve));
+  const reply = held => ({ ok: true, json: () => Promise.resolve(held) });
+  const head = () => w.elements.get('needs-you-head').textContent;
+  // A tick while a request is in flight makes no second request.
+  const first = vm.runInContext('checkPending()', w.context);
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(pending.length, 1);
+  pending[0](reply([{ agent: 'old', tool: 'stale', age_s: 1 }, { agent: 'old', tool: 'stale2', age_s: 1 }]));
+  await first;
+  assert.equal(head(), 'Needs you: 2 calls waiting for approval');
+  // The next tick asks again, and its newer answer is the one shown.
+  const second = vm.runInContext('checkPending()', w.context);
+  assert.equal(pending.length, 2);
+  pending[1](reply([{ agent: 'kit', tool: 'deploy_prod', age_s: 3 }]));
+  await second;
+  assert.equal(head(), 'Needs you: 1 call waiting for approval');
+  const rows = w.elements.get('needs-you-rows').children;
+  assert.equal(rows.length, 1);
+  assert.match(rows[0].innerHTML, /kit<\/span>.*deploy_prod/);
+  // A server slower than the poll still draws every answer it sends.
+  const slow = vm.runInContext('checkPending()', w.context);
+  for (let i = 0; i < 3; i++) await vm.runInContext('checkPending()', w.context); // ticks while slow
+  assert.equal(pending.length, 3);
+  pending[2](reply([]));
+  await slow;
+  assert.equal(w.elements.get('needs-you').hidden, true);
+  // A failed request releases the guard too.
+  w.context.fetch = () => Promise.reject(new Error('offline'));
+  await vm.runInContext('checkPending()', w.context);
+  w.context.fetch = () => Promise.resolve(reply([{ agent: 'kit', tool: 'x', age_s: 0 }]));
+  await vm.runInContext('checkPending()', w.context);
+  assert.equal(head(), 'Needs you: 1 call waiting for approval');
 });

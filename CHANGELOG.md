@@ -9,6 +9,23 @@ All notable changes to NockGuard are documented here.
 - `examples/github-mcp-cursor/`: a worked Cursor setup for the GitHub MCP
   server, with an `mcp.json` entry, a `policy.yaml` that denies repository
   create, fork and delete, and a policy test.
+- Live Wall: a read-only "Needs you" line above the feed counts the calls the
+  local approver (`NOCKGUARD_APPROVER=local`) is holding and lists each one's
+  agent, tool and wait time, with the hint to approve or deny with
+  `nockguard approvals`; it is hidden at zero. The
+  Wall reads the same listing as `nockguard approvals list` from the new
+  `GET /pending` endpoint, and `/pulse` now fills `pending` with the count.
+  An approvals directory that cannot be resolved or read returns 503 from
+  `/pending`, sets `pendingError` on `/pulse`, and the line reads "held calls
+  could not be read". The list shows about six rows and scrolls for the rest,
+  and one poll runs at a time, so an older answer never overwrites a newer one.
+  Screen readers hear the head line only, and only when its count or the
+  unknown state changes. A `/pending` body that is not a JSON list reads as
+  unknown. `/pulse` and `/pending` share one approvals listing for 2 seconds,
+  so open pages, scripts and monitors polling together dial each approval
+  socket once between them; `/pulse` answers with the last listing at once
+  while a refresh dials. The announcement comes from a status node present
+  from page load, so the first held call is read out.
 
 ## [0.12.2] - 2026-11-20
 
