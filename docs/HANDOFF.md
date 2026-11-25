@@ -14,7 +14,10 @@ and what is still open, and remove anything no longer true. Keep it short.
   zero. `--demo` leaves the directory unset. Only the local approver's holds
   appear. The browser test harness
   in `cmd/nockguard-wall/index.test.js` gained `replaceChildren`; its `esc`
-  stub does not escape, so HTML escaping is not observable there.
+  stub does not escape, so a source assertion there pins `esc()` on the agent
+  and tool. `ListPending` dials each socket in turn (2 s connect, 10 s
+  exchange), so an unresponsive proxy slows `/pending` and `/pulse`;
+  `nockguard approvals prune` clears dead sockets.
 
 - 2026-11-24: `examples/github-mcp-cursor/` adds the GitHub MCP wrap for
   Cursor. Cursor interpolates `${env:NAME}`, not plain `${NAME}`;
