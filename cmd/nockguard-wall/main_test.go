@@ -2082,15 +2082,21 @@ func TestMethodRowsExcludedFromToolCounts(t *testing.T) {
 	}
 }
 
-// serveWall sends a loopback GET for path through the Wall handler.
+// serveWall sends a loopback GET for path through the Wall handler and wants 200.
 func serveWall(t *testing.T, b *broker, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	return serveWallStatus(t, b, path, http.StatusOK)
+}
+
+// serveWallStatus is serveWall for a response status other than 200.
+func serveWallStatus(t *testing.T, b *broker, path string, want int) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	req.Host = "127.0.0.1:8787"
 	rec := httptest.NewRecorder()
 	wallHandler(b, "8787", "").ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("%s = %d %s", path, rec.Code, rec.Body)
+	if rec.Code != want {
+		t.Fatalf("%s = %d %s, want %d", path, rec.Code, rec.Body, want)
 	}
 	return rec
 }
@@ -2187,13 +2193,7 @@ func TestPendingShowsCallsHeldForApproval(t *testing.T) {
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/pending", nil)
-	req.Host = "127.0.0.1:8787"
-	bad := httptest.NewRecorder()
-	wallHandler(b, "8787", "").ServeHTTP(bad, req)
-	if bad.Code != http.StatusServiceUnavailable {
-		t.Fatalf("unprovable dir: /pending = %d %s", bad.Code, bad.Body)
-	}
+	serveWallStatus(t, b, "/pending", http.StatusServiceUnavailable)
 	var p pulse
 	if err := json.Unmarshal(serveWall(t, b, "/pulse").Body.Bytes(), &p); err != nil || p.Pending != 0 || p.PendingError == "" {
 		t.Fatalf("unprovable dir: pulse = %+v, %v", p, err)
@@ -2214,12 +2214,8 @@ func TestPendingUnknownWhenApprovalsDirUnresolved(t *testing.T) {
 	if b.approvalsDirErr == nil {
 		t.Fatal("DefaultLocalDir with no HOME resolved; the control proves nothing")
 	}
-	req := httptest.NewRequest(http.MethodGet, "/pending", nil)
-	req.Host = "127.0.0.1:8787"
-	rec := httptest.NewRecorder()
-	wallHandler(b, "8787", "").ServeHTTP(rec, req)
-	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "approvals directory") {
-		t.Fatalf("/pending = %d %s, want 503 naming the approvals directory", rec.Code, rec.Body)
+	if rec := serveWallStatus(t, b, "/pending", http.StatusServiceUnavailable); !strings.Contains(rec.Body.String(), "approvals directory") {
+		t.Fatalf("/pending body %q does not name the approvals directory", rec.Body)
 	}
 	var p pulse
 	if err := json.Unmarshal(serveWall(t, b, "/pulse").Body.Bytes(), &p); err != nil || p.Pending != 0 || p.PendingError == "" {
