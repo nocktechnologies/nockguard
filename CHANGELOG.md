@@ -22,7 +22,8 @@ All notable changes to NockGuard are documented here.
   Screen readers hear the head line only, and only when its count or the
   unknown state changes. A `/pending` body that is not a JSON list reads as
   unknown. `/pulse` and `/pending` share one approvals listing for 2 seconds,
-  so each poll dials every approval socket once.
+  so open pages, scripts and monitors polling together dial each approval
+  socket once between them.
 
 ## [0.12.2] - 2026-11-20
 
