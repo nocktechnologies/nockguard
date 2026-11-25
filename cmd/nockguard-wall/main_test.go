@@ -2102,17 +2102,24 @@ func serveWallStatus(t *testing.T, b *broker, path string, want int) *httptest.R
 	return rec
 }
 
-// localApprovals starts a local approver in a short /tmp directory (unix
-// socket path limit). hold has one call held as kit/deploy_prod and returns it
-// once listed; resolve denies it and waits for the Ask to return.
-func localApprovals(t *testing.T) (tmp, dir string, hold func() approval.Pending, resolve func(approval.Pending)) {
+// shortApprovalsDir names an approvals directory under a short /tmp
+// directory (unix socket path limit), removed when the test ends.
+func shortApprovalsDir(t *testing.T) (tmp, dir string) {
 	t.Helper()
 	tmp, err := os.MkdirTemp("/tmp", "ngw")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(tmp) })
-	dir = filepath.Join(tmp, "approvals")
+	return tmp, filepath.Join(tmp, "approvals")
+}
+
+// localApprovals starts a local approver in a short /tmp directory (unix
+// socket path limit). hold has one call held as kit/deploy_prod and returns it
+// once listed; resolve denies it and waits for the Ask to return.
+func localApprovals(t *testing.T) (tmp, dir string, hold func() approval.Pending, resolve func(approval.Pending)) {
+	t.Helper()
+	tmp, dir = shortApprovalsDir(t)
 	a, err := approval.NewLocalApprover(dir, 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -2277,12 +2284,7 @@ func waitHeldIdle(b *broker) {
 // result and starts no second dial; the /pending caller that started the
 // listing is the one that waits.
 func TestPulseNeverWaitsOnApprovalsDial(t *testing.T) {
-	tmp, err := os.MkdirTemp("/tmp", "ngw")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(tmp) })
-	dir := filepath.Join(tmp, "approvals")
+	tmp, dir := shortApprovalsDir(t)
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}

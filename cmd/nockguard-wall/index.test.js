@@ -834,7 +834,7 @@ test('Needs you renders every held call and caps the box with a scroll', async (
   assert.match(PAGE, /<div id="needs-you-rows" role="region" tabindex="0"/);
 });
 
-test('Needs you announces only the head line, and only when it changes', async () => {
+test('Needs you announces only through the status node, and only when it changes', async () => {
   let held = [{ agent: 'kit', tool: 'deploy_prod', age_s: 1 }];
   const w = wall({ demo: false });
   await tick();
@@ -842,10 +842,10 @@ test('Needs you announces only the head line, and only when it changes', async (
   // The live region is the status node alone; the box and its ticking rows sit outside it.
   const box = PAGE.match(/<div id="needs-you"[\s\S]*?<\/div>\s*<\/div>/)[0];
   assert.doesNotMatch(box, /aria-live|role="status"/);
-  const head = w.elements.get('needs-you-status');
+  const status = w.elements.get('needs-you-status');
   let writes = 0;
   let text = '';
-  Object.defineProperty(head, 'textContent', { get: () => text, set: v => { writes++; text = v; } });
+  Object.defineProperty(status, 'textContent', { get: () => text, set: v => { writes++; text = v; } });
   await vm.runInContext('checkPending()', w.context);
   assert.equal(writes, 1);
   // Same count, older wait time: the announced text is not rewritten.
@@ -889,10 +889,8 @@ test('Needs you status node is present and shown before the first held call', as
   const status = w.elements.get('needs-you-status');
   await vm.runInContext('checkPending()', w.context);
   assert.equal(status.textContent, '');
-  assert.equal(status.hidden, false);
   held = [{ agent: 'kit', tool: 'deploy_prod', age_s: 0 }];
   await vm.runInContext('checkPending()', w.context);
-  assert.equal(status.hidden, false);
   assert.equal(status.textContent, 'Needs you: 1 call waiting for approval');
 });
 

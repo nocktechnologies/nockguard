@@ -926,19 +926,18 @@
       // node, and only when its text changes, so the ticking wait times in the
       // rows never re-announce. At zero the status is empty: nothing to say.
       const status = document.getElementById('needs-you-status');
-      const say = text => {
-        head.textContent = text;
-        const live = needsYou.hidden ? '' : text;
+      const say = (text, shown) => {
+        needsYou.hidden = !shown;
+        if (head.textContent !== text) head.textContent = text;
+        const live = shown ? text : '';
         if (status.textContent !== live) status.textContent = live;
       };
       if (!Array.isArray(held)) { // the held calls could not be read: unknown, never zero
-        needsYou.hidden = false;
-        say('Needs you: held calls could not be read');
+        say('Needs you: held calls could not be read', true);
         rows.replaceChildren();
         return;
       }
-      needsYou.hidden = held.length === 0;
-      say('Needs you: ' + held.length + (held.length === 1 ? ' call' : ' calls') + ' waiting for approval');
+      say('Needs you: ' + held.length + (held.length === 1 ? ' call' : ' calls') + ' waiting for approval', held.length > 0);
       rows.replaceChildren(...held.map(h => {
         const el = document.createElement('div');
         el.className = 'ny-row';

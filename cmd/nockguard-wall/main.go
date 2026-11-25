@@ -581,26 +581,23 @@ type heldCall struct {
 // every /pulse and /pending caller for heldTTL. Past the TTL a caller starts
 // the one refresh unless it is already running. Without wait (/pulse) it
 // returns the last result at once and never blocks on a dial; with wait
-// (/pending) it waits for a refresh it started itself.
+// (/pending) it takes the running refresh's result.
 func (b *broker) heldCalls(wait bool) ([]heldCall, error) {
 	b.hmu.Lock()
 	defer b.hmu.Unlock()
-	for time.Since(b.heldAt) >= b.heldTTL {
-		busy, own := b.heldBusy, b.heldBusy == nil
-		if own {
-			busy = make(chan struct{})
-			b.heldBusy = busy
-			go b.refreshHeld(busy)
-		}
-		if !wait {
-			break
-		}
+	if time.Since(b.heldAt) < b.heldTTL {
+		return b.held, b.heldErr
+	}
+	busy := b.heldBusy
+	if busy == nil {
+		busy = make(chan struct{})
+		b.heldBusy = busy
+		go b.refreshHeld(busy)
+	}
+	if wait {
 		b.hmu.Unlock()
 		<-busy
 		b.hmu.Lock()
-		if own {
-			break
-		}
 	}
 	return b.held, b.heldErr
 }
@@ -1244,6 +1241,7 @@ func main() {
 	if !*demoMode { // a synthetic stream never mixes in real held calls
 		b.useLocalApprovals()
 	}
+	b.heldCalls(false) // start the first listing now, so the first /pulse has a count
 	if *lockDB != "" {
 		if *demoMode {
 			log.Fatal("--demo and --lock-db cannot be combined: synthetic rows would hide the real Lock badges")
