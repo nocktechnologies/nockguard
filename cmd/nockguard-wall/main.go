@@ -1273,7 +1273,6 @@ func main() {
 		go tailLock(ctx, b.lockDB, b)
 	}
 	b.refreshSnapshot() // seed the snapshot so live badges have a baseline
-	b.heldCalls(false)  // start the first approvals listing, so the first /pulse has a count
 
 	if *demoMode {
 		go demo(ctx, b)

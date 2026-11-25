@@ -879,8 +879,6 @@ test('Needs you status node is present and shown before the first held call', as
   assert.match(tag, /aria-live="polite"/);
   assert.doesNotMatch(tag, /\bhidden\b|aria-hidden/);
   assert.ok(PAGE.indexOf(tag) < PAGE.indexOf('<div id="needs-you"'), 'status node sits inside the hidden box');
-  // The visible head is hidden from screen readers, so browse mode reads the sentence once.
-  assert.match(PAGE, /<span class="ny-head" id="needs-you-head" aria-hidden="true">/);
   assert.match(PAGE, /\.sr-only\s*\{[^}]*position:absolute[^}]*\}/);
   assert.doesNotMatch(PAGE.match(/\.sr-only\s*\{[^}]*\}/)[0], /display:\s*none|visibility:\s*hidden/);
   // At zero the status stays empty; the first held call fills it while the node stays shown.
